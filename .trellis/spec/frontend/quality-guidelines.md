@@ -38,6 +38,8 @@ Questions to answer:
 
 ## Testing Requirements
 
+Browser tests must wait for the expected row after an asynchronous refresh. Scope action locators to that row. Do not resolve ambiguous stale lists by taking the first matching button. Cover delayed responses when testing refreshed data.
+
 <!-- What level of testing is expected -->
 
 (To be filled by the team)

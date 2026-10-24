@@ -37,11 +37,15 @@ Docker 会构建源码中的前端。
 /data/platform2api/cnb2api-panel/
 ```
 
-使用发布包时，先上传并解压。
+使用发布包时，先上传到服务器。
+同时上传对应的 `.sha256` 文件。
+检查通过后再解压。
 
 ```bash
+cd /tmp
+sha256sum -c cnb2api-panel-v1.0.0-20261025.tar.gz.sha256
 mkdir -p /data/platform2api
-tar -xzf /tmp/cnb2api-panel.tar.gz -C /data/platform2api
+tar -xzf /tmp/cnb2api-panel-v1.0.0-20261025.tar.gz -C /data/platform2api
 ```
 
 进入目录，复制配置模板。
@@ -93,7 +97,9 @@ Compose 将宿主机的 `./data` 挂载到 `/app/data`。
 
 ### 普通 Node
 
-后端需要 Node.js 22.13 或更高版本。
+后端需要 Node.js 26.12.1 或更高版本。
+项目通过 `.node-version` 固定构建版本。
+Docker 构建与 CI 使用同一版本。
 后端没有第三方运行依赖。
 发布包自带 `web/dist`，无需安装前端依赖。
 
@@ -536,10 +542,90 @@ npm run test:e2e
 npm run package
 ```
 
-输出文件为 `dist/cnb2api-panel.tar.gz`。
+包名包含版本号和 UTC 构建日期。
+通用格式如下。
+
+```text
+cnb2api-panel-v<版本>-<UTC年月日>.tar.gz
+```
+
+版本号来自根目录的 `package.json`。
+例如，`1.0.0` 在 UTC 2026-10-25 构建时产生以下文件。
+
+```text
+dist/
+├── cnb2api-panel-v1.0.0-20261025.tar.gz
+├── cnb2api-panel-v1.0.0-20261025.tar.gz.sha256
+└── build-manifest.json
+```
+
+`.sha256` 文件记录发布包的 SHA-256 值。
+`build-manifest.json` 记录版本、时间和 SHA-256 值。
 发布包包含后端和 `web/dist`。
 发布包不包含真实 `.env`、`data/` 和前端依赖。
 服务器解压后可选择 Docker 或普通 Node 启动。
+
+### GitHub 与 CNB 自动构建
+
+GitHub 使用 `.github/workflows/test.yml`。
+push 和 PR 均触发测试与构建。
+验证包括后端测试、浏览器测试和前端构建。
+验证成功后，工作流上传发布包和 `.sha256` 文件。
+从本次运行的 Artifacts 下载构建产物。
+
+CNB 使用根目录的 `.cnb.yml`。
+`main` 的 push 和 PR 运行相同验证。
+`main` 的 push 还会上传构建附件。
+从本次构建的附件下载发布包和 `.sha256` 文件。
+这里的 CNB 流水线只负责面板构建。
+工作区代理仍使用 cnb2api 仓库的配置。
+
+标签 `v*` 触发两端的 Release 工作流。
+标签必须与 `package.json` 的版本一致。
+例如，版本 `1.0.0` 对应标签 `v1.0.0`。
+版本检查和测试通过后，两端发布 Release。
+Release 包含发布包和 `.sha256` 文件。
+只推送 `main` 不会发布 Release。
+
+### 同步两个远程与发布版本
+
+GitHub 远程名为 `origin`。
+首次同步前，添加 CNB 远程。
+
+```bash
+git remote add cnb https://cnb.cool/azurekiln/cnb2api-panel.git
+```
+
+提交代码后，分别推送两个远程。
+
+```bash
+git push origin main
+git push cnb main
+```
+
+发布前，更新 `package.json` 中的版本号。
+提交修改。
+再将 `main` 推送到两个远程。
+版本 `1.0.0` 使用以下标签。
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+git push cnb v1.0.0
+```
+
+两端接收标签后各自构建并发布。
+
+## 许可证
+
+本项目采用 `AGPL-3.0-only`。
+完整条款见 [LICENSE](LICENSE)。
+分发本项目或修改版时，须遵守许可证。
+修改版提供网络交互服务时，须向用户提供对应源码。
+对应源码应包含构建、安装和运行所需的材料。
+未分发且未提供网络交互的私用修改无需公开。
+仅调用网关 API 的独立项目无需因此开源。
+字体和图标保留各自的第三方许可证。
 
 ## 排查问题
 

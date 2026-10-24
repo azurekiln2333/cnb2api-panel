@@ -684,6 +684,7 @@ test('request details show the first user message, usage and routing metadata on
   await dialog.getByRole('button', { name: '关闭', exact: true }).click()
 
   await page.route('**/api/logs', async (route) => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 150))
     await route.fulfill({
       json: {
         logs: [
@@ -704,7 +705,11 @@ test('request details show the first user message, usage and routing metadata on
   })
   await page.getByLabel('搜索事件', { exact: true }).fill('')
   await page.getByRole('button', { name: '刷新记录', exact: true }).click()
-  await page.getByRole('button', { name: '查看事件详情', exact: true }).click()
+  const legacyRow = page
+    .getByRole('row')
+    .filter({ has: page.getByRole('cell', { name: '旧请求记录', exact: true }) })
+  await expect(legacyRow).toBeVisible()
+  await legacyRow.getByRole('button', { name: '查看事件详情', exact: true }).click()
   await expect(dialog).toContainText('此记录未保存首条用户消息。')
   await expect(dialog).toContainText('此记录未保存 Token 用量。')
   await expect(dialog.getByTestId('initial-message')).toHaveCount(0)

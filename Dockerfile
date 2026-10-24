@@ -1,4 +1,5 @@
-FROM node:22-bookworm-slim AS console
+ARG NODE_VERSION=26.12.1
+FROM node:${NODE_VERSION}-bookworm-slim AS console
 
 WORKDIR /build
 COPY web/ ./web/
@@ -9,7 +10,7 @@ RUN if [ -f web/package-lock.json ]; then \
       test -f web/dist/index.html; \
     fi
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:${NODE_VERSION}-bookworm-slim AS runtime
 
 WORKDIR /app
 ENV NODE_ENV=production \

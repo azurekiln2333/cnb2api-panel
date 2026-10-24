@@ -1,0 +1,101 @@
+main:
+  push: &verify-build
+    - name: verify-and-package
+      docker: &node-runtime
+        image: node:26.12.1-bookworm
+      stages:
+        - name: build-and-test
+          jobs: &validation-jobs
+            - name: check-runtime
+              script: |
+                node --version
+                npm --version
+            - name: install-console-dependencies
+              script: npm ci --prefix web
+            - name: test-backend
+              script: npm test
+            - name: check-console-format
+              script: npm --prefix web run format:check
+            - name: build-release-package
+              script: npm run package
+            - name: install-test-browser
+              script: |
+                cd web
+                npx playwright install --with-deps chromium
+            - name: test-console
+              script: npm run test:e2e
+        - &read-build-manifest
+          name: read-build-manifest
+          type: cnb:read-file
+          options:
+            filePath: dist/build-manifest.json
+          exports:
+            archive: RELEASE_ARCHIVE
+        - &upload-build-assets
+          name: upload-build-assets
+          image: cnbcool/attachments:latest
+          settings:
+            attachments:
+              - dist/$RELEASE_ARCHIVE
+              - dist/$RELEASE_ARCHIVE.sha256
+
+  api_trigger: *verify-build
+
+  pull_request:
+    - name: verify-pull-request
+      docker: *node-runtime
+      stages:
+        - name: build-and-test
+          jobs: *validation-jobs
+
+"v*":
+  tag_push:
+    - name: publish-release
+      docker: *node-runtime
+      stages:
+        - name: validate-release-tag
+          script: |
+            node --input-type=module <<'NODE'
+            import { readFileSync } from 'node:fs';
+            const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
+            const expected = `v${version}`;
+            if (process.env.CNB_BRANCH !== expected) {
+              throw new Error(`Release tag must be ${expected}, received ${process.env.CNB_BRANCH}`);
+            }
+            NODE
+        - name: build-and-test
+          jobs: *validation-jobs
+        - *read-build-manifest
+        - name: prepare-release-notes
+          script: |
+            node --input-type=module <<'NODE'
+            import { readFileSync, writeFileSync } from 'node:fs';
+            const { version, archive, sha256, builtAt } = JSON.parse(
+              readFileSync('dist/build-manifest.json', 'utf8'),
+            );
+            const description = [
+              `# cnb2api-panel v${version}`,
+              '',
+              `Built at: ${builtAt} (UTC)`,
+              '',
+              `Package: ${archive}`,
+              '',
+              `SHA-256: \`${sha256}\``,
+              '',
+              'The package contains the standalone backend and compiled console.',
+              'Existing .env and data files are excluded.',
+              '',
+            ].join('\n');
+            writeFileSync('dist/release-notes.md', description);
+            writeFileSync('dist/cnb-release-options.json', JSON.stringify({
+              overlying: true,
+              title: `cnb2api-panel v${version}`,
+              descriptionFromFile: 'dist/release-notes.md',
+              preRelease: version.includes('-'),
+              latest: !version.includes('-'),
+            }));
+            NODE
+        - name: create-release
+          type: git:release
+          optionsFrom: dist/cnb-release-options.json
+        - *upload-build-assets
