@@ -1,0 +1,15 @@
+**
+!src/
+!src/*.mjs
+!web/
+!web/package.json
+!web/package-lock.json
+!web/index.html
+!web/vite.config.ts
+!web/tsconfig.json
+!web/src/
+!web/src/**
+!web/public/
+!web/public/**
+!web/dist/
+!web/dist/**

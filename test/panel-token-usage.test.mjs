@@ -1,0 +1,330 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import http from "node:http";
+import { once } from "node:events";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Store } from "../src/store.mjs";
+import { createPanelServer } from "../src/app.mjs";
+import {
+  emptyTokenUsage,
+  TokenUsageCapture,
+} from "../src/token-usage.mjs";
+
+const ADMIN = "usage-test-admin-key";
+const GATEWAY = "usage-test-gateway-key";
+const PROXY = "usage-test-proxy-key";
+const listen = async (server) => {
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  return `http://127.0.0.1:${server.address().port}`;
+};
+const close = async (server) => {
+  server.closeAllConnections();
+  await new Promise((done) => server.close(done));
+};
+
+function capture(
+  value,
+  { sse = false, path = "/v1/chat/completions", complete = true } = {},
+) {
+  const collector = new TokenUsageCapture(
+    sse ? "text/event-stream" : "application/json",
+    path,
+  );
+  const bytes = Buffer.from(value);
+  for (let i = 0; i < bytes.length; i += 7)
+    collector.push(bytes.subarray(i, i + 7));
+  return collector.finish(complete);
+}
+
+test("JSON usage counts input/output/cache once and rejects invalid numeric counters", () => {
+  assert.deepEqual(
+    capture(
+      JSON.stringify({
+        choices: [{ message: { content: "多字节内容" } }],
+        usage: {
+          prompt_tokens: 120,
+          completion_tokens: 30,
+          prompt_tokens_details: { cached_tokens: 70 },
+        },
+      }),
+    ),
+    {
+      ...emptyTokenUsage(),
+      input: 120,
+      output: 30,
+      cacheRead: 70,
+      total: 150,
+      reportedRequests: 1,
+    },
+  );
+  assert.deepEqual(
+    capture('{"usage":{"prompt_tokens":-1,"completion_tokens":"123"}}'),
+    {
+      ...emptyTokenUsage(),
+      missingRequests: 1,
+    },
+  );
+});
+
+test("SSE handles arbitrary byte boundaries, CRLF and terminal events without double counting", () => {
+  const stream = [
+    'data: {"choices":[{"delta":{"content":"你好"}}]}\r\n\r\n',
+    'data: {"usage":{"prompt_tokens":100,"completion_tokens":8,"prompt_cache_hit_tokens":60}}\r\n\r\n',
+    'data: {"usage":{"prompt_tokens":100,"completion_tokens":12,"prompt_cache_hit_tokens":60}}\r\n\r\n',
+    "data: [DONE]",
+  ].join("");
+  assert.deepEqual(capture(stream, { sse: true }), {
+    ...emptyTokenUsage(),
+    input: 100,
+    output: 12,
+    cacheRead: 60,
+    total: 112,
+    reportedRequests: 1,
+  });
+});
+
+test("Anthropic input includes cache read/write and legacy zero placeholders remain partial", () => {
+  const full = [
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0,"cache_read_input_tokens":40,"cache_creation_input_tokens":20}}}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":15}}\n\n',
+  ].join("");
+  assert.deepEqual(capture(full, { sse: true, path: "/v1/messages" }), {
+    ...emptyTokenUsage(),
+    input: 70,
+    output: 15,
+    cacheRead: 40,
+    cacheWrite: 20,
+    total: 85,
+    reportedRequests: 1,
+  });
+  const old =
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}\n\n' +
+    'data: {"type":"message_delta","usage":{"output_tokens":15}}\n\n';
+  const partial = capture(old, { sse: true, path: "/v1/messages" });
+  assert.equal(partial.output, 15);
+  assert.equal(partial.reportedRequests, 1);
+  assert.equal(partial.partialRequests, 1);
+  assert.equal(
+    capture(full, { sse: true, path: "/v1/messages", complete: false })
+      .partialRequests,
+    1,
+  );
+});
+
+test("large content events remain bounded and do not hide later small usage events", () => {
+  const collector = new TokenUsageCapture("text/event-stream");
+  collector.push(Buffer.from('data: {"choices":[{"delta":{"content":"'));
+  for (let i = 0; i < 40; i++) collector.push(Buffer.alloc(16384, 120));
+  assert.ok(collector.buffer.length <= 256 * 1024);
+  collector.push(Buffer.from('"}}]}\n\n'));
+  collector.push(
+    Buffer.from(
+      'data: {"usage":{"prompt_tokens":9,"completion_tokens":3}}\n\n',
+    ),
+  );
+  assert.equal(collector.finish().total, 12);
+  const largeJSON = new TokenUsageCapture("application/json");
+  for (let i = 0; i < 160; i++) largeJSON.push(Buffer.alloc(16384, 120));
+  assert.equal(largeJSON.buffer.length, 0);
+  assert.equal(largeJSON.finish().missingRequests, 1);
+});
+
+async function fixture(t) {
+  const directory = mkdtempSync(join(tmpdir(), "cnb-panel-usage-"));
+  const sse =
+    'data: {"choices":[{"delta":{"content":"秘密回复"}}]}\n\n' +
+    'data: {"usage":{"prompt_tokens":80,"completion_tokens":20,"prompt_cache_hit_tokens":50}}\n\n' +
+    "data: [DONE]\n\n";
+  const upstream = http.createServer(async (req, res) => {
+    assert.equal(req.headers.authorization, `Bearer ${PROXY}`);
+    if (req.url === "/v1/models") {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ object: "list", data: [{ id: "test-model" }] }));
+      return;
+    }
+    if (req.url === "/usage") {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const payload = JSON.parse(Buffer.concat(chunks));
+    if (payload.stream) {
+      res.setHeader("Content-Type", "text/event-stream");
+      for (let i = 0; i < sse.length; i += 13) res.write(sse.slice(i, i + 13));
+      res.end();
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        choices: [{ message: { content: "秘密回复" } }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 25,
+          prompt_cache_hit_tokens: 60,
+        },
+      }),
+    );
+  });
+  const endpoint = await listen(upstream);
+  const app = createPanelServer({
+    adminKey: ADMIN,
+    gatewayKey: GATEWAY,
+    dataDir: directory,
+    allowLocal: true,
+  });
+  const base = await listen(app.server);
+  const session = await fetch(`${base}/api/session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key: ADMIN }),
+  });
+  const cookie = session.headers.get("set-cookie").split(";")[0];
+  const call = (path, method = "GET", data) =>
+    fetch(`${base}${path}`, {
+      method,
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: data === undefined ? undefined : JSON.stringify(data),
+    });
+  const created = await (
+    await call("/api/accounts", "POST", {
+      name: "usage-workspace",
+      endpoint,
+      proxyKey: PROXY,
+      pat: "private-test-pat",
+    })
+  ).json();
+  await app.pool.probe(created.account.id);
+  const generate = (path, extra = {}) =>
+    fetch(`${base}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${GATEWAY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "test-model",
+        messages: [{ role: "user", content: "秘密提示词" }],
+        ...extra,
+      }),
+    });
+  t.after(async () => {
+    app.pool.stop();
+    await close(app.server);
+    await close(upstream);
+    rmSync(directory, { recursive: true, force: true });
+  });
+  return {
+    ...app,
+    directory,
+    base,
+    call,
+    generate,
+    id: created.account.id,
+    sse,
+  };
+}
+
+test("gateway persists local totals, preserves SSE bytes, and excludes count_tokens consumption", async (t) => {
+  const app = await fixture(t);
+  const response = await app.generate("/v1/chat/completions");
+  assert.equal(response.status, 200);
+  await response.text();
+  const stream = await app.generate("/v1/chat/completions", { stream: true });
+  assert.equal(await stream.text(), app.sse);
+  await (await app.generate("/v1/messages/count_tokens")).text();
+  const overview = await (await app.call("/api/overview")).json();
+  const expected = {
+    ...emptyTokenUsage(),
+    input: 180,
+    output: 45,
+    cacheRead: 110,
+    total: 225,
+    reportedRequests: 2,
+  };
+  assert.deepEqual(overview.stats.tokenUsage.today, expected);
+  assert.deepEqual(overview.stats.tokenUsage.total, expected);
+  assert.deepEqual(overview.accounts[0].tokenUsage, expected);
+  assert.equal(overview.stats.requests, 3);
+  const disk = readFileSync(join(app.directory, "panel.json"), "utf8");
+  assert.ok(!disk.includes("秘密提示词"));
+  assert.ok(!disk.includes("秘密回复"));
+  assert.deepEqual(
+    new Store(app.directory, { allowLocal: true }).state.tokenUsage,
+    expected,
+  );
+});
+
+test("legacy version 1 data receives empty usage and lifetime totals survive hourly pruning", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "cnb-panel-legacy-usage-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const store = new Store(directory, { allowLocal: true });
+  const saved = JSON.parse(readFileSync(store.file, "utf8"));
+  delete saved.tokenUsage;
+  delete saved.tokenUsageStartedAt;
+  writeFileSync(store.file, JSON.stringify(saved));
+  const restored = new Store(directory, { allowLocal: true });
+  assert.deepEqual(restored.state.tokenUsage, emptyTokenUsage());
+  restored.commit((s) => {
+    s.tokenUsage = {
+      ...emptyTokenUsage(),
+      input: 1000,
+      total: 1000,
+      reportedRequests: 1,
+    };
+    s.hourly = [
+      {
+        at: "2020-01-01T00:00:00.000Z",
+        requests: 1,
+        errors: 0,
+        durationMs: 0,
+        accounts: {},
+        tokenUsage: structuredClone(s.tokenUsage),
+      },
+    ];
+  });
+  restored.record({
+    kind: "request",
+    status: 200,
+    tokenUsage: {
+      ...emptyTokenUsage(),
+      input: 7,
+      output: 3,
+      total: 10,
+      reportedRequests: 1,
+    },
+  });
+  assert.equal(restored.state.hourly.length, 1);
+  assert.equal(restored.state.hourly[0].tokenUsage.total, 10);
+  assert.equal(restored.state.tokenUsage.total, 1010);
+  assert.equal(new Store(directory).state.tokenUsage.total, 1010);
+});
+
+test("personal token requires an explicit authenticated reveal and stays absent from normal reads/logs", async (t) => {
+  const app = await fixture(t);
+  const route = `/api/accounts/${app.id}/pat`;
+  assert.equal(
+    (await fetch(`${app.base}${route}`, { method: "POST" })).status,
+    401,
+  );
+  const revealed = await app.call(route, "POST", {});
+  assert.equal(revealed.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await revealed.json(), { pat: "private-test-pat" });
+  for (const path of [
+    "/api/accounts",
+    "/api/overview",
+    "/api/logs",
+    "/api/usage/comparison",
+  ])
+    assert.ok(
+      !(await (await app.call(path)).text()).includes("private-test-pat"),
+    );
+  const comparison = await app.call("/api/usage/comparison", "POST", {});
+  assert.equal(comparison.status, 200);
+  assert.ok(!JSON.stringify(await comparison.json()).includes(PROXY));
+});

@@ -1,0 +1,19 @@
+{
+  "name": "cnb2api-panel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone CNB account pool, API gateway and Vue management console.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "dev": "npm --prefix web run dev",
+    "build": "npm --prefix web run build",
+    "test:e2e": "npm --prefix web run test:e2e",
+    "package": "npm run build && node scripts/package.mjs"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,33 @@
+services:
+  panel:
+    image: cnb2api-panel:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      PANEL_ADMIN_KEY: "${PANEL_ADMIN_KEY:?请在 .env 中填写 PANEL_ADMIN_KEY}"
+      GATEWAY_KEY: "${GATEWAY_KEY:?请在 .env 中填写 GATEWAY_KEY}"
+      PANEL_PUBLIC_URL: "${PANEL_PUBLIC_URL:-}"
+      PANEL_HOST: 0.0.0.0
+      PANEL_PORT: "9002"
+      PANEL_DATA_DIR: /app/data
+      PANEL_SSO_ENABLED: "${PANEL_SSO_ENABLED:-false}"
+      PANEL_KEY_LOGIN_ENABLED: "${PANEL_KEY_LOGIN_ENABLED:-true}"
+      PANEL_OIDC_ISSUER: "${PANEL_OIDC_ISSUER:-}"
+      PANEL_OIDC_CLIENT_ID: "${PANEL_OIDC_CLIENT_ID:-}"
+      PANEL_OIDC_CLIENT_SECRET: "${PANEL_OIDC_CLIENT_SECRET:-}"
+      PANEL_OIDC_SCOPES: "${PANEL_OIDC_SCOPES:-openid profile email}"
+      PANEL_OIDC_PROVIDER_NAME: "${PANEL_OIDC_PROVIDER_NAME:-SSO}"
+      PANEL_OIDC_ALLOWED_SUBJECTS: "${PANEL_OIDC_ALLOWED_SUBJECTS:-}"
+      PANEL_OIDC_ALLOWED_EMAILS: "${PANEL_OIDC_ALLOWED_EMAILS:-}"
+    ports:
+      - "${PANEL_BIND_HOST:-127.0.0.1}:9002:9002"
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
