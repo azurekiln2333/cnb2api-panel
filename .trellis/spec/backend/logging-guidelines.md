@@ -1,51 +1,26 @@
 # Logging Guidelines
 
-> How logging is done in this project.
+`Store.record()` persists the latest 1,000 events in `panel.json` and updates request and Token totals. `/api/logs` requires an authenticated management session.
 
----
+## Request records
 
-## Overview
+`Pool.forward()` records one request event in `finally`, including the final account, status, request ID, model, path, attempt count and total duration. Existing records may omit newly added optional fields.
 
-<!--
-Document your project's logging conventions here.
+- `method` and `stream` describe the accepted request.
+- `requestBytes` counts the UTF-8 JSON forwarded to each upstream attempt.
+- `responseBytes` counts upstream body bytes written to the client.
+- `firstByteMs` measures request start to the first forwarded body chunk. It is `null` if no upstream body was forwarded.
+- `upstreamEndpoint` identifies the last selected workspace without authentication headers.
+- `tokenUsage` keeps the existing reported/missing/partial accounting semantics.
 
-Questions to answer:
-- What logging library do you use?
-- What are the log levels and when to use each?
-- What should be logged?
-- What should NOT be logged (PII, secrets)?
--->
+## Initial user message
 
-(To be filled by the team)
+`initialUserMessage()` in `src/request-details.mjs` selects the first message whose role is `user`. It supports text strings and OpenAI/Anthropic text blocks. The result contains `role`, `text` and `truncated` and is limited to 4,000 Unicode code points.
 
----
+Use media-type placeholders for image, audio, file and tool-result blocks. Do not retain media URLs, base64 data, system messages, assistant history, later user messages, tool bodies, credentials, or response bodies. Request failure descriptions must not include raw upstream error bodies.
 
-## Log Levels
+Initial message previews are stored in plaintext with event metadata, as documented in the README. Historical records have no preview and must remain readable. The frontend renders previews as escaped text and labels missing or truncated data.
 
-<!-- When to use each level: debug, info, warn, error -->
+## Verification
 
-(To be filled by the team)
-
----
-
-## Structured Logging
-
-<!-- Log format, required fields -->
-
-(To be filled by the team)
-
----
-
-## What to Log
-
-<!-- Important events to log -->
-
-(To be filled by the team)
-
----
-
-## What NOT to Log
-
-<!-- Sensitive data, PII, secrets -->
-
-(To be filled by the team)
+Cover text formats, Unicode truncation, media omission, unchanged upstream forwarding, streaming byte counts, empty responses, failure descriptions and persisted legacy records. Browser checks cover preview search, details, copying and mobile wrapping.

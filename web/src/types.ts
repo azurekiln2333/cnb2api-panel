@@ -124,6 +124,14 @@ export interface LogEntry {
   path?: string
   attempts?: number
   durationMs?: number
+  method?: string
+  stream?: boolean
+  requestBytes?: number
+  responseBytes?: number
+  firstByteMs?: number | null
+  upstreamEndpoint?: string
+  initialMessage?: { role: 'user'; text: string; truncated: boolean }
+  tokenUsage?: TokenTotals
 }
 export interface Overview {
   accounts: Account[]

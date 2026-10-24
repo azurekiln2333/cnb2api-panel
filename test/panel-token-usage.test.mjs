@@ -7,10 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.mjs";
 import { createPanelServer } from "../src/app.mjs";
-import {
-  emptyTokenUsage,
-  TokenUsageCapture,
-} from "../src/token-usage.mjs";
+import { emptyTokenUsage, TokenUsageCapture } from "../src/token-usage.mjs";
 
 const ADMIN = "usage-test-admin-key";
 const GATEWAY = "usage-test-gateway-key";
@@ -209,7 +206,13 @@ async function fixture(t) {
       },
       body: JSON.stringify({
         model: "test-model",
-        messages: [{ role: "user", content: "秘密提示词" }],
+        messages: [
+          { role: "system", content: "不记录系统提示词" },
+          { role: "user", content: "首条用户测试消息" },
+          { role: "assistant", content: "不记录历史回复" },
+          { role: "tool", content: "不记录工具正文" },
+          { role: "user", content: "不记录后续消息" },
+        ],
         ...extra,
       }),
     });
@@ -252,7 +255,23 @@ test("gateway persists local totals, preserves SSE bytes, and excludes count_tok
   assert.deepEqual(overview.accounts[0].tokenUsage, expected);
   assert.equal(overview.stats.requests, 3);
   const disk = readFileSync(join(app.directory, "panel.json"), "utf8");
-  assert.ok(!disk.includes("秘密提示词"));
+  const requestLogs = JSON.parse(disk).logs.filter(
+    (log) => log.kind === "request",
+  );
+  assert.equal(requestLogs.length, 3);
+  for (const log of requestLogs)
+    assert.deepEqual(log.initialMessage, {
+      role: "user",
+      text: "首条用户测试消息",
+      truncated: false,
+    });
+  for (const content of [
+    "不记录系统提示词",
+    "不记录历史回复",
+    "不记录工具正文",
+    "不记录后续消息",
+  ])
+    assert.ok(!disk.includes(content));
   assert.ok(!disk.includes("秘密回复"));
   assert.deepEqual(
     new Store(app.directory, { allowLocal: true }).state.tokenUsage,

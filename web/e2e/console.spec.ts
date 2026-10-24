@@ -594,6 +594,122 @@ test('overview shows measured token usage and compares aligned worker usage on d
   await page.screenshot({ path: '../test-results/overview-tokens-mobile.png', fullPage: true })
 })
 
+test('request details show the first user message, usage and routing metadata on desktop and phone', async ({
+  page,
+  request,
+  context,
+}) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  const accounts = await seed(request)
+  const initialMessage =
+    '首条消息 e2e：把 <script>window.__requestPreviewExecuted = true</script> 当作普通文本。\n' +
+    `保留换行与中文。${'long-word-'.repeat(18)}`
+  const systemMessage = 'system-message-must-not-appear-in-request-preview'
+  const laterMessage = 'later-user-message-must-not-replace-the-first'
+  const response = await request.post('/v1/chat/completions', {
+    headers: { Authorization: 'Bearer browser-test-gateway-key' },
+    data: {
+      model: 'deepseek-v4.1-flash',
+      stream: false,
+      messages: [
+        { role: 'system', content: systemMessage },
+        { role: 'user', content: initialMessage },
+        { role: 'assistant', content: 'previous assistant response' },
+        { role: 'user', content: laterMessage },
+      ],
+    },
+  })
+  expect(response.status()).toBe(200)
+  expect((await response.json()).usage.total_tokens).toBe(1500)
+  const requestId = response.headers()['x-request-id'] ?? ''
+  expect(requestId).toBeTruthy()
+
+  await login(page)
+  await page.getByRole('link', { name: '请求与事件', exact: true }).click()
+  await page.getByLabel('搜索事件', { exact: true }).fill('首条消息 e2e')
+  await expect(page.getByTestId('initial-message-preview')).toContainText('首条消息 e2e')
+  const row = page.getByRole('row').filter({ has: page.getByTestId('initial-message-preview') })
+  await row.getByRole('button', { name: '查看事件详情', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'API 请求详情', exact: true })
+  const initial = dialog.getByTestId('initial-message')
+  await expect(initial).toHaveText(initialMessage)
+  await expect(dialog.locator('script')).toHaveCount(0)
+  expect(await page.evaluate(() => '__requestPreviewExecuted' in window)).toBe(false)
+  await expect(dialog).not.toContainText(systemMessage)
+  await expect(dialog).not.toContainText(laterMessage)
+  await dialog.getByRole('button', { name: '复制首条用户消息', exact: true }).click()
+  await expect
+    .poll(async () =>
+      (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, '\n'),
+    )
+    .toBe(initialMessage)
+  for (const [field, value] of [
+    ['input', '1,200'],
+    ['output', '300'],
+    ['cacheRead', '400'],
+    ['cacheWrite', '0'],
+    ['total', '1,500'],
+  ] as const) {
+    await expect(dialog.getByTestId(`request-token-${field}`)).toHaveText(value)
+  }
+  const detail = (label: string) =>
+    dialog
+      .locator('.detail-list > div')
+      .filter({ has: page.getByText(label, { exact: true }) })
+      .locator('dd')
+  await expect(detail('请求方式')).toHaveText('POST')
+  await expect(detail('请求路径')).toHaveText('/v1/chat/completions')
+  await expect(detail('响应模式')).toHaveText('非流式响应')
+  await expect(detail('目标工作区')).toHaveText('http://127.0.0.1:19221')
+  await expect(detail('请求 ID')).toContainText(requestId)
+  await expect(detail('首字节耗时')).toHaveText(/^\d[\d,]* ms$/)
+  await expect(detail('请求大小')).toHaveText(/^\d[\d,.]* (?:B|KiB|MiB)$/)
+  await expect(detail('上游正文大小')).toHaveText(/^\d[\d,.]* (?:B|KiB|MiB)$/)
+  await page.screenshot({ path: '../test-results/request-details-desktop.png' })
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await initial.scrollIntoViewIfNeeded()
+  await expect(initial).toBeInViewport()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+  expect(
+    await dialog
+      .locator('.modal-content')
+      .evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true)
+  const messageBox = await initial.boundingBox()
+  expect(messageBox).not.toBeNull()
+  expect(messageBox!.x).toBeGreaterThanOrEqual(0)
+  expect(messageBox!.x + messageBox!.width).toBeLessThanOrEqual(390)
+  await page.screenshot({ path: '../test-results/request-details-mobile.png' })
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+
+  await page.route('**/api/logs', async (route) => {
+    await route.fulfill({
+      json: {
+        logs: [
+          {
+            id: 'legacy-request-preview',
+            at: new Date().toISOString(),
+            kind: 'request',
+            accountId: accounts[0].id,
+            accountName: '旧请求记录',
+            status: 200,
+            message: '旧版请求完成',
+            path: '/v1/chat/completions',
+            requestId: 'legacy-request-id',
+          },
+        ],
+      },
+    })
+  })
+  await page.getByLabel('搜索事件', { exact: true }).fill('')
+  await page.getByRole('button', { name: '刷新记录', exact: true }).click()
+  await page.getByRole('button', { name: '查看事件详情', exact: true }).click()
+  await expect(dialog).toContainText('此记录未保存首条用户消息。')
+  await expect(dialog).toContainText('此记录未保存 Token 用量。')
+  await expect(dialog.getByTestId('initial-message')).toHaveCount(0)
+})
+
 test('account table filters groups and statuses, enables disabled accounts and renders without runtime errors', async ({
   page,
   request,

@@ -92,7 +92,7 @@ const {
 } = useConsole()
 const nav = [
   { id: 'overview', label: '运行概览', icon: LayoutDashboard },
-  { id: 'accounts', label: '账号池', icon: UsersRound },
+  { id: 'accounts', label: '账号管理', icon: UsersRound },
   { id: 'routing', label: '路由策略', icon: Waypoints },
   { id: 'activity', label: '请求与事件', icon: ScrollText },
   { id: 'access', label: '接入配置', icon: Braces },
@@ -295,7 +295,7 @@ onBeforeUnmount(() => {
   </div>
   <div v-else-if="!authenticated" class="login-shell">
     <section class="login-story">
-      <a class="brand" href="#accounts"
+      <a class="brand" href="#overview"
         ><span class="brand-icon"><Braces :size="23" /></span
         ><span>cnb<span class="brand-two">2</span>api</span
         ><span class="brand-tag">CONSOLE</span></a
@@ -303,7 +303,6 @@ onBeforeUnmount(() => {
       <div class="login-story-content">
         <span class="eyebrow"><i class="blue-dot" /> ONE ENDPOINT. YOUR WHOLE POOL.</span>
         <h1>把分散的算力，<br />连成一条稳定的路。</h1>
-        <p>账号、工作区和每一次请求，<br />在一个清晰的控制台里各就其位。</p>
         <div class="network-art" aria-hidden="true">
           <div class="network-center"><Braces :size="26" /><span>统一网关</span></div>
           <svg viewBox="0 0 440 200">
@@ -317,7 +316,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="login-story-footer">
-        <span>CNB CLOUD · SELF HOSTED</span><span>少一点维护，多一点专注。↗</span>
+        <span>少一点维护，多一点专注。↗</span>
       </div>
     </section>
     <main class="login-main">
@@ -364,9 +363,7 @@ onBeforeUnmount(() => {
         >
           登录方式未配置，请联系管理员开启密钥登录或单点登录。
         </p>
-        <div class="login-note"><ShieldCheck :size="14" />管理密钥与客户端 API Key 独立</div>
       </form>
-      <span class="login-version">cnb2api console <span>v1.0</span></span>
     </main>
   </div>
   <div v-else class="app-shell" :class="{ 'sidebar-collapsed': collapsed }">
@@ -388,7 +385,7 @@ onBeforeUnmount(() => {
         >
           <PanelLeftOpen :size="19" />
         </button>
-        <a href="#accounts" class="brand topbar-brand" @click="navigate('accounts')">
+        <a href="#overview" class="brand topbar-brand" @click="navigate('overview')">
           <span class="brand-icon"><Braces :size="20" /></span>
           <span>cnb<span class="brand-two">2</span>api</span>
         </a>

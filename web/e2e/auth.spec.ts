@@ -88,6 +88,9 @@ test('compact shell removes workspace clutter and exposes user identity and the 
   await page.setViewportSize({ width: 1440, height: 1000 })
   await expect(page.getByRole('heading', { name: '账号池' })).toBeInViewport()
   await expect(page.getByRole('button', { name: '关闭导航', exact: true })).toBeHidden()
+  await page.getByRole('link', { name: 'cnb2api', exact: true }).click()
+  await expect(page).toHaveURL(/\/#overview$/)
+  await expect(page.getByRole('heading', { name: '运行概览' })).toBeInViewport()
 })
 
 test('wake is available in the visible account action row without opening a menu', async ({

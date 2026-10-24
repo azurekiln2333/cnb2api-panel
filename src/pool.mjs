@@ -4,6 +4,7 @@ import { fetchQuota } from "./quota.mjs";
 import { InputError, normalizeEndpoint, publicAccount } from "./store.mjs";
 import { emptyTokenUsage, TokenUsageCapture } from "./token-usage.mjs";
 import { WorkerUsageMonitor } from "./worker-usage.mjs";
+import { initialUserMessage } from "./request-details.mjs";
 
 export const isCooling = (a) =>
   Boolean(a.cooldownUntil && Date.parse(a.cooldownUntil) > Date.now());
@@ -682,6 +683,8 @@ export class Pool {
   async forward(req, res, path, payload) {
     const requestId = randomUUID();
     const started = Date.now();
+    const requestBody = JSON.stringify(payload);
+    const initialMessage = initialUserMessage(payload);
     const excluded = new Set();
     const controller = new AbortController();
     const disconnected = () => {
@@ -692,12 +695,17 @@ export class Pool {
     let finalStatus = 503;
     let attempts = 0;
     let success = false;
+    let firstByteMs = null;
+    let responseBytes = 0;
     let usageCapture = null;
     let usageComplete = false;
     let failureMessage = "没有可用账号，请检查工作区状态、模型范围或冷却时间";
     try {
       for (; attempts < this.store.state.settings.maxAttempts;) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted) {
+          finalStatus = 499;
+          return;
+        }
         const selected = this.select(payload.model, excluded);
         if (!selected) break;
         account = selected;
@@ -721,7 +729,7 @@ export class Pool {
                 ? { "anthropic-version": req.headers["anthropic-version"] }
                 : {}),
             },
-            body: JSON.stringify(payload),
+            body: requestBody,
             signal,
             redirect: "error",
           });
@@ -740,6 +748,8 @@ export class Pool {
             });
             continue;
           }
+          if (!response.ok)
+            failureMessage = `工作区返回 HTTP ${response.status}`;
           if (path !== "/v1/messages/count_tokens")
             usageCapture = new TokenUsageCapture(
               response.headers.get("content-type") || "application/json",
@@ -767,7 +777,10 @@ export class Pool {
                 clearTimeout(timer);
                 if (done) break;
                 usageCapture?.push(value);
-                if (!res.write(value))
+                const writable = res.write(value);
+                firstByteMs ??= Date.now() - started;
+                responseBytes += value.byteLength;
+                if (!writable)
                   await once(res, "drain", { signal: controller.signal });
               }
             } finally {
@@ -832,6 +845,13 @@ export class Pool {
         model:
           typeof payload.model === "string" ? payload.model.slice(0, 120) : "",
         path,
+        method: "POST",
+        stream: payload.stream === true,
+        requestBytes: Buffer.byteLength(requestBody, "utf8"),
+        responseBytes,
+        firstByteMs,
+        upstreamEndpoint: account?.endpoint || "",
+        ...(initialMessage ? { initialMessage } : {}),
         attempts,
         durationMs: Date.now() - started,
         ...(path !== "/v1/messages/count_tokens" && attempts > 0
@@ -845,7 +865,7 @@ export class Pool {
           ? "请求完成"
           : finalStatus === 499
             ? "客户端断开连接"
-            : "请求未成功完成",
+            : failureMessage,
       });
     }
   }
