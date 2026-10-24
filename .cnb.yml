@@ -99,3 +99,39 @@ main:
           type: git:release
           optionsFrom: dist/cnb-release-options.json
         - *upload-build-assets
+
+# Container image for `docker pull`. Runs beside publish-release so an image
+# failure never blocks the tar.gz release. Registry credentials default to the
+# platform-issued CNB_TOKEN; override CNB_REGISTRY / CNB_REGISTRY_USER /
+# CNB_REGISTRY_PASSWORD / CNB_IMAGE in repository settings when needed.
+
+    - name: publish-image
+      docker:
+        image: cnbcool/default-dev-env:latest
+      services:
+        - docker
+      stages:
+        - name: build-and-push-image
+          script: |
+            set -euo pipefail
+            TAG="$CNB_BRANCH"
+            VERSION=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' package.json | head -1)
+            if [ "$TAG" != "v$VERSION" ]; then
+              echo "Release tag must be v$VERSION, received $TAG" >&2
+              exit 1
+            fi
+            REGISTRY="${CNB_REGISTRY:-docker.cnb.cool}"
+            REGISTRY_USER="${CNB_REGISTRY_USER:-cnb}"
+            REGISTRY_PASSWORD="${CNB_REGISTRY_PASSWORD:-${CNB_TOKEN:?CNB_TOKEN is not set}}"
+            IMAGE="${CNB_IMAGE:-$REGISTRY/azurekiln/cnb2api-panel}"
+            echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+            docker build -t "$IMAGE:$TAG" .
+            docker push "$IMAGE:$TAG"
+            case "$VERSION" in
+              *-*) echo "prerelease $VERSION, latest tag skipped" ;;
+              *)
+                docker tag "$IMAGE:$TAG" "$IMAGE:latest"
+                docker push "$IMAGE:latest"
+                ;;
+            esac
+            echo "pushed $IMAGE:$TAG"
