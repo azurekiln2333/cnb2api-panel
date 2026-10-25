@@ -781,10 +781,10 @@ test('release version and selected sidebar remain distinct in light, dark, colla
     })
     expect(styles.background).not.toBe(styles.sidebar)
     expect(styles.background).not.toBe('rgba(0, 0, 0, 0)')
-    expect(styles.weight).toBeGreaterThanOrEqual(700)
-    expect(styles.shadow).not.toBe('none')
+    expect(styles.weight).toBe(500)
+    expect(styles.shadow).toContain('rgb(30, 64, 175)')
   }
-  await expect(page.locator('.nav-caption').first()).toHaveCSS('font-weight', '750')
+  await expect(page.locator('.nav-caption').first()).toHaveCSS('font-weight', '450')
   await checkSelected()
   await page.screenshot({ path: '../test-results/sidebar-selected-light.png', fullPage: true })
   await page.getByRole('button', { name: '切换深色主题' }).click()

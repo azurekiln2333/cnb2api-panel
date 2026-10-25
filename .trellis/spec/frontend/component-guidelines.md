@@ -38,8 +38,9 @@ Questions to answer:
 
 ## Styling Patterns
 
-Sidebar captions and navigation labels use explicit bold weights. Active links
-use a darker blue background, an inset border and a black left marker. Selected
+Sidebar captions inherit the normal text weight; navigation labels use weight 500
+without additional bolding on selection. Active links use a darker blue background,
+an inset border and a deep blue (#1e40af) left marker. Selected
 text and SVG icons inherit the same black color in both themes; the dark theme
 uses a light selected background to keep that color readable. Retain these cues
 in collapsed and mobile navigation. Verify changes in browser screenshots.

@@ -401,7 +401,6 @@ button.button,
 }
 .nav-caption {
   font-size: 11px;
-  font-weight: 750;
   color: var(--text);
   padding: 0 8px;
   margin: 12px 0 6px;
@@ -431,7 +430,7 @@ button.button,
   border-radius: var(--radius-sm);
   color: var(--text);
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 500;
 }
 .main-nav > a > svg {
   stroke-width: 1.65;
@@ -442,14 +441,12 @@ button.button,
 .main-nav > a.active {
   background: var(--nav-active-bg);
   color: #000;
-  font-weight: 750;
   box-shadow:
-    inset 3px 0 0 #000,
+    inset 3px 0 0 #1e40af,
     inset 0 0 0 1px var(--nav-active-border);
 }
 .main-nav > a.active > svg {
   color: inherit;
-  stroke-width: 2;
 }
 .main-nav > a > small {
   margin-left: auto;
