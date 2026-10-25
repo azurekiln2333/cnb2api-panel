@@ -41,3 +41,8 @@ console lockfile metadata, aligned. Vite rejects mismatched package versions.
 Docker's console stage and both source/release dockerignore files must admit the
 root package.json. Release archives can still use prebuilt web/dist without the
 console source or dependencies.
+
+The v1.1.0 startup migrates legacy monolithic `panel.json` into separate account,
+statistics and log files. Preserve the complete data directory and original
+`master.key`. The migration keeps the original as `panel.json.v1.bak` and uses
+the recoverable storage journal. Operators do not need to edit or clear files.

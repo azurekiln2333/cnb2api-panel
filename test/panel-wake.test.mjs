@@ -306,7 +306,7 @@ test("the HTTP wake endpoint returns safe 424 JSON for CNB auth failures while t
     await overview.body.cancel();
   }
   assert.equal(remote.mock.callCount(), 2);
-  assert.deepEqual(app.store.state.logs.map((log) => log.upstreamStatus), [401, 403]);
+  assert.deepEqual(app.store.state.logs.filter((log) => log.kind === "wake").map((log) => log.upstreamStatus), [401, 403]);
 });
 
 test("CNB JSON explanation fields are shown while unknown fields stay private", async (t) => {

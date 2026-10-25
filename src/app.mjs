@@ -25,6 +25,8 @@ import {
 } from "./auth.mjs";
 import { Pool, isReady, isCooling } from "./pool.mjs";
 import { addTokenUsage, emptyTokenUsage } from "./token-usage.mjs";
+import { auditRequest } from "./audit.mjs";
+import { logChannel } from "./file-storage.mjs";
 
 const SESSION_MS = 12 * 60 * 60 * 1000;
 const OIDC_TRANSACTION_MS = 10 * 60 * 1000;
@@ -143,17 +145,28 @@ export function createPanelServer(options) {
   const pool = new Pool(store, poolOptions);
   const sessions = new Map();
   const ssoFingerprint = (sso) =>
-    digest(JSON.stringify([
-      sso.issuer, sso.clientId, sso.clientSecret, sso.scope,
-      sso.allowedSubjects, sso.allowedEmails, sso.callbackUrl,
-    ])).toString("hex");
+    digest(
+      JSON.stringify([
+        sso.issuer,
+        sso.clientId,
+        sso.clientSecret,
+        sso.scope,
+        sso.allowedSubjects,
+        sso.allowedEmails,
+        sso.callbackUrl,
+      ]),
+    ).toString("hex");
   const loginFailures = new Map();
   const root = resolve(webRoot);
   const getSession = (req) => {
     const cookie = cookieValue(req, "cnb_session");
     const entry = cookie ? sessions.get(cookie) : null;
     if (!entry || entry.expiresAt < Date.now()) return null;
-    return { token: cookie, user: entry.user, ssoFingerprint: entry.ssoFingerprint };
+    return {
+      token: cookie,
+      user: entry.user,
+      ssoFingerprint: entry.ssoFingerprint,
+    };
   };
   const isSecure = (req) =>
     publicUrl
@@ -240,16 +253,22 @@ export function createPanelServer(options) {
       authorizationEndpoint: discovery.authorizationEndpoint,
     });
     return redirectResponse(res, location, {
-      "Set-Cookie": oidcCookie(req, transaction.txid, OIDC_TRANSACTION_MS / 1000),
+      "Set-Cookie": oidcCookie(
+        req,
+        transaction.txid,
+        OIDC_TRANSACTION_MS / 1000,
+      ),
     });
   };
   const oidcCallback = async (req, res) => {
     const sso = store.state.sso;
     const clearCookie = oidcCookie(req, "", 0);
-    const fail = (reason) =>
-      redirectResponse(res, `/?auth_error=${reason}`, {
+    const fail = (reason) => {
+      req.auditStatus = 403;
+      return redirectResponse(res, `/?auth_error=${reason}`, {
         "Set-Cookie": clearCookie,
       });
+    };
     if (!sso.enabled) return fail("sso_disabled");
     const url = new URL(req.url, "http://panel.local");
     const txid = cookieValue(req, "cnb_oidc");
@@ -304,6 +323,7 @@ export function createPanelServer(options) {
     sessions.set(token, {
       expiresAt: Date.now() + SESSION_MS,
       ssoFingerprint: ssoFingerprint(sso),
+      subject: identity.sub,
       user: {
         name: identity.name || identity.sub || "SSO 用户",
         email: identity.email,
@@ -312,11 +332,10 @@ export function createPanelServer(options) {
       },
     });
     // Issue the session and drop the single-use transaction cookie together.
+    req.auditActor = { ...sessions.get(token).user, subject: identity.sub };
+    req.auditStatus = 200;
     return redirectResponse(res, "/#overview", {
-      "Set-Cookie": [
-        sessionCookie(req, token, SESSION_MS / 1000),
-        clearCookie,
-      ],
+      "Set-Cookie": [sessionCookie(req, token, SESSION_MS / 1000), clearCookie],
     });
   };
 
@@ -327,6 +346,16 @@ export function createPanelServer(options) {
     try {
       const path = new URL(req.url, "http://panel.local").pathname;
       const method = req.method;
+      const auditSession = getSession(req);
+      auditRequest(
+        req,
+        res,
+        path,
+        store,
+        auditSession
+          ? { ...auditSession.user, subject: auditSession.subject }
+          : null,
+      );
       if (path === "/health" && method === "GET") {
         const ready = store.state.accounts.filter(isReady).length;
         return json(res, ready ? 200 : 503, {
@@ -474,7 +503,13 @@ export function createPanelServer(options) {
           const token = randomBytes(32).toString("hex");
           if (sessions.size >= 100)
             sessions.delete(sessions.keys().next().value);
-          const user = { name: "管理员", email: "", picture: "", provider: "key" };
+          const user = {
+            name: "管理员",
+            email: "",
+            picture: "",
+            provider: "key",
+          };
+          req.auditActor = user;
           sessions.set(token, { expiresAt: now + SESSION_MS, user });
           return json(
             res,
@@ -528,9 +563,7 @@ export function createPanelServer(options) {
             (session.user.provider !== "oidc" ||
               session.ssoFingerprint !== ssoFingerprint(candidate))
           )
-            throw new InputError(
-              "请先通过 SSO 登录验证，再关闭管理密钥登录",
-            );
+            throw new InputError("请先通过 SSO 登录验证，再关闭管理密钥登录");
           // Re-check discovery whenever enabling SSO or changing its identity.
           const needsDiscovery =
             candidate.enabled &&
@@ -551,7 +584,10 @@ export function createPanelServer(options) {
           return json(
             res,
             200,
-            sanitizeSso(candidate, candidate.callbackUrl || ssoCallbackUrl(req)),
+            sanitizeSso(
+              candidate,
+              candidate.callbackUrl || ssoCallbackUrl(req),
+            ),
           );
         }
         if (path === "/api/overview" && method === "GET") {
@@ -628,13 +664,7 @@ export function createPanelServer(options) {
           return json(res, 200, { accounts: pool.accounts() });
         if (path === "/api/accounts" && method === "POST") {
           const account = store.create(await body(req));
-          store.record({
-            kind: "account",
-            accountId: account.id,
-            accountName: account.name,
-            status: 201,
-            message: "账号已加入号池",
-          });
+          req.auditTarget = account;
           if (account.endpoint) pool.probe(account.id).catch(() => {});
           return json(res, 201, {
             account: publicAccount(account),
@@ -652,6 +682,7 @@ export function createPanelServer(options) {
             return json(res, 200, { account: publicAccount(account) });
           if (!action && method === "PATCH") {
             const updated = store.update(id, await body(req));
+            req.auditTarget = updated;
             if (
               updated.endpoint &&
               updated.enabled &&
@@ -662,13 +693,6 @@ export function createPanelServer(options) {
           }
           if (!action && method === "DELETE") {
             store.remove(id);
-            store.record({
-              kind: "account",
-              accountId: id,
-              accountName: account.name,
-              status: 200,
-              message: "账号已从号池移除",
-            });
             return json(res, 200, { ok: true });
           }
           if (action && method === "POST") {
@@ -696,8 +720,15 @@ export function createPanelServer(options) {
           return json(res, 200, { settings: store.state.settings });
         if (path === "/api/settings" && method === "PATCH")
           return json(res, 200, { settings: store.settings(await body(req)) });
-        if (path === "/api/logs" && method === "GET")
-          return json(res, 200, { logs: store.state.logs });
+        const logRoute = /^\/api\/logs(?:\/(requests|audit|system))?$/.exec(
+          path,
+        );
+        if (logRoute && method === "GET")
+          return json(res, 200, {
+            logs: store.state.logs.filter(
+              (entry) => logChannel(entry) === (logRoute[1] || "requests"),
+            ),
+          });
         if (path === "/api/access" && method === "GET")
           return json(res, 200, {
             publicUrl,

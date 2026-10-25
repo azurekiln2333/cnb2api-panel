@@ -1,6 +1,37 @@
 # Logging Guidelines
 
-`Store.record()` persists the latest 1,000 events in `panel.json` and updates request and Token totals. `/api/logs` requires an authenticated management session.
+`Store.record()` routes events through `logChannel()` in `src/file-storage.mjs`.
+Keep three independent streams under the data directory:
+
+| Stream | File | Event kinds | Management endpoint |
+| --- | --- | --- | --- |
+| API requests | `requests.log` | `request` | `/api/logs/requests` |
+| Management audit | `audit.log` | `audit`, legacy `account` | `/api/logs/audit` |
+| Runtime events | `system.log` | `register`, `health`, `wake`, `failover` | `/api/logs/system` |
+
+Each file contains one JSON object per line in chronological order. Each stream
+retains its latest 1,000 records in memory and in the console. Ordinary writes
+append to the matching file. After 2,000 records, the next write compacts that
+file to the latest 1,000. Other streams remain unchanged.
+
+All log endpoints require an authenticated management session. `/api/logs` is an
+alias for requests only. The console provides separate request, audit and system
+navigation entries. Never put event arrays in `panel.json` or `accounts.json`.
+Request counters and Token totals belong in `stats.json` and survive log cleanup.
+
+## Management audit
+
+`auditRequest()` in `src/audit.mjs` records the final HTTP outcome on response
+finish or close, exactly once. Cover login/logout, SSO login/configuration,
+routing settings, account changes, credential/key reveals, registration-token
+rotation and manual probe/quota/wake/usage operations. Automatic worker results
+remain runtime events, even when a manual management action triggered them.
+
+Record the stable action name, actor name/provider/optional OIDC subject, target,
+socket source IP, method, path and status. Include failures and disconnected
+operations. Do not trust forwarded IP headers without an explicit proxy policy.
+Never copy request bodies, headers, query strings, keys, tokens, OIDC codes or raw
+exception messages into an audit record. Use static operation descriptions.
 
 ## Request records
 
@@ -24,3 +55,8 @@ Initial message previews are stored in plaintext with event metadata, as documen
 ## Verification
 
 Cover text formats, Unicode truncation, media omission, unchanged upstream forwarding, streaming byte counts, empty responses, failure descriptions and persisted legacy records. Browser checks cover preview search, details, copying and mobile wrapping.
+
+Storage tests must prove category separation, independent retention, unchanged
+account/configuration files on event writes, and replay-safe interrupted writes.
+API checks cover authentication, audit actors, successful/failed operations and
+secret exclusion. Browser checks verify separate navigation and filters.

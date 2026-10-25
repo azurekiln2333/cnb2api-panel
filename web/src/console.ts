@@ -1,9 +1,10 @@
 import { computed, ref } from 'vue'
 import { api, ApiError, type ApiDiagnostics } from './api'
-import type { Account, LogEntry, Overview, Settings } from './types'
+import type { Account, LogChannel, LogEntry, Overview, Settings } from './types'
 
 const overview = ref<Overview | null>(null)
 const logs = ref<LogEntry[]>([])
+const logStreams = { requests: logs, audit: ref<LogEntry[]>([]), system: ref<LogEntry[]>([]) }
 const loading = ref(false)
 const refreshError = ref('')
 const refreshDiagnostics = ref<ApiDiagnostics | null>(null)
@@ -13,20 +14,22 @@ const toasts = ref<{ id: number; text: string; error: boolean; diagnostics?: Api
 const registration = ref<{ account: Account; token: string } | null>(null)
 let notificationId = 0
 let refreshPromise: Promise<void> | null = null
-let logsPromise: Promise<void> | null = null
+const logsPromises: Partial<Record<LogChannel, Promise<void>>> = {}
 let sessionGeneration = 0
 
 function reset() {
   sessionGeneration++
   overview.value = null
   logs.value = []
+  logStreams.audit.value = []
+  logStreams.system.value = []
   registration.value = null
   lastUpdated.value = null
   refreshError.value = ''
   refreshDiagnostics.value = null
   loading.value = false
   refreshPromise = null
-  logsPromise = null
+  for (const channel of ['requests', 'audit', 'system'] as const) delete logsPromises[channel]
 }
 
 export function notify(text: string, error = false, diagnostics?: ApiDiagnostics) {
@@ -68,13 +71,15 @@ async function refresh() {
   return refreshPromise
 }
 
-async function refreshLogs() {
-  if (logsPromise) return logsPromise
+async function refreshLogs(channel: LogChannel = 'requests') {
+  if (logsPromises[channel]) return logsPromises[channel]
   const generation = sessionGeneration
-  logsPromise = (async () => {
+  logsPromises[channel] = (async () => {
     try {
-      const result = await api<{ logs: LogEntry[] }>('/logs')
-      if (generation === sessionGeneration) logs.value = result.logs
+      const result = await api<{ logs: LogEntry[] }>(
+        channel === 'requests' ? '/logs' : `/logs/${channel}`,
+      )
+      if (generation === sessionGeneration) logStreams[channel].value = result.logs
     } catch (error) {
       if (generation === sessionGeneration)
         notify(
@@ -83,10 +88,10 @@ async function refreshLogs() {
           error instanceof ApiError ? error.diagnostics : undefined,
         )
     } finally {
-      if (generation === sessionGeneration) logsPromise = null
+      if (generation === sessionGeneration) delete logsPromises[channel]
     }
   })()
-  return logsPromise
+  return logsPromises[channel]
 }
 
 async function action(id: string, operation: 'probe' | 'quota' | 'wake') {
@@ -232,6 +237,7 @@ export function useConsole() {
   return {
     overview,
     logs,
+    logStreams,
     loading,
     refreshError,
     refreshDiagnostics,

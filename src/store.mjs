@@ -8,11 +8,51 @@ import {
   mkdirSync,
   readFileSync,
   writeFileSync,
-  renameSync,
+  statSync,
   existsSync,
 } from "node:fs";
 import { resolve, join } from "node:path";
 import { addTokenUsage, emptyTokenUsage } from "./token-usage.mjs";
+import {
+  FileStorage,
+  LOG_FILES,
+  logChannel,
+  retainLogs,
+} from "./file-storage.mjs";
+
+const RUNTIME_FIELDS = [
+  "status",
+  "discoveredModels",
+  "checkedAt",
+  "registeredAt",
+  "cooldownUntil",
+  "failures",
+  "latencyMs",
+  "lastError",
+  "quota",
+  "quotaSync",
+  "requests",
+  "errors",
+  "lastWakeAt",
+  "tokenUsage",
+  "workerUsage",
+];
+const runtimeDefaults = () => ({
+  status: "pending",
+  discoveredModels: [],
+  checkedAt: null,
+  registeredAt: null,
+  cooldownUntil: null,
+  failures: 0,
+  latencyMs: null,
+  lastError: "",
+  quota: null,
+  quotaSync: null,
+  requests: 0,
+  errors: 0,
+  lastWakeAt: null,
+  tokenUsage: emptyTokenUsage(),
+});
 
 export class InputError extends Error {
   constructor(message, status = 400) {
@@ -61,10 +101,7 @@ export function normalizeIssuer(input, allowLocal = false) {
   }
   if (!["http:", "https:"].includes(url.protocol))
     throw new InputError("SSO 颁发者须为完整的 HTTP(S) 地址");
-  if (
-    url.protocol === "http:" &&
-    !(allowLocal && loopbackHost(url.hostname))
-  )
+  if (url.protocol === "http:" && !(allowLocal && loopbackHost(url.hostname)))
     throw new InputError("SSO 颁发者须使用 HTTPS 地址");
   if (url.username || url.password || url.search || url.hash)
     throw new InputError("SSO 颁发者不得包含凭据、查询或片段");
@@ -105,7 +142,8 @@ function normalizeStringList(input, { label, limit, itemLimit, lower }) {
   if (!Array.isArray(input)) throw new InputError(`${label}须为字符串数组`);
   const result = [];
   for (const entry of input) {
-    if (typeof entry !== "string") throw new InputError(`${label}须为字符串数组`);
+    if (typeof entry !== "string")
+      throw new InputError(`${label}须为字符串数组`);
     const item = entry.trim();
     if (!item) continue;
     if (item.length > itemLimit || !printable(item))
@@ -158,7 +196,11 @@ function assertSsoPolicy(sso) {
     throw new InputError("关闭密钥登录前请先启用有效的 SSO");
 }
 
-export function validateSso(input, previous = DEFAULT_SSO, { allowLocal = false } = {}) {
+export function validateSso(
+  input,
+  previous = DEFAULT_SSO,
+  { allowLocal = false } = {},
+) {
   if (!input || typeof input !== "object" || Array.isArray(input))
     throw new InputError("请填写 SSO 配置");
   const next = withSsoDefaults(previous);
@@ -168,7 +210,8 @@ export function validateSso(input, previous = DEFAULT_SSO, { allowLocal = false 
         throw new InputError("SSO 启用状态须为布尔值");
       next[key] = input[key];
     }
-  if (input.issuer !== undefined) next.issuer = normalizeIssuer(input.issuer, allowLocal);
+  if (input.issuer !== undefined)
+    next.issuer = normalizeIssuer(input.issuer, allowLocal);
   if (input.clientId !== undefined) {
     const value = text(input.clientId, 200, "SSO 客户端 ID");
     if (!printable(value)) throw new InputError("SSO 客户端 ID 含有无效字符");
@@ -176,7 +219,10 @@ export function validateSso(input, previous = DEFAULT_SSO, { allowLocal = false 
   }
   // A blank secret keeps the stored value; only a non-blank value replaces it.
   if (input.clientSecret !== undefined) {
-    if (typeof input.clientSecret !== "string" || input.clientSecret.length > 1024)
+    if (
+      typeof input.clientSecret !== "string" ||
+      input.clientSecret.length > 1024
+    )
       throw new InputError("SSO 客户端密钥格式不正确");
     const value = input.clientSecret.trim();
     if (value && !printable(value))
@@ -287,41 +333,124 @@ export class Store {
     this.directory = resolve(directory);
     this.allowLocal = allowLocal;
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
+    this.storage = new FileStorage(this.directory);
+    this.file = join(this.directory, "panel.json");
+    this.accountsFile = join(this.directory, "accounts.json");
+    this.statsFile = join(this.directory, "stats.json");
+    this.logFiles = Object.fromEntries(
+      Object.entries(LOG_FILES).map(([key, name]) => [
+        key,
+        join(this.directory, name),
+      ]),
+    );
+    if (
+      !existsSync(this.file) &&
+      (existsSync(this.accountsFile) || existsSync(this.statsFile))
+    )
+      throw new Error(
+        "data/panel.json is missing; restore the panel configuration backup",
+      );
     const keyFile = join(this.directory, "master.key");
-    if (!existsSync(keyFile))
+    if (!existsSync(keyFile)) {
+      if (existsSync(this.file) || existsSync(this.accountsFile))
+        throw new Error(
+          "data/master.key is missing; restore the original encryption key",
+        );
       writeFileSync(keyFile, randomBytes(32), { mode: 0o600, flag: "wx" });
+    }
     this.key = readFileSync(keyFile);
     if (this.key.length !== 32)
       throw new Error(
         "data/master.key is invalid; restore the original encryption key",
       );
-    this.file = join(this.directory, "panel.json");
+    this.logLines = { requests: 0, audit: 0, system: 0 };
+    this.snapshots = {};
     if (existsSync(this.file)) {
-      const saved = JSON.parse(readFileSync(this.file, "utf8"));
-      if (saved.version !== 1)
+      const original = readFileSync(this.file, "utf8");
+      const saved = JSON.parse(original);
+      if (![1, 2].includes(saved.version))
         throw new Error("Unsupported panel data version");
+      const legacy = saved.version === 1;
+      const accounts = legacy
+        ? { accounts: saved.accounts }
+        : JSON.parse(readFileSync(this.accountsFile, "utf8"));
+      const stats = legacy
+        ? saved
+        : JSON.parse(readFileSync(this.statsFile, "utf8"));
+      if (
+        !Array.isArray(accounts.accounts) ||
+        (!legacy && (accounts.version !== 1 || stats.version !== 1))
+      )
+        throw new Error("Unsupported account or statistics data version");
+      if (
+        !legacy &&
+        (!stats.accounts ||
+          typeof stats.accounts !== "object" ||
+          Array.isArray(stats.accounts) ||
+          !Array.isArray(stats.hourly) ||
+          !stats.tokenUsage ||
+          typeof stats.tokenUsage !== "object" ||
+          typeof stats.tokenUsageStartedAt !== "string" ||
+          !saved.settings ||
+          typeof saved.settings !== "object" ||
+          Array.isArray(saved.settings) ||
+          !saved.sso ||
+          typeof saved.sso.clientSecret !== "string")
+      )
+        throw new Error(
+          "Invalid panel or statistics document; restore the data backup",
+        );
+      const logs = [];
+      if (!legacy)
+        for (const channel of Object.keys(LOG_FILES)) {
+          const loaded = this.storage.readLog(channel);
+          logs.push(...loaded.entries);
+          this.logLines[channel] = loaded.lines;
+        }
       this.state = {
-        ...saved,
+        version: 2,
         settings: { ...DEFAULT_SETTINGS, ...saved.settings },
-        tokenUsage: { ...emptyTokenUsage(), ...saved.tokenUsage },
+        logs: legacy
+          ? retainLogs(saved.logs || [])
+          : logs.sort((a, b) => b.at.localeCompare(a.at)),
+        tokenUsage: { ...emptyTokenUsage(), ...stats.tokenUsage },
         tokenUsageStartedAt:
-          saved.tokenUsageStartedAt || new Date().toISOString(),
-        hourly: (saved.hourly || []).map((b) => ({
+          stats.tokenUsageStartedAt || new Date().toISOString(),
+        hourly: (stats.hourly || []).map((b) => ({
           ...b,
           tokenUsage: { ...emptyTokenUsage(), ...b.tokenUsage },
         })),
-        accounts: saved.accounts.map((a) => ({
+        accounts: accounts.accounts.map((a) => ({
+          ...runtimeDefaults(),
           ...a,
-          quotaSync: a.quotaSync || null,
-          tokenUsage: { ...emptyTokenUsage(), ...a.tokenUsage },
+          ...(!legacy
+            ? Object.fromEntries(
+                RUNTIME_FIELDS.filter(
+                  (key) => stats.accounts?.[a.id]?.[key] !== undefined,
+                ).map((key) => [key, stats.accounts[a.id][key]]),
+              )
+            : {}),
+          tokenUsage: {
+            ...emptyTokenUsage(),
+            ...(legacy ? a.tokenUsage : stats.accounts?.[a.id]?.tokenUsage),
+          },
           secrets: this.decrypt(a.secrets),
         })),
       };
       this.state.sso = this.loadSso(saved.sso);
-      if (!saved.tokenUsageStartedAt) this.commit(() => {});
+      if (legacy) {
+        const backup = join(this.directory, "panel.json.v1.bak");
+        if (!existsSync(backup))
+          writeFileSync(backup, original, {
+            mode: 0o600,
+            flag: "wx",
+            flush: true,
+          });
+        this.persist(this.state, true);
+      } else this.snapshots = this.documents(this.state);
     } else {
       this.state = {
-        version: 1,
+        version: 2,
         accounts: [],
         settings: { ...DEFAULT_SETTINGS },
         sso: { ...DEFAULT_SSO },
@@ -330,7 +459,7 @@ export class Store {
         tokenUsage: emptyTokenUsage(),
         tokenUsageStartedAt: new Date().toISOString(),
       };
-      this.commit(() => {});
+      this.persist(this.state, true);
     }
   }
 
@@ -374,23 +503,106 @@ export class Store {
     );
   }
 
-  // Write first, publish second: an unsuccessful write cannot become a successful API mutation.
+  documents(state) {
+    return {
+      "accounts.json": JSON.stringify({
+        version: 1,
+        accounts: state.accounts.map((a) =>
+          Object.fromEntries(
+            Object.entries(a).filter(([key]) => !RUNTIME_FIELDS.includes(key)),
+          ),
+        ),
+      }),
+      "stats.json": JSON.stringify({
+        version: 1,
+        hourly: state.hourly,
+        tokenUsage: state.tokenUsage,
+        tokenUsageStartedAt: state.tokenUsageStartedAt,
+        accounts: Object.fromEntries(
+          state.accounts.map((a) => [
+            a.id,
+            Object.fromEntries(
+              RUNTIME_FIELDS.filter((key) => a[key] !== undefined).map(
+                (key) => [key, a[key]],
+              ),
+            ),
+          ]),
+        ),
+      }),
+      "panel.json": JSON.stringify({
+        version: 2,
+        settings: state.settings,
+        sso: withSsoDefaults(state.sso),
+      }),
+    };
+  }
+
+  persist(next, initialize = false) {
+    const documents = this.documents(next);
+    const operations = [];
+    for (const name of ["accounts.json", "stats.json", "panel.json"]) {
+      if (documents[name] === this.snapshots[name]) continue;
+      const data = JSON.parse(documents[name]);
+      if (name === "accounts.json")
+        for (const account of data.accounts)
+          account.secrets = this.encrypt(account.secrets);
+      if (name === "panel.json")
+        data.sso.clientSecret = this.encrypt(data.sso.clientSecret);
+      operations.push({
+        type: "replace",
+        file: name,
+        text: JSON.stringify(data),
+      });
+    }
+    const counts = { ...this.logLines };
+    for (const [channel, file] of Object.entries(LOG_FILES)) {
+      const previous = (initialize ? [] : this.state.logs).filter(
+        (entry) => logChannel(entry) === channel,
+      );
+      const entries = next.logs.filter(
+        (entry) => logChannel(entry) === channel,
+      );
+      if (!initialize && JSON.stringify(previous) === JSON.stringify(entries))
+        continue;
+      const append =
+        !initialize &&
+        counts[channel] < 2000 &&
+        entries.length &&
+        JSON.stringify(entries.slice(1)) ===
+          JSON.stringify(previous.slice(0, 999));
+      if (append) {
+        const offset = existsSync(this.logFiles[channel])
+          ? statSync(this.logFiles[channel]).size
+          : 0;
+        operations.push({
+          type: "append",
+          file,
+          offset,
+          text: `${JSON.stringify(entries[0])}\n`,
+        });
+        counts[channel]++;
+      } else {
+        operations.push({
+          type: "replace",
+          file,
+          text: [...entries]
+            .reverse()
+            .map((entry) => `${JSON.stringify(entry)}\n`)
+            .join(""),
+        });
+        counts[channel] = entries.length;
+      }
+    }
+    this.storage.write(operations);
+    this.snapshots = documents;
+    this.logLines = counts;
+  }
+
+  // Publish state only after all recoverable disk operations complete.
   commit(mutate) {
     const next = structuredClone(this.state);
     const result = mutate(next);
-    const disk = {
-      ...next,
-      accounts: next.accounts.map((a) => ({
-        ...a,
-        secrets: this.encrypt(a.secrets),
-      })),
-      sso: {
-        ...withSsoDefaults(next.sso),
-        clientSecret: this.encrypt(next.sso?.clientSecret || ""),
-      },
-    };
-    writeFileSync(`${this.file}.tmp`, JSON.stringify(disk), { mode: 0o600 });
-    renameSync(`${this.file}.tmp`, this.file);
+    this.persist(next);
     this.state = next;
     return result;
   }
@@ -618,7 +830,7 @@ export class Store {
         at: new Date(now).toISOString(),
       };
       s.logs.unshift(log);
-      s.logs = s.logs.slice(0, 1000);
+      s.logs = retainLogs(s.logs);
       if (entry.kind !== "request") return;
       const hour = new Date(Math.floor(now / 3600000) * 3600000).toISOString();
       let bucket = s.hourly.find((b) => b.at === hour);

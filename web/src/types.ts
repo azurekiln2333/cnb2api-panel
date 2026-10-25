@@ -115,11 +115,14 @@ export interface Stats {
 export interface LogEntry {
   id: string
   at: string
-  kind: 'request' | 'account' | 'register' | 'health' | 'failover' | 'wake'
+  kind: 'request' | 'audit' | 'account' | 'register' | 'health' | 'failover' | 'wake'
   accountId: string | null
   accountName: string
   status: number
   message: string
+  action?: string
+  actor?: { name: string; provider: string; subject?: string }
+  ip?: string
   requestId?: string
   model?: string
   path?: string
@@ -162,4 +165,5 @@ export interface SessionUser {
   picture: string
   provider: 'key' | 'oidc'
 }
-export type Page = 'accounts' | 'overview' | 'routing' | 'activity' | 'access'
+export type LogChannel = 'requests' | 'audit' | 'system'
+export type Page = 'accounts' | 'overview' | 'routing' | 'activity' | 'audit' | 'system' | 'access'

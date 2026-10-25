@@ -112,6 +112,11 @@ Compose 将宿主机的 `./data` 挂载到 `/app/data`。
 ```text
 /data/platform2api/cnb2api-panel/data/
 ├── panel.json
+├── accounts.json
+├── stats.json
+├── requests.log
+├── audit.log
+├── system.log
 └── master.key
 ```
 
@@ -123,6 +128,11 @@ cnb2api-panel/
 ├── .env
 └── data/
     ├── panel.json
+    ├── accounts.json
+    ├── stats.json
+    ├── requests.log
+    ├── audit.log
+    ├── system.log
     └── master.key
 ```
 
@@ -575,7 +585,12 @@ Docker 使用 Compose 的宿主机 `./data` 挂载。
 
 | 文件 | 内容 | 加密情况 |
 | --- | --- | --- |
-| `data/panel.json` | 账号、配置、事件、用量 | 账号凭据和 SSO 客户端密钥加密 |
+| `data/panel.json` | 面板配置、路由配置、SSO 配置 | SSO 客户端密钥加密 |
+| `data/accounts.json` | 账号定义、地址、权重、凭据 | 账号凭据加密 |
+| `data/stats.json` | 用量、探活状态、额度与对比基线 | 明文统计 |
+| `data/requests.log` | API 请求记录 | 明文日志 |
+| `data/audit.log` | 管理操作审计 | 明文日志 |
+| `data/system.log` | 工作区运行事件 | 明文日志 |
 | `data/master.key` | 解密账号凭据的本地密钥 | 原始密钥文件 |
 | `.env` | 两个系统密钥及启动配置 | 明文配置 |
 
@@ -585,42 +600,68 @@ SSO 客户端密钥也使用 AES-256-GCM。
 事件和用量统计也为明文。
 整个 JSON 文件没有加密。
 
-同时取得 `panel.json` 和 `master.key` 即可解密凭据。
+同时取得 `accounts.json` 和 `master.key` 即可解密账号凭据。
+SSO 密钥仍保存在 `panel.json` 中。
 丢失 `master.key` 后，原有凭据无法恢复。
 Linux 首次生成的数据目录权限为 `0700`。
 首次生成的数据文件和密钥权限为 `0600`。
 已有目录权限需自行管理。
 
-面板保留最近 1,000 条事件和 30 天小时统计。
+三类日志各自保留最近 1,000 条记录。
+面板单独保留 30 天小时统计。
 累计 Token 单独保存，不随这些记录清理而减少。
 请求日志记录首条用户消息，最多 4,000 个字符。
 消息过长时，面板标记截断。
 图片、音频和文件只保留类型占位。
-消息摘要与事件明文保存在 `panel.json`。
+请求日志在 `requests.log` 中逐行追加。
+每行是一个 JSON 对象。
+日志不会写入 `panel.json` 或 `accounts.json`。
+请求计数只更新 `stats.json`。
 更新前的日志没有消息摘要，无法补回。
 请求日志不保存系统消息、工具正文和回复正文。
 请求详情还包含上游地址、收发大小与首字节耗时。
 登录会话只保存在内存中。
 重启后需要重新登录。
 
-面板通过临时文件和原子替换写入数据。
+JSON 文件通过临时文件和原子替换写入。
+日志超过 2,000 条时，压缩为最近 1,000 条。
+三类日志分别压缩，互不挤占。
+写入中断后，启动过程通过 `store.pending` 恢复。
 此文件方案用于单进程部署。
 多个面板进程不能共享同一数据目录。
+
+### 请求日志、审计日志与运行事件
+
+侧边栏提供三个独立入口。
+各入口只读取对应类别的日志。
+
+| 入口 | 接口 | 内容 |
+| --- | --- | --- |
+| 请求日志 | `/api/logs/requests` | API 请求、用量、首条消息摘要 |
+| 审计日志 | `/api/logs/audit` | 登录、退出、账号修改、凭据查看、配置操作 |
+| 运行事件 | `/api/logs/system` | 地址注册、探活错误、唤醒、路由切换 |
+
+`/api/logs` 兼容请求日志入口。
+三个接口均要求登录管理面板。
+审计记录操作人、对象、来源 IP 和操作结果。
+成功和失败的管理操作都会生成审计记录。
+审计不保存提交的密钥、令牌或请求正文。
+工作区运行结果不会混入管理审计。
 
 ### 备份、迁移与更新
 
 备份前先停止面板写入。
-一起备份以下三个文件。
-
-```text
-.env
-data/panel.json
-data/master.key
-```
-
-建议备份 `.env` 和整个 `data/`。
+一起备份 `.env` 和整个 `data/`。
 备份应按密钥文件管理访问权限。
-只复制 `panel.json` 不足以恢复账号凭据。
+只复制 `panel.json` 无法恢复账号凭据。
+
+首次升级时，面板自动拆分旧版数据。
+原文件保存在 `data/panel.json.v1.bak`。
+账号、凭据、累计用量与历史事件均会迁移。
+旧账号修改记录迁入 `audit.log`。
+旧请求和运行事件迁入各自的日志文件。
+旧备份不会继续接收写入。
+保留完整 `data/`，无需手动拆分或清空文件。
 
 迁移旧面板时，先停止原面板进程。
 找到原进程实际使用的 `PANEL_DATA_DIR`。
@@ -820,13 +861,13 @@ git push gitlab main
 同时更新 `web/package-lock.json` 的包版本。
 提交修改。
 再将 `main` 推送到三个远程。
-版本 `1.0.4` 使用以下标签。
+版本 `1.1.0` 使用以下标签。
 
 ```bash
-git tag -a v1.0.4 -m "Release v1.0.4"
-git push origin v1.0.4
-git push cnb v1.0.4
-git push gitlab v1.0.4
+git tag -a v1.1.0 -m "Release v1.1.0"
+git push origin v1.1.0
+git push cnb v1.1.0
+git push gitlab v1.1.0
 ```
 
 GitHub 和 CNB 接收标签后各自构建并发布。

@@ -130,7 +130,7 @@ test('account secrets survive restart encrypted, remain hidden in reads, and edi
   const app = await fixture(t);
   const created = await account(app, null, { pat: 'private-personal-token' });
   assert.equal(created.account.hasPat, true);
-  const disk = readFileSync(join(app.directory, 'panel.json'), 'utf8');
+  const disk = readFileSync(join(app.directory, 'accounts.json'), 'utf8');
   for (const secret of [
     WORKER,
     'private-personal-token',
@@ -294,7 +294,7 @@ test('existing registration tokens are imported, encrypted, preserved on blank e
     token,
   );
   assert.ok(
-    !readFileSync(join(app.directory, 'panel.json'), 'utf8').includes(token),
+    !readFileSync(join(app.directory, 'accounts.json'), 'utf8').includes(token),
   );
   for (const input of [{ name: '保留原密钥' }, { registrationToken: '' }]) {
     const edited = await app.call(`/api/accounts/${first.account.id}`, {
@@ -559,6 +559,55 @@ test('editing and rotating imported tokens invalidates old credentials on every 
       403,
     );
     assert.equal((await register(path, registrationToken)).status, 200);
+  }
+});
+
+test('request, audit and system APIs remain separate and audits include successful and failed management actions', async (t) => {
+  const app = await fixture(t);
+  const up = await worker(t, 'a');
+  const { account: a } = await account(app, up);
+  for (const [path, method, data, status] of [
+    [`/api/accounts/${a.id}`, 'PATCH', { name: '审计目标' }, 200],
+    [`/api/accounts/${a.id}/credentials`, 'POST', {}, 200],
+    [`/api/accounts/${a.id}/registration`, 'POST', {}, 200],
+    ['/api/settings', 'PATCH', { maxAttempts: 4 }, 200],
+    ['/api/settings', 'PATCH', { maxAttempts: 0 }, 400],
+  ]) {
+    const response = await app.call(path, { method, data });
+    assert.equal(response.status, status);
+    await response.text();
+  }
+  const denied = await fetch(`${app.base}/api/settings`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  });
+  assert.equal(denied.status, 401);
+  await denied.text();
+  await app.pool.register(a.id, up.endpoint);
+  await (await completion(app)).text();
+  const requestLogs = (await (await app.call('/api/logs')).json()).logs;
+  const audits = (await (await app.call('/api/logs/audit')).json()).logs;
+  const system = (await (await app.call('/api/logs/system')).json()).logs;
+  assert.equal(requestLogs.length, 1);
+  assert.ok(requestLogs.every((entry) => entry.kind === 'request'));
+  assert.ok(audits.every((entry) => entry.kind === 'audit'));
+  assert.ok(system.some((entry) => entry.kind === 'register'));
+  assert.ok(system.every((entry) => !['request', 'audit', 'account'].includes(entry.kind)));
+  for (const action of ['auth.login', 'account.create', 'account.update', 'account.credentials.read', 'account.token.rotate', 'routing.settings'])
+    assert.ok(audits.some((entry) => entry.action === action), action);
+  assert.ok(audits.some((entry) => entry.action === 'routing.settings' && entry.status === 400));
+  const anonymous = audits.find((entry) => entry.status === 401);
+  assert.equal(anonymous.actor.provider, 'anonymous');
+  const revealed = audits.find((entry) => entry.action === 'account.credentials.read');
+  assert.equal(revealed.actor.name, '管理员');
+  assert.equal(revealed.actor.provider, 'key');
+  assert.equal(revealed.accountId, a.id);
+  assert.ok(revealed.ip);
+  for (const secret of [WORKER, ADMIN, GATEWAY, app.store.get(a.id).secrets.registrationToken])
+    assert.ok(!JSON.stringify(audits).includes(secret));
+  for (const channel of ['requests', 'audit', 'system']) {
+    assert.equal((await fetch(`${app.base}/api/logs/${channel}`)).status, 401);
+    const persisted = readFileSync(join(app.directory, `${channel}.log`), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(persisted.every((entry) => channel === 'requests' ? entry.kind === 'request' : channel === 'audit' ? entry.kind === 'audit' : !['request', 'audit'].includes(entry.kind)));
   }
 });
 

@@ -96,7 +96,9 @@ const nav = [
   { id: 'overview', label: '运行概览', icon: LayoutDashboard },
   { id: 'accounts', label: '账号管理', icon: UsersRound },
   { id: 'routing', label: '路由策略', icon: Waypoints },
-  { id: 'activity', label: '请求与事件', icon: ScrollText },
+  { id: 'activity', label: '请求日志', icon: ScrollText },
+  { id: 'audit', label: '审计日志', icon: ShieldCheck },
+  { id: 'system', label: '运行事件', icon: Cloud },
   { id: 'access', label: '接入配置', icon: Braces },
 ] as const
 const initialPage = location.hash.slice(1)
@@ -141,6 +143,7 @@ function refreshPage() {
   if (!authenticated.value || document.hidden) return
   void refresh()
   if (page.value === 'activity') void refreshLogs()
+  if (page.value === 'audit' || page.value === 'system') void refreshLogs(page.value)
 }
 function resumeRefresh() {
   if (!authenticated.value || document.hidden) return
@@ -509,7 +512,9 @@ onBeforeUnmount(() => {
           ><AccountsView v-if="page === 'accounts'" @navigate="navigate" /><OverviewView
             v-else-if="page === 'overview'"
             @navigate="navigate" /><RoutingView v-else-if="page === 'routing'" /><ActivityView
-            v-else-if="page === 'activity'" /><AccessView v-else
+            v-else-if="page === 'activity' || page === 'audit' || page === 'system'"
+            :key="page"
+            :channel="page === 'activity' ? 'requests' : page" /><AccessView v-else
         /></template>
         <div v-else-if="!refreshError" class="page-loading">等待网关数据</div>
       </main>

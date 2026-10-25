@@ -15,12 +15,12 @@ This directory contains guidelines for backend development. Fill in each file wi
 | Guide | Description | Status |
 |-------|-------------|--------|
 | [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
+| [Database Guidelines](./database-guidelines.md) | File partitions, encrypted credentials, migration and recovery | Implemented |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
 | [Deployment](./deployment.md) | Compose naming, scoped image updates, release packaging | Implemented |
 | [Session Routing](./routing.md) | Session affinity, eligibility and bounded bindings | Implemented |
-| [Logging Guidelines](./logging-guidelines.md) | Request metadata, bounded message previews, legacy records | Implemented |
+| [Logging Guidelines](./logging-guidelines.md) | Separate request/audit/runtime logs, bounded previews and retention | Implemented |
 | [OIDC Authentication](./oidc-authentication.md) | Management sessions, SSO settings, provider validation | Implemented |
 
 ---

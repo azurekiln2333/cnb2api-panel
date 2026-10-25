@@ -2,9 +2,31 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { Search, RefreshCw, ArrowUpRight, ScrollText, X, Copy } from '@lucide/vue'
 import { useConsole, time, number, copy } from '../console'
-import type { LogEntry } from '../types'
+import type { LogChannel, LogEntry } from '../types'
 import ModalShell from '../components/ModalShell.vue'
-const { logs, refreshLogs } = useConsole()
+const props = withDefaults(defineProps<{ channel?: LogChannel }>(), { channel: 'requests' })
+const { logStreams, refreshLogs } = useConsole()
+const logs = computed(() => logStreams[props.channel].value)
+const pageInfo = computed(
+  () =>
+    ({
+      requests: {
+        title: '请求日志',
+        english: 'API REQUESTS',
+        description: '仅显示 API 请求，保留最近 1,000 条请求记录。',
+      },
+      audit: {
+        title: '审计日志',
+        english: 'AUDIT LOG',
+        description: '记录登录、账号变更、凭据查看和配置操作，保留最近 1,000 条审计记录。',
+      },
+      system: {
+        title: '运行事件',
+        english: 'SYSTEM EVENTS',
+        description: '记录工作区注册、探活异常、唤醒和路由切换，保留最近 1,000 条运行事件。',
+      },
+    })[props.channel],
+)
 const search = ref('')
 const kind = ref('all')
 const page = ref(1)
@@ -12,17 +34,27 @@ const selected = ref<LogEntry | null>(null)
 const refreshing = ref(false)
 const labels: Record<LogEntry['kind'], string> = {
   request: 'API 请求',
+  audit: '管理操作',
   account: '账号变更',
   register: '域名注册',
   health: '探活异常',
   failover: '路由切换',
   wake: '工作区唤醒',
 }
+const kindOptions = computed(() =>
+  Object.entries(labels).filter(([value]) =>
+    props.channel === 'requests'
+      ? value === 'request'
+      : props.channel === 'audit'
+        ? ['audit', 'account'].includes(value)
+        : !['request', 'audit', 'account'].includes(value),
+  ),
+)
 const filtered = computed(() =>
   logs.value.filter(
     (l) =>
       (kind.value === 'all' || l.kind === kind.value) &&
-      `${l.accountName} ${l.model ?? ''} ${l.message} ${l.requestId ?? ''} ${l.initialMessage?.text ?? ''}`
+      `${l.accountName} ${l.actor?.name ?? ''} ${l.action ?? ''} ${l.ip ?? ''} ${l.model ?? ''} ${l.message} ${l.requestId ?? ''} ${l.initialMessage?.text ?? ''}`
         .toLowerCase()
         .includes(search.value.toLowerCase()),
   ),
@@ -50,7 +82,7 @@ watch([search, kind], () => {
 })
 async function refresh() {
   refreshing.value = true
-  await refreshLogs()
+  await refreshLogs(props.channel)
   refreshing.value = false
 }
 onMounted(refresh)
@@ -59,9 +91,9 @@ onMounted(refresh)
 <template>
   <div class="page-heading">
     <div>
-      <div class="eyebrow"><span class="blue-line" />REQUESTS & EVENTS</div>
-      <h1>请求与事件</h1>
-      <p>追踪请求、域名更新和路由切换，保留最近 1,000 条事件。</p>
+      <div class="eyebrow"><span class="blue-line" />{{ pageInfo.english }}</div>
+      <h1>{{ pageInfo.title }}</h1>
+      <p>{{ pageInfo.description }}</p>
     </div>
     <button class="button" :disabled="refreshing" @click="refresh">
       <RefreshCw :size="15" :class="{ spin: refreshing }" />刷新记录
@@ -72,7 +104,13 @@ onMounted(refresh)
       <div class="search-field">
         <Search :size="16" /><input
           v-model="search"
-          placeholder="搜索账号、模型、请求 ID 或消息…"
+          :placeholder="
+            channel === 'audit'
+              ? '搜索操作人、账号、操作或来源 IP…'
+              : channel === 'system'
+                ? '搜索账号或运行事件…'
+                : '搜索账号、模型、请求 ID 或消息…'
+          "
           aria-label="搜索事件"
         /><button v-if="search" class="icon-button" aria-label="清空搜索" @click="search = ''">
           <X :size="13" />
@@ -80,7 +118,9 @@ onMounted(refresh)
       </div>
       <select v-model="kind" class="filter-select" aria-label="事件类型">
         <option value="all">全部事件</option>
-        <option v-for="(label, value) in labels" :key="value" :value="value">{{ label }}</option>
+        <option v-for="[value, label] in kindOptions" :key="value" :value="value">
+          {{ label }}
+        </option>
       </select>
     </div>
     <div v-if="rows.length" class="table-scroll">
@@ -89,10 +129,18 @@ onMounted(refresh)
           <tr>
             <th>时间</th>
             <th>类型</th>
-            <th>账号 / 模型</th>
+            <th>
+              {{
+                channel === 'audit'
+                  ? '对象 / 操作人'
+                  : channel === 'requests'
+                    ? '账号 / 模型'
+                    : '账号'
+              }}
+            </th>
             <th>结果</th>
             <th>详情</th>
-            <th class="right-align">耗时</th>
+            <th v-if="channel !== 'audit'" class="right-align">耗时</th>
             <th />
           </tr>
         </thead>
@@ -105,6 +153,7 @@ onMounted(refresh)
             <td>
               <strong>{{ log.accountName }}</strong
               ><span v-if="log.model" class="cell-secondary mono">{{ log.model }}</span>
+              <span v-if="log.actor" class="cell-secondary">操作人：{{ log.actor.name }}</span>
             </td>
             <td>
               <span class="http-status" :class="log.status < 400 ? 'ok' : 'failed'"
@@ -123,7 +172,7 @@ onMounted(refresh)
                 >首条消息：{{ log.initialMessage.text || '（空消息）' }}</span
               >
             </td>
-            <td class="right-align mono">
+            <td v-if="channel !== 'audit'" class="right-align mono">
               {{ log.durationMs != null ? `${number(log.durationMs)} ms` : '—' }}
             </td>
             <td>
@@ -137,19 +186,16 @@ onMounted(refresh)
     </div>
     <div v-else class="empty-filter">
       <ScrollText :size="30" />
-      <h3>{{ logs.length ? '没有匹配的事件' : '这里会记下每一次变化' }}</h3>
+      <h3>{{ logs.length ? '没有匹配的记录' : `暂无${pageInfo.title}` }}</h3>
       <p>
-        {{
-          logs.length
-            ? '试试其他关键词或事件类型。'
-            : '添加账号、注册工作区或发送 API 请求后，即可查看记录。'
-        }}
+        {{ logs.length ? '试试其他关键词或事件类型。' : pageInfo.description }}
       </p>
     </div>
     <footer class="table-footer">
       <span
-        >共 {{ filtered.length }} 条记录<span class="footer-dot">·</span>首条用户消息最多保留 4,000
-        字符</span
+        >共 {{ filtered.length }} 条记录<template v-if="channel === 'requests'"
+          ><span class="footer-dot">·</span>首条用户消息最多保留 4,000 字符</template
+        ></span
       >
       <div class="pagination">
         <button class="button" :disabled="page <= 1" @click="page--">上一页</button
@@ -161,7 +207,13 @@ onMounted(refresh)
   </section>
   <ModalShell
     v-if="selected"
-    :title="selected.kind === 'request' ? 'API 请求详情' : '事件详情'"
+    :title="
+      selected.kind === 'request'
+        ? 'API 请求详情'
+        : channel === 'audit'
+          ? '审计详情'
+          : '运行事件详情'
+    "
     :subtitle="time(selected.at, true)"
     :wide="selected.kind === 'request'"
     @close="selected = null"
@@ -182,6 +234,18 @@ onMounted(refresh)
         <div v-if="selected.model">
           <dt>模型</dt>
           <dd class="mono">{{ selected.model }}</dd>
+        </div>
+        <div v-if="selected.actor">
+          <dt>操作人</dt>
+          <dd>{{ selected.actor.name }}（{{ selected.actor.provider }}）</dd>
+        </div>
+        <div v-if="selected.action">
+          <dt>操作</dt>
+          <dd class="mono wrap-anywhere">{{ selected.action }}</dd>
+        </div>
+        <div v-if="selected.ip">
+          <dt>来源 IP</dt>
+          <dd class="mono wrap-anywhere">{{ selected.ip }}</dd>
         </div>
         <div v-if="selected.path">
           <dt>请求路径</dt>

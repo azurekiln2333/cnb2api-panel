@@ -628,7 +628,7 @@ test('request details show the first user message, usage and routing metadata on
   expect(requestId).toBeTruthy()
 
   await login(page)
-  await page.getByRole('link', { name: '请求与事件', exact: true }).click()
+  await page.getByRole('link', { name: '请求日志', exact: true }).click()
   await page.getByLabel('搜索事件', { exact: true }).fill('首条消息 e2e')
   await expect(page.getByTestId('initial-message-preview')).toContainText('首条消息 e2e')
   const row = page.getByRole('row').filter({ has: page.getByTestId('initial-message-preview') })
@@ -802,6 +802,64 @@ test('release version and selected sidebar remain distinct in light, dark, colla
   await page.screenshot({ path: '../test-results/sidebar-selected-mobile.png', fullPage: true })
 })
 
+test('request logs, audit logs and system events have separate navigation and never mix records', async ({
+  page,
+  request,
+}) => {
+  const accounts = await seed(request)
+  const id = accounts[0].id
+  await request.patch(`/api/accounts/${id}`, { data: { name: '审计分流目标' } })
+  const credentials = await (
+    await request.post(`/api/accounts/${id}/credentials`, { data: {} })
+  ).json()
+  await request.post('/ops/register', {
+    headers: { 'x-reg-token': credentials.registrationToken },
+    data: { uri: 'http://127.0.0.1:19221' },
+  })
+  const response = await request.post('/v1/chat/completions', {
+    headers: { Authorization: 'Bearer browser-test-gateway-key' },
+    data: {
+      model: 'deepseek-v4.1-flash',
+      messages: [{ role: 'user', content: '请求分流独立标记' }],
+    },
+  })
+  expect(response.status()).toBe(200)
+  await response.json()
+  await login(page)
+  await page.getByRole('link', { name: '请求日志', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '请求日志', exact: true })).toBeVisible()
+  await page.getByLabel('搜索事件', { exact: true }).fill('请求分流独立标记')
+  await expect(page.locator('.event-type')).toHaveText(['API 请求'])
+  await expect(page.getByLabel('事件类型').locator('option[value="audit"]')).toHaveCount(0)
+  await page.getByRole('link', { name: '审计日志', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '审计日志', exact: true })).toBeVisible()
+  await page.getByLabel('搜索事件', { exact: true }).fill('审计分流目标')
+  await expect(page.getByTestId('initial-message-preview')).toHaveCount(0)
+  await expect(page.getByLabel('事件类型').locator('option[value="request"]')).toHaveCount(0)
+  const row = page
+    .getByRole('row')
+    .filter({ has: page.getByRole('cell', { name: '查看账号凭据成功', exact: true }) })
+  await expect(row).toBeVisible()
+  await expect(row).toContainText('操作人：管理员')
+  await row.getByRole('button', { name: '查看事件详情' }).click()
+  const dialog = page.getByRole('dialog', { name: '审计详情', exact: true })
+  await expect(dialog).toContainText('account.credentials.read')
+  await expect(dialog).toContainText('来源 IP')
+  await expect(dialog).not.toContainText(credentials.proxyKey)
+  await page.screenshot({ path: '../test-results/audit-details-desktop.png' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+  await page.screenshot({ path: '../test-results/audit-details-mobile.png' })
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByRole('button', { name: '展开导航' }).click()
+  await page.getByRole('link', { name: '运行事件', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '运行事件', exact: true })).toBeVisible()
+  await page.getByLabel('搜索事件', { exact: true }).fill('审计分流目标')
+  await expect(page.getByRole('cell', { name: '域名注册', exact: true })).toBeVisible()
+  await expect(page.getByLabel('事件类型').locator('option[value="audit"]')).toHaveCount(0)
+  await expect(page.getByLabel('事件类型').locator('option[value="request"]')).toHaveCount(0)
+})
+
 test('routing changes persist and access examples match each protocol', async ({
   page,
   request,
@@ -840,8 +898,9 @@ test('routing changes persist and access examples match each protocol', async ({
   await expect(page.getByText('browser-test-gateway-key', { exact: true })).not.toBeVisible()
   await page.getByRole('link', { name: '运行概览', exact: true }).click()
   await expect(page.getByRole('heading', { name: '号池健康度' })).toBeVisible()
-  await page.getByRole('link', { name: '请求与事件', exact: true }).click()
-  await expect(page.getByRole('cell', { name: '账号变更', exact: true }).first()).toBeVisible()
+  await page.getByRole('link', { name: '请求日志', exact: true }).click()
+  await page.getByRole('link', { name: '审计日志', exact: true }).click()
+  await expect(page.getByRole('cell', { name: '管理操作', exact: true }).first()).toBeVisible()
 })
 
 test('phone layout keeps content within the viewport and account forms support keyboard dismissal', async ({

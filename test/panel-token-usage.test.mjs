@@ -254,10 +254,8 @@ test("gateway persists local totals, preserves SSE bytes, and excludes count_tok
   assert.deepEqual(overview.stats.tokenUsage.total, expected);
   assert.deepEqual(overview.accounts[0].tokenUsage, expected);
   assert.equal(overview.stats.requests, 3);
-  const disk = readFileSync(join(app.directory, "panel.json"), "utf8");
-  const requestLogs = JSON.parse(disk).logs.filter(
-    (log) => log.kind === "request",
-  );
+  const disk = readFileSync(join(app.directory, "requests.log"), "utf8");
+  const requestLogs = disk.trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(requestLogs.length, 3);
   for (const log of requestLogs)
     assert.deepEqual(log.initialMessage, {
@@ -283,7 +281,9 @@ test("legacy version 1 data receives empty usage and lifetime totals survive hou
   const directory = mkdtempSync(join(tmpdir(), "cnb-panel-legacy-usage-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const store = new Store(directory, { allowLocal: true });
-  const saved = JSON.parse(readFileSync(store.file, "utf8"));
+  const saved = { ...store.state, version: 1,
+    sso: { ...store.state.sso, clientSecret: store.encrypt("") },
+  };
   delete saved.tokenUsage;
   delete saved.tokenUsageStartedAt;
   writeFileSync(store.file, JSON.stringify(saved));
