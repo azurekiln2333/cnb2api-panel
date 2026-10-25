@@ -45,7 +45,7 @@ try {
   const destination = join(staging, name);
   mkdirSync(destination);
 
-  for (const file of ['LICENSE', 'README.md', 'Dockerfile', 'compose.yaml', 'compose.build.yaml', '.env.example', 'nginx.conf'])
+  for (const file of ['LICENSE', 'README.md', 'Dockerfile', 'docker-compose.yaml', 'docker-compose.build.yaml', '.env.example', 'nginx.conf'])
     copyFileSync(join(root, file), join(destination, file));
   writeFileSync(join(destination, '.dockerignore'), releaseDockerignore);
   cpSync(join(root, 'src'), join(destination, 'src'), { recursive: true });

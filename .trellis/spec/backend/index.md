@@ -18,6 +18,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
+| [Deployment](./deployment.md) | Compose naming, scoped image updates, release packaging | Implemented |
 | [Logging Guidelines](./logging-guidelines.md) | Request metadata, bounded message previews, legacy records | Implemented |
 | [OIDC Authentication](./oidc-authentication.md) | Management sessions, SSO settings, provider validation | Implemented |
 

@@ -5,3 +5,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+
+  watchtower:
+    profiles: [auto-update]

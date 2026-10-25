@@ -37,7 +37,7 @@ Docker Compose 和普通 Node 均可部署。
 /data/platform2api/cnb2api-panel/
 ```
 
-从仓库下载 `compose.yaml` 和 `.env.example`。
+从仓库下载 `docker-compose.yaml` 和 `.env.example`。
 将这两个文件放入项目目录。
 首次部署时，复制配置模板。
 
@@ -119,15 +119,75 @@ Compose 将宿主机的 `./data` 挂载到 `/app/data`。
 
 ```text
 cnb2api-panel/
-├── compose.yaml
+├── docker-compose.yaml
 ├── .env
 └── data/
     ├── panel.json
     └── master.key
 ```
 
-每次更新都运行 `pull` 和 `up -d`。
+手动更新时，运行 `pull` 和 `up -d`。
 更新无需替换 `.env` 和 `data/`。
+
+### 自动更新镜像
+
+默认配置同时启动 Watchtower。
+本项目使用仍在维护的 `nickfedor/watchtower` 分支。
+Watchtower 每 10 分钟检查一次面板镜像。
+镜像标签内容变化后，它拉取镜像并重建面板容器。
+更新后，它清理替换下来的旧镜像。
+它只更新同一个 Compose 项目内带启用标签的容器。
+它不会更新自身。
+
+面板继续使用原来的环境变量和数据挂载。
+更新会短暂中断请求，登录会话也会失效。
+修改 `.env` 后，仍需运行 `docker compose up -d`。
+Watchtower 通过 Docker socket 管理容器。
+
+自动跟随正式版时，保持以下镜像配置。
+
+```dotenv
+PANEL_IMAGE=docker.cnb.cool/azurekiln/cnb2api-panel:latest
+WATCHTOWER_POLL_INTERVAL=600
+```
+
+检查间隔以秒为单位。
+固定版本标签不会自动切换到另一个版本标签。
+代码推送后，发布新正式版才会更新 `latest`。
+
+查看自动更新日志。
+
+```bash
+docker compose logs --tail=100 watchtower
+```
+
+暂停自动更新。
+
+```bash
+docker compose stop watchtower
+```
+
+重新运行 `docker compose up -d` 可恢复自动更新。
+
+### 迁移 Compose 文件名
+
+`compose.yaml` 是 Docker 当前推荐的文件名。
+`docker-compose.yaml` 是兼容名称。
+本项目统一使用后者。
+两种文件名都使用 `docker compose` 命令。
+
+已有部署下载新配置后，删除旧的 `compose.yaml`。
+如果保留两份，Compose 会优先读取 `compose.yaml`。
+若旧的 `compose.override.yaml` 只用于 Watchtower，也请删除。
+其他自定义覆盖配置应先合并。
+本地构建用户同时替换旧的 `compose.build.yaml`。
+保留原 `.env` 和 `data/`。
+然后启动更新后的配置。
+
+```bash
+docker compose up -d --pull always
+docker compose logs --tail=100 watchtower
+```
 
 ### 从源码或发布包构建镜像
 
@@ -150,11 +210,12 @@ tar -xzf /tmp/cnb2api-panel-v1.0.0-20261025.tar.gz -C /data/platform2api
 
 ```bash
 cd /data/platform2api/cnb2api-panel
-docker compose -f compose.yaml -f compose.build.yaml up -d --build
+docker compose -f docker-compose.yaml -f docker-compose.build.yaml up -d --build
 ```
 
 此命令使用本地镜像 `cnb2api-panel:local`。
 本地构建不能删除源码或 `Dockerfile`。
+本地构建配置默认关闭 Watchtower 和面板自动更新。
 
 ### 普通 Node
 
@@ -528,7 +589,7 @@ data/master.key
 普通 Node 需同步修改绝对数据路径。
 Docker 继续使用 `/app/data` 容器路径。
 
-使用远程镜像时，保留 `compose.yaml`、`.env` 和 `data/`。
+使用远程镜像时，保留 `docker-compose.yaml`、`.env` 和 `data/`。
 拉取镜像后，更新容器。
 
 ```bash
@@ -542,7 +603,7 @@ docker compose up -d
 Docker 直接使用包内的 `web/dist`。
 
 ```bash
-docker compose -f compose.yaml -f compose.build.yaml up -d --build
+docker compose -f docker-compose.yaml -f docker-compose.build.yaml up -d --build
 ```
 
 普通 Node 更新后重新运行 `npm start`。
@@ -576,8 +637,8 @@ cnb2api-panel/
 ├── test/
 ├── scripts/package.mjs
 ├── Dockerfile
-├── compose.yaml
-├── compose.build.yaml
+├── docker-compose.yaml
+├── docker-compose.build.yaml
 ├── .env.example
 └── nginx.conf
 ```
@@ -655,7 +716,7 @@ dist/
 
 ### GitHub 与 CNB 自动构建
 
-GitHub 使用 `.github/workflows/test.yml`。
+GitHub 使用 `.github/workflows/build-and-release.yml`。
 push 和 PR 均触发测试与构建。
 验证包括后端测试、浏览器测试和前端构建。
 验证成功后，工作流上传发布包和 `.sha256` 文件。
