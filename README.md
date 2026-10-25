@@ -85,7 +85,7 @@ docker.cnb.cool/azurekiln/cnb2api-panel:latest
 需要固定版本时，在 `.env` 中配置镜像。
 
 ```dotenv
-PANEL_IMAGE=docker.cnb.cool/azurekiln/cnb2api-panel:v1.0.1
+PANEL_IMAGE=docker.cnb.cool/azurekiln/cnb2api-panel:v1.0.2
 ```
 
 GHCR 镜像也可通过 `PANEL_IMAGE` 指定。
@@ -742,45 +742,51 @@ Release 包含发布包和 `.sha256` 文件。
 CNB 镜像使用以下地址。
 
 ```text
-docker.cnb.cool/azurekiln/cnb2api-panel:v1.0.1
+docker.cnb.cool/azurekiln/cnb2api-panel:v1.0.2
 ```
 
 GitHub 镜像发布到 GHCR。
 
 ```text
-ghcr.io/azurekiln2333/cnb2api-panel:v1.0.1
+ghcr.io/azurekiln2333/cnb2api-panel:v1.0.2
 ```
 
 代码更新后，发布新版本标签才会更新镜像。
 
-### 同步两个远程与发布版本
+### 同步远程与发布版本
 
 GitHub 远程名为 `origin`。
-首次同步前，添加 CNB 远程。
+CNB 远程名为 `cnb`。
+GitLab 远程名为 `gitlab`。
+首次同步前，添加其他远程。
 
 ```bash
 git remote add cnb https://cnb.cool/azurekiln/cnb2api-panel.git
+git remote add gitlab https://gitlab.com/azurekiln-team/cnb2api-panel.git
 ```
 
-提交代码后，分别推送两个远程。
+提交代码后，分别推送三个远程。
 
 ```bash
 git push origin main
 git push cnb main
+git push gitlab main
 ```
 
 发布前，更新 `package.json` 中的版本号。
 提交修改。
-再将 `main` 推送到两个远程。
-版本 `1.0.0` 使用以下标签。
+再将 `main` 推送到三个远程。
+版本 `1.0.2` 使用以下标签。
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
-git push cnb v1.0.0
+git tag -a v1.0.2 -m "Release v1.0.2"
+git push origin v1.0.2
+git push cnb v1.0.2
+git push gitlab v1.0.2
 ```
 
-两端接收标签后各自构建并发布。
+GitHub 和 CNB 接收标签后各自构建并发布。
+GitLab 保存相同的代码和版本标签。
 
 ## 许可证
 
