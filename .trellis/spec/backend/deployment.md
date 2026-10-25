@@ -30,7 +30,7 @@ Run the packaging script and inspect the archive when changing deployment
 filenames. Packages must include both configurations and exclude `.env` and data.
 
 Synchronize `main` and release tags to `origin` (GitHub), `cnb`, and `gitlab`
-(`https://gitlab.com/azurekiln-team/cnb2api-panel.git`). Release tags must match
+(`git@gitlab.com:azurekiln-team/cnb2api-panel.git`, using SSH). Release tags must match
 the root package version. GitHub and CNB tags trigger image and release builds;
 GitLab currently mirrors the source and tags. Preserve existing remote history
 when connecting a new mirror instead of force-pushing over its initial commit.

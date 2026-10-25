@@ -762,7 +762,7 @@ GitLab 远程名为 `gitlab`。
 
 ```bash
 git remote add cnb https://cnb.cool/azurekiln/cnb2api-panel.git
-git remote add gitlab https://gitlab.com/azurekiln-team/cnb2api-panel.git
+git remote add gitlab git@gitlab.com:azurekiln-team/cnb2api-panel.git
 ```
 
 提交代码后，分别推送三个远程。
