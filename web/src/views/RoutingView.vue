@@ -35,7 +35,7 @@ const strategies = [
     title: '加权轮询',
     english: 'WEIGHTED ROUND ROBIN',
     icon: Scale,
-    description: '按权重平滑分配请求，让多个账号共同承担流量。',
+    description: '按权重分配新会话，让多个账号共同承担流量。',
     tag: '适合日常使用',
   },
   {
@@ -43,7 +43,7 @@ const strategies = [
     title: '最少连接',
     english: 'LEAST CONNECTIONS',
     icon: ArrowDownUp,
-    description: '优先选择当前并发相对权重最低的工作区。',
+    description: '新会话优先选择当前并发相对权重最低的工作区。',
     tag: '适合长连接',
   },
   {
@@ -116,6 +116,19 @@ async function save() {
           <p>{{ strategy.description }}</p>
           <span class="strategy-tag">{{ strategy.tag }}</span>
         </button>
+      </div>
+      <div class="affinity-settings">
+        <label class="affinity-toggle">
+          <input v-model="form.sessionAffinity" type="checkbox" />
+          <span
+            ><strong>会话粘性</strong
+            ><small>同一会话优先沿用原账号，减少切换对上游缓存的影响。</small></span
+          >
+        </label>
+        <p class="subtle">
+          优先识别会话 ID。没有 ID 时，匹配系统提示和首条用户消息。绑定空闲 1 小时后失效。
+        </p>
+        <p class="subtle">账号不可用或优先级改变时重新分配。关闭后，每次请求都按所选策略分配。</p>
       </div>
     </section>
     <div class="routing-settings-grid">

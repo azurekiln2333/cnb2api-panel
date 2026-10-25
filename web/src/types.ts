@@ -84,6 +84,7 @@ export interface Account {
 }
 export interface Settings {
   strategy: 'weighted' | 'least-connections' | 'failover'
+  sessionAffinity: boolean
   maxAttempts: number
   cooldownSeconds: number
   healthIntervalSeconds: number

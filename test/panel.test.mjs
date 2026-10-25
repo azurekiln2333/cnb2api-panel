@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -110,11 +111,19 @@ async function account(app, upstream, fields = {}) {
   return data;
 }
 
-const completion = (app) =>
+const completion = (
+  app,
+  { session = randomUUID(), data = {}, headers = {} } = {},
+) =>
   app.call('/v1/chat/completions', {
     method: 'POST',
     auth: GATEWAY,
-    data: { model: 'test-model', messages: [{ role: 'user', content: 'hi' }] },
+    headers: { ...(session ? { 'x-session-id': session } : {}), ...headers },
+    data: {
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      ...data,
+    },
   });
 
 test('account secrets survive restart encrypted, remain hidden in reads, and edits preserve blank credentials', async (t) => {
@@ -578,6 +587,224 @@ test('weighted routing distributes 2:1, replaces client authorization, and recor
     new Store(app.directory).state.hourly.reduce((n, h) => n + h.requests, 0),
     6,
   );
+});
+
+test('session affinity keeps subsequent turns on their account and forwards payloads unchanged', async (t) => {
+  const app = await fixture(t);
+  const a = await worker(t, 'a');
+  const b = await worker(t, 'b');
+  await account(app, a);
+  await account(app, b);
+  const first = await (
+    await completion(app, { session: 'conversation-a' })
+  ).json();
+  assert.equal(first.worker, 'a');
+  assert.equal(
+    (await (await completion(app, { session: 'conversation-b' })).json())
+      .worker,
+    'b',
+  );
+  const data = {
+    model: 'test-model',
+    messages: [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'answer' },
+      { role: 'user', content: 'continue' },
+    ],
+    metadata: { user_id: 'unchanged-user' },
+    temperature: 0.7,
+  };
+  assert.equal(
+    (await (await completion(app, { session: 'conversation-a', data })).json())
+      .worker,
+    'a',
+  );
+  assert.deepEqual(a.calls.at(-1).payload, data);
+  const cors = await app.call('/v1/chat/completions', { method: 'OPTIONS' });
+  assert.match(
+    cors.headers.get('access-control-allow-headers'),
+    /x-session-id/,
+  );
+  assert.match(
+    cors.headers.get('access-control-allow-headers'),
+    /x-conversation-id/,
+  );
+});
+
+test('requests without session IDs reuse the first-message fingerprint across turns', async (t) => {
+  const app = await fixture(t);
+  const a = await worker(t, 'a');
+  const b = await worker(t, 'b');
+  await account(app, a);
+  await account(app, b);
+  assert.equal(
+    (await (await completion(app, { session: null })).json()).worker,
+    'a',
+  );
+  const data = {
+    messages: [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'answer' },
+      { role: 'user', content: 'continue' },
+    ],
+  };
+  assert.equal(
+    (await (await completion(app, { session: null, data })).json()).worker,
+    'a',
+  );
+  assert.equal(
+    (
+      await (
+        await completion(app, {
+          session: null,
+          data: {
+            messages: [{ role: 'user', content: 'another conversation' }],
+          },
+        })
+      ).json()
+    ).worker,
+    'b',
+  );
+});
+
+test('concurrent requests for a new session bind before the upstream responds', async (t) => {
+  const app = await fixture(t);
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  let received;
+  const bothReceived = new Promise((resolve) => {
+    received = resolve;
+  });
+  let count = 0;
+  const handler = (name) => async (_req, res) => {
+    if (++count === 2) received();
+    await held;
+    res.end(JSON.stringify({ worker: name }));
+  };
+  const a = await worker(t, 'a', handler('a'));
+  const b = await worker(t, 'b', handler('b'));
+  await account(app, a);
+  await account(app, b);
+  const requests = [
+    completion(app, { session: 'concurrent' }),
+    completion(app, { session: 'concurrent' }),
+  ];
+  try {
+    await bothReceived;
+  } finally {
+    release();
+  }
+  const results = await Promise.all(
+    requests.map(async (request) => (await (await request).json()).worker),
+  );
+  assert.deepEqual(results, ['a', 'a']);
+});
+
+test('failed sessions rebind and stay with a healthy replacement after same-priority recovery', async (t) => {
+  const app = await fixture(t);
+  let failing = true;
+  const a = await worker(t, 'a', (_req, res) => {
+    res.writeHead(failing ? 429 : 200);
+    res.end(JSON.stringify({ worker: 'a' }));
+  });
+  const b = await worker(t, 'b');
+  const first = await account(app, a);
+  await account(app, b);
+  assert.equal(
+    (await (await completion(app, { session: 'failover' })).json()).worker,
+    'b',
+  );
+  failing = false;
+  await app.pool.probe(first.account.id);
+  assert.equal(
+    (await (await completion(app, { session: 'failover' })).json()).worker,
+    'b',
+  );
+  assert.equal(a.calls.length, 1);
+});
+
+for (const reason of [
+  'disabled',
+  'deleted',
+  'incompatible',
+  'cooling',
+  'unhealthy',
+  'priority',
+]) {
+  test(`session affinity rechecks account eligibility: ${reason}`, async (t) => {
+    const app = await fixture(t);
+    const a = await worker(t, 'a');
+    const b = await worker(t, 'b');
+    const first = (await account(app, a)).account;
+    const second = (await account(app, b)).account;
+    assert.equal(
+      (await (await completion(app, { session: reason })).json()).worker,
+      'a',
+    );
+    if (reason === 'deleted') app.store.remove(first.id);
+    else if (reason === 'priority')
+      app.store.patch(second.id, { priority: 10 });
+    else
+      app.store.patch(first.id, {
+        ...{
+          disabled: { enabled: false },
+          incompatible: { models: ['other-model'] },
+          cooling: {
+            cooldownUntil: new Date(Date.now() + 60000).toISOString(),
+          },
+          unhealthy: { status: 'unhealthy' },
+        }[reason],
+      });
+    assert.equal(
+      (await (await completion(app, { session: reason })).json()).worker,
+      'b',
+    );
+  });
+}
+
+test('disabling session affinity restores per-request balancing and persists across restart', async (t) => {
+  const app = await fixture(t);
+  const a = await worker(t, 'a');
+  const b = await worker(t, 'b');
+  await account(app, a);
+  await account(app, b);
+  assert.equal(
+    (await (await completion(app, { session: 'toggle' })).json()).worker,
+    'a',
+  );
+  const invalid = await app.call('/api/settings', {
+    method: 'PATCH',
+    data: { sessionAffinity: 'false' },
+  });
+  assert.equal(invalid.status, 400);
+  const saved = await app.call('/api/settings', {
+    method: 'PATCH',
+    data: { sessionAffinity: false },
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(
+    (await (await completion(app, { session: 'toggle' })).json()).worker,
+    'b',
+  );
+  assert.equal(
+    (await (await completion(app, { session: 'toggle' })).json()).worker,
+    'a',
+  );
+  assert.equal(new Store(app.directory).state.settings.sessionAffinity, false);
+});
+
+test('existing saved settings receive new defaults while preserving configured values', async (t) => {
+  const app = await fixture(t);
+  app.store.settings({ strategy: 'failover', maxAttempts: 5 });
+  const saved = JSON.parse(readFileSync(app.store.file, 'utf8'));
+  delete saved.settings.sessionAffinity;
+  writeFileSync(app.store.file, JSON.stringify(saved));
+  const restored = new Store(app.directory);
+  assert.equal(restored.state.settings.sessionAffinity, true);
+  assert.equal(restored.state.settings.strategy, 'failover');
+  assert.equal(restored.state.settings.maxAttempts, 5);
 });
 
 test('429 triggers cooldown and switches to a lower priority account without leaking upstream error bodies', async (t) => {

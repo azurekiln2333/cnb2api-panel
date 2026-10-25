@@ -28,6 +28,8 @@
   --surface: #fff;
   --surface-subtle: #fafbfd;
   --sidebar: #f2f4f7;
+  --nav-active-bg: #cfddf2;
+  --nav-active-border: #9fb5d6;
   --text: #232b3a;
   --muted: #7d8798;
   --secondary: #596477;
@@ -63,6 +65,8 @@
   --surface: #1b2029;
   --surface-subtle: #1e242e;
   --sidebar: #14181f;
+  --nav-active-bg: #b8cceb;
+  --nav-active-border: #829dc6;
   --text: #e1e7f0;
   --muted: #8590a1;
   --secondary: #abb5c5;
@@ -397,6 +401,7 @@ button.button,
 }
 .nav-caption {
   font-size: 11px;
+  font-weight: 750;
   color: var(--text);
   padding: 0 8px;
   margin: 12px 0 6px;
@@ -426,7 +431,7 @@ button.button,
   border-radius: var(--radius-sm);
   color: var(--text);
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 650;
 }
 .main-nav > a > svg {
   stroke-width: 1.65;
@@ -435,11 +440,16 @@ button.button,
   background: var(--surface-subtle);
 }
 .main-nav > a.active {
-  background: var(--primary-soft);
-  color: var(--text);
+  background: var(--nav-active-bg);
+  color: #000;
+  font-weight: 750;
+  box-shadow:
+    inset 3px 0 0 #000,
+    inset 0 0 0 1px var(--nav-active-border);
 }
 .main-nav > a.active > svg {
-  color: var(--primary);
+  color: inherit;
+  stroke-width: 2;
 }
 .main-nav > a > small {
   margin-left: auto;
@@ -449,6 +459,10 @@ button.button,
   border-radius: var(--radius-xs);
   line-height: 1.3;
   color: var(--text);
+}
+.main-nav > a.active > small {
+  color: inherit;
+  background: #ffffffa6;
 }
 .sidebar-bottom {
   margin-top: auto;
@@ -1821,6 +1835,32 @@ button.button,
   color: var(--primary);
   background: var(--primary-soft);
   border-color: transparent;
+}
+.affinity-settings {
+  margin: 0 23px 23px;
+  padding: 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
+}
+.affinity-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.affinity-toggle input {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+.affinity-toggle small {
+  display: block;
+  margin-top: 4px;
+  color: var(--secondary);
+  line-height: 1.7;
+}
+.affinity-settings > p {
+  margin: 10px 0 0 26px;
+  line-height: 1.7;
 }
 .routing-settings-grid {
   display: grid;

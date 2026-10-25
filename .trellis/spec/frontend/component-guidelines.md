@@ -38,6 +38,12 @@ Questions to answer:
 
 ## Styling Patterns
 
+Sidebar captions and navigation labels use explicit bold weights. Active links
+use a darker blue background, an inset border and a black left marker. Selected
+text and SVG icons inherit the same black color in both themes; the dark theme
+uses a light selected background to keep that color readable. Retain these cues
+in collapsed and mobile navigation. Verify changes in browser screenshots.
+
 <!-- How styles are applied (CSS modules, styled-components, Tailwind, etc.) -->
 
 (To be filled by the team)

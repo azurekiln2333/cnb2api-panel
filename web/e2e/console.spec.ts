@@ -1,4 +1,7 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
+import { readFileSync } from 'node:fs'
+
+const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
 
 const ADMIN = 'browser-test-admin-key'
 async function login(page: Page) {
@@ -33,7 +36,7 @@ async function seed(request: APIRequestContext) {
     created.push(account)
     await request.post(`/api/accounts/${account.id}/probe`, { data: {} })
   }
-  await request.patch('/api/settings', { data: { strategy: 'weighted' } })
+  await request.patch('/api/settings', { data: { strategy: 'weighted', sessionAffinity: true } })
   return created
 }
 
@@ -754,6 +757,51 @@ test('account table filters groups and statuses, enables disabled accounts and r
   expect(errors).toEqual([])
 })
 
+test('release version and selected sidebar remain distinct in light, dark, collapsed and mobile views', async ({
+  page,
+  request,
+}) => {
+  await seed(request)
+  await login(page)
+  await expect(page.locator('.footer-product small')).toHaveText(`v${version}`)
+  const selected = page.locator('.main-nav > a[aria-current="page"]')
+  const checkSelected = async () => {
+    await expect(selected).toHaveCSS('color', 'rgb(0, 0, 0)')
+    await expect(selected.locator('svg')).toHaveCSS('color', 'rgb(0, 0, 0)')
+    await expect(selected.locator('small')).toHaveCSS('color', 'rgb(0, 0, 0)')
+    const styles = await selected.evaluate((link) => {
+      const css = getComputedStyle(link)
+      const sidebar = getComputedStyle(link.closest('.sidebar')!)
+      return {
+        background: css.backgroundColor,
+        sidebar: sidebar.backgroundColor,
+        weight: Number(css.fontWeight),
+        shadow: css.boxShadow,
+      }
+    })
+    expect(styles.background).not.toBe(styles.sidebar)
+    expect(styles.background).not.toBe('rgba(0, 0, 0, 0)')
+    expect(styles.weight).toBeGreaterThanOrEqual(700)
+    expect(styles.shadow).not.toBe('none')
+  }
+  await expect(page.locator('.nav-caption').first()).toHaveCSS('font-weight', '750')
+  await checkSelected()
+  await page.screenshot({ path: '../test-results/sidebar-selected-light.png', fullPage: true })
+  await page.getByRole('button', { name: '切换深色主题' }).click()
+  await checkSelected()
+  await page.screenshot({ path: '../test-results/sidebar-selected-dark.png', fullPage: true })
+  await page.getByRole('button', { name: '收起侧栏' }).click()
+  await checkSelected()
+  await page.screenshot({ path: '../test-results/sidebar-selected-collapsed.png', fullPage: true })
+  await page.getByRole('button', { name: '展开侧栏' }).click()
+  await page.getByRole('button', { name: '切换浅色主题' }).click()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('button', { name: '展开导航' }).click()
+  await expect(page.locator('.sidebar')).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)')
+  await checkSelected()
+  await page.screenshot({ path: '../test-results/sidebar-selected-mobile.png', fullPage: true })
+})
+
 test('routing changes persist and access examples match each protocol', async ({
   page,
   request,
@@ -761,15 +809,23 @@ test('routing changes persist and access examples match each protocol', async ({
   await seed(request)
   await login(page)
   await page.getByRole('link', { name: '路由策略', exact: true }).click()
+  await expect(page.getByRole('checkbox', { name: /会话粘性/ })).toBeChecked()
+  await page.getByRole('checkbox', { name: /会话粘性/ }).uncheck()
   await page.getByRole('radio', { name: /最少连接/ }).click()
   await page.getByRole('button', { name: '保存配置' }).click()
   await expect(page.getByText('路由配置已保存并即时生效')).toBeVisible()
   await page.reload()
+  await expect(page.getByRole('checkbox', { name: /会话粘性/ })).not.toBeChecked()
   await expect(page.getByRole('radio', { name: /最少连接/ })).toHaveAttribute(
     'aria-checked',
     'true',
   )
   await page.screenshot({ path: '../test-results/routing-desktop.png', fullPage: true })
+  await page.getByRole('checkbox', { name: /会话粘性/ }).check()
+  await page.getByRole('button', { name: '保存配置' }).click()
+  await expect
+    .poll(async () => (await (await request.get('/api/overview')).json()).settings.sessionAffinity)
+    .toBe(true)
   await page.getByRole('link', { name: '接入配置', exact: true }).click()
   await expect(page.locator('pre')).toContainText('/v1/chat/completions')
   await page.getByRole('tab', { name: 'Claude Code' }).click()

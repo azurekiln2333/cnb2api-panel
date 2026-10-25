@@ -21,6 +21,7 @@ const name = 'cnb2api-panel';
 // Exclude both from the release build context so Docker uses this package's dist.
 const releaseDockerignore = [
   '**',
+  '!package.json',
   '!src/',
   '!src/*.mjs',
   '!web/',

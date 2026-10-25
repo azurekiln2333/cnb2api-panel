@@ -5,6 +5,7 @@ import { InputError, normalizeEndpoint, publicAccount } from "./store.mjs";
 import { emptyTokenUsage, TokenUsageCapture } from "./token-usage.mjs";
 import { WorkerUsageMonitor } from "./worker-usage.mjs";
 import { initialUserMessage } from "./request-details.mjs";
+import { SessionAffinity, sessionKey } from "./session-affinity.mjs";
 
 export const isCooling = (a) =>
   Boolean(a.cooldownUntil && Date.parse(a.cooldownUntil) > Date.now());
@@ -136,6 +137,7 @@ export class Pool {
     this.store = store;
     this.active = new Map();
     this.scores = new Map();
+    this.affinity = new SessionAffinity({ now });
     this.probes = new Map();
     this.wakes = new Map();
     this.lastCycle = 0;
@@ -172,23 +174,36 @@ export class Pool {
     );
   }
 
-  select(model, excluded) {
+  select(model, excluded, affinityKey = null) {
     let candidates = this.eligible(model, excluded);
     if (!candidates.length) return null;
     const highest = Math.max(...candidates.map((a) => a.priority));
     candidates = candidates.filter((a) => a.priority === highest);
+    const bound = this.affinity.get(affinityKey);
+    const preferred = candidates.find((a) => a.id === bound);
+    if (preferred) return preferred;
+    this.affinity.forget(affinityKey);
+    const bind = (chosen) => {
+      this.affinity.bind(affinityKey, chosen.id);
+      return chosen;
+    };
     const strategy = this.store.state.settings.strategy;
     if (strategy === "failover")
-      return candidates.sort(
-        (a, b) => b.weight - a.weight || a.createdAt.localeCompare(b.createdAt),
-      )[0];
+      return bind(
+        candidates.sort(
+          (a, b) =>
+            b.weight - a.weight || a.createdAt.localeCompare(b.createdAt),
+        )[0],
+      );
     if (strategy === "least-connections") {
-      return candidates.sort(
-        (a, b) =>
-          (this.active.get(a.id) || 0) / a.weight -
-            (this.active.get(b.id) || 0) / b.weight ||
-          (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity),
-      )[0];
+      return bind(
+        candidates.sort(
+          (a, b) =>
+            (this.active.get(a.id) || 0) / a.weight -
+              (this.active.get(b.id) || 0) / b.weight ||
+            (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity),
+        )[0],
+      );
     }
     // Smooth weighted round-robin keeps short bursts spread across the pool.
     let chosen;
@@ -200,7 +215,7 @@ export class Pool {
       if (!chosen || score > this.scores.get(chosen.id)) chosen = account;
     }
     this.scores.set(chosen.id, this.scores.get(chosen.id) - total);
-    return chosen;
+    return bind(chosen);
   }
 
   fail(id, reason, status = 502, source) {
@@ -684,6 +699,10 @@ export class Pool {
     const requestId = randomUUID();
     const started = Date.now();
     const requestBody = JSON.stringify(payload);
+    const affinityKey = this.store.state.settings.sessionAffinity
+      ? sessionKey(req.headers, payload)
+      : null;
+    if (!this.store.state.settings.sessionAffinity) this.affinity.clear();
     const initialMessage = initialUserMessage(payload);
     const excluded = new Set();
     const controller = new AbortController();
@@ -706,7 +725,7 @@ export class Pool {
           finalStatus = 499;
           return;
         }
-        const selected = this.select(payload.model, excluded);
+        const selected = this.select(payload.model, excluded, affinityKey);
         if (!selected) break;
         account = selected;
         attempts++;
@@ -739,6 +758,7 @@ export class Pool {
             await response.body?.cancel();
             failureMessage = `工作区返回 HTTP ${response.status}，已进入冷却`;
             this.fail(account.id, failureMessage, response.status, account);
+            this.affinity.forget(affinityKey, account.id);
             this.store.record({
               kind: "failover",
               accountId: account.id,
@@ -807,6 +827,7 @@ export class Pool {
             ? "上游响应中断"
             : "工作区连接失败或超时";
           this.fail(account.id, failureMessage, 502, account);
+          this.affinity.forget(affinityKey, account.id);
           if (res.headersSent) {
             res.destroy();
             return;

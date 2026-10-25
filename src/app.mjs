@@ -372,7 +372,7 @@ export function createPanelServer(options) {
         res.setHeader("Access-Control-Allow-Origin", "*");
         res.setHeader(
           "Access-Control-Allow-Headers",
-          "Authorization, Content-Type, x-api-key, anthropic-version, anthropic-beta",
+          "Authorization, Content-Type, x-api-key, anthropic-version, anthropic-beta, x-session-id, x-conversation-id",
         );
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
         res.setHeader(

@@ -34,3 +34,10 @@ Synchronize `main` and release tags to `origin` (GitHub), `cnb`, and `gitlab`
 the root package version. GitHub and CNB tags trigger image and release builds;
 GitLab currently mirrors the source and tags. Preserve existing remote history
 when connecting a new mirror instead of force-pushing over its initial commit.
+
+The console footer reads the root package version at build time through Vite's
+`__APP_VERSION__` constant. Keep root and console package versions, including the
+console lockfile metadata, aligned. Vite rejects mismatched package versions.
+Docker's console stage and both source/release dockerignore files must admit the
+root package.json. Release archives can still use prebuilt web/dist without the
+console source or dependencies.

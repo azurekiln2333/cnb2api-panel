@@ -2,6 +2,7 @@ ARG NODE_VERSION=26.12.1
 FROM node:${NODE_VERSION}-bookworm-slim AS console
 
 WORKDIR /build
+COPY package.json ./package.json
 COPY web/ ./web/
 # Source checkouts build the console. Release archives already contain web/dist.
 RUN if [ -f web/package-lock.json ]; then \

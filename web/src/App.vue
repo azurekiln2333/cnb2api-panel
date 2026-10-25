@@ -35,6 +35,8 @@ import AccessView from './views/AccessView.vue'
 import RegistrationDialog from './components/RegistrationDialog.vue'
 import ModalShell from './components/ModalShell.vue'
 
+const appVersion = __APP_VERSION__
+
 interface SessionUser {
   name: string
   email: string
@@ -515,7 +517,8 @@ onBeforeUnmount(() => {
         <span
           ><i class="blue-dot" /><span class="footer-gateway">CNB CLOUD GATEWAY</span
           ><span class="footer-dot">·</span
-          ><span class="footer-product">cnb2api <small>v1.0</small></span
+          ><span class="footer-product"
+            >cnb2api <small>v{{ appVersion }}</small></span
           ><span class="footer-dot">·</span
           >{{ overview ? strategyLabels[overview.settings.strategy] : '—' }}</span
         ><button @click="refresh">

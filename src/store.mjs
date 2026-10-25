@@ -23,6 +23,7 @@ export class InputError extends Error {
 
 export const DEFAULT_SETTINGS = {
   strategy: "weighted",
+  sessionAffinity: true,
   maxAttempts: 3,
   cooldownSeconds: 60,
   healthIntervalSeconds: 60,
@@ -301,6 +302,7 @@ export class Store {
         throw new Error("Unsupported panel data version");
       this.state = {
         ...saved,
+        settings: { ...DEFAULT_SETTINGS, ...saved.settings },
         tokenUsage: { ...emptyTokenUsage(), ...saved.tokenUsage },
         tokenUsageStartedAt:
           saved.tokenUsageStartedAt || new Date().toISOString(),
@@ -580,6 +582,11 @@ export class Store {
 
   settings(input) {
     const next = { ...this.state.settings };
+    if (input.sessionAffinity !== undefined) {
+      if (typeof input.sessionAffinity !== "boolean")
+        throw new InputError("会话粘性必须为布尔值");
+      next.sessionAffinity = input.sessionAffinity;
+    }
     if (input.strategy !== undefined) {
       if (
         !["weighted", "least-connections", "failover"].includes(input.strategy)
