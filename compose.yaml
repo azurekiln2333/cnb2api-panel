@@ -1,9 +1,6 @@
 services:
   panel:
-    image: cnb2api-panel:local
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: "${PANEL_IMAGE:-docker.cnb.cool/azurekiln/cnb2api-panel:latest}"
     restart: unless-stopped
     init: true
     environment:

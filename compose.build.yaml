@@ -1,0 +1,7 @@
+services:
+  panel:
+    image: cnb2api-panel:local
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: Dockerfile

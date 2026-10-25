@@ -27,9 +27,9 @@ Docker Compose 和普通 Node 均可部署。
 
 服务器需要 Docker Engine 和 Compose 插件。
 宿主机无需安装 Node。
-源码和发布包均可使用此方式。
-Docker 会构建源码中的前端。
-发布包自带前端构建结果。
+默认配置从 CNB 拉取已构建的镜像。
+服务器无需保留源码和 `Dockerfile`。
+镜像已包含后端、前端和 Node。
 
 把项目放到以下目录。
 
@@ -37,24 +37,17 @@ Docker 会构建源码中的前端。
 /data/platform2api/cnb2api-panel/
 ```
 
-使用发布包时，先上传到服务器。
-同时上传对应的 `.sha256` 文件。
-检查通过后再解压。
-
-```bash
-cd /tmp
-sha256sum -c cnb2api-panel-v1.0.0-20261025.tar.gz.sha256
-mkdir -p /data/platform2api
-tar -xzf /tmp/cnb2api-panel-v1.0.0-20261025.tar.gz -C /data/platform2api
-```
-
-进入目录，复制配置模板。
+从仓库下载 `compose.yaml` 和 `.env.example`。
+将这两个文件放入项目目录。
+首次部署时，复制配置模板。
 
 ```bash
 cd /data/platform2api/cnb2api-panel
 cp .env.example .env
 chmod 600 .env
 ```
+
+已有部署保留原 `.env`，无需复制模板。
 
 运行两次以下命令，分别生成两个密钥。
 
@@ -77,9 +70,26 @@ PANEL_BIND_HOST=127.0.0.1
 启动面板。
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose logs --tail=100 panel
 ```
+
+默认镜像如下。
+
+```text
+docker.cnb.cool/azurekiln/cnb2api-panel:latest
+```
+
+需要固定版本时，在 `.env` 中配置镜像。
+
+```dotenv
+PANEL_IMAGE=docker.cnb.cool/azurekiln/cnb2api-panel:v1.0.1
+```
+
+GHCR 镜像也可通过 `PANEL_IMAGE` 指定。
+使用前确认镜像已公开或完成仓库登录。
+切换镜像后，重新运行拉取和启动命令。
 
 默认端口映射为 `127.0.0.1:9002:9002`。
 宿主机 Nginx 可连接此端口。
@@ -94,6 +104,47 @@ Compose 将宿主机的 `./data` 挂载到 `/app/data`。
 ├── panel.json
 └── master.key
 ```
+
+镜像启动成功后，目录只需保留以下内容。
+
+```text
+cnb2api-panel/
+├── compose.yaml
+├── .env
+└── data/
+    ├── panel.json
+    └── master.key
+```
+
+每次更新都运行 `pull` 和 `up -d`。
+更新无需替换 `.env` 和 `data/`。
+
+### 从源码或发布包构建镜像
+
+本地构建需要保留源码或完整发布包。
+源码中的前端由 Docker 构建。
+发布包自带前端构建结果。
+
+使用发布包时，先上传到服务器。
+同时上传对应的 `.sha256` 文件。
+检查通过后再解压。
+
+```bash
+cd /tmp
+sha256sum -c cnb2api-panel-v1.0.0-20261025.tar.gz.sha256
+mkdir -p /data/platform2api
+tar -xzf /tmp/cnb2api-panel-v1.0.0-20261025.tar.gz -C /data/platform2api
+```
+
+添加本地构建配置后启动。
+
+```bash
+cd /data/platform2api/cnb2api-panel
+docker compose -f compose.yaml -f compose.build.yaml up -d --build
+```
+
+此命令使用本地镜像 `cnb2api-panel:local`。
+本地构建不能删除源码或 `Dockerfile`。
 
 ### 普通 Node
 
@@ -449,14 +500,21 @@ data/master.key
 普通 Node 需同步修改绝对数据路径。
 Docker 继续使用 `/app/data` 容器路径。
 
-更新程序时保留 `.env` 和 `data/`。
-替换程序文件后，重新构建并启动。
+使用远程镜像时，保留 `compose.yaml`、`.env` 和 `data/`。
+拉取镜像后，更新容器。
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+本地构建时，替换程序文件。
 解压发布包时，务必覆盖隐藏文件 `.dockerignore`。
 发布包会排除残留的旧前端源码。
 Docker 直接使用包内的 `web/dist`。
 
 ```bash
-docker compose up -d --build
+docker compose -f compose.yaml -f compose.build.yaml up -d --build
 ```
 
 普通 Node 更新后重新运行 `npm start`。
@@ -467,8 +525,9 @@ docker compose up -d --build
 curl -fsS http://127.0.0.1:9002/ | grep '/assets/index-'
 ```
 
-本机资源仍旧时，检查解压路径和 `.dockerignore`。
-同时检查自定义 Compose 的构建目录和挂载目录。
+远程镜像仍旧时，检查 `PANEL_IMAGE` 和拉取结果。
+本地构建仍旧时，检查解压路径和 `.dockerignore`。
+同时检查自定义 Compose 的镜像和挂载目录。
 本机已更新而域名未更新时，检查 CDN 和反向代理缓存。
 
 ## 本地开发与发布包
@@ -490,6 +549,7 @@ cnb2api-panel/
 ├── scripts/package.mjs
 ├── Dockerfile
 ├── compose.yaml
+├── compose.build.yaml
 ├── .env.example
 └── nginx.conf
 ```
@@ -586,6 +646,23 @@ CNB 使用根目录的 `.cnb.yml`。
 版本检查和测试通过后，两端发布 Release。
 Release 包含发布包和 `.sha256` 文件。
 只推送 `main` 不会发布 Release。
+
+版本标签还会触发两端的镜像发布。
+正式版镜像同时更新版本标签和 `latest`。
+预发布镜像只更新版本标签。
+CNB 镜像使用以下地址。
+
+```text
+docker.cnb.cool/azurekiln/cnb2api-panel:v1.0.1
+```
+
+GitHub 镜像发布到 GHCR。
+
+```text
+ghcr.io/azurekiln2333/cnb2api-panel:v1.0.1
+```
+
+代码更新后，发布新版本标签才会更新镜像。
 
 ### 同步两个远程与发布版本
 
