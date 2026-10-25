@@ -202,9 +202,12 @@ test("interrupted log appends recover partial UTF-8 writes without duplication o
   store.storage.apply = (operations) => {
     originalApply(operations.filter((op) => op.type === "replace"));
     const append = operations.find((op) => op.type === "append");
+    const bytes = Buffer.from(append.text, "utf8");
+    const emojiOffset = bytes.indexOf(Buffer.from("😀", "utf8"));
+    assert.ok(emojiOffset >= 0);
     appendFileSync(
       join(store.directory, append.file),
-      Buffer.from(append.text).subarray(0, 17),
+      bytes.subarray(0, emojiOffset + 2),
     );
     throw new Error("interrupted append");
   };

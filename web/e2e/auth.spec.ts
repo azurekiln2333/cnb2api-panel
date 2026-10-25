@@ -1,4 +1,5 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { readFileSync } from 'node:fs'
 import {
   OIDC_ISSUER,
   OIDC_CLIENT_ID,
@@ -7,6 +8,7 @@ import {
   OIDC_AVATAR_URL,
 } from './support/oidc.mjs'
 
+const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
 const ADMIN = 'browser-test-admin-key'
 
 async function keyLogin(page: Page) {
@@ -76,7 +78,7 @@ test('compact shell removes workspace clutter and exposes user identity and the 
   await expect(page.getByRole('menuitem', { name: '退出登录', exact: true })).toBeVisible()
   await page.screenshot({ path: '../test-results/compact-shell-desktop.png', fullPage: true })
   await page.getByRole('button', { name: '用户菜单', exact: true }).click()
-  await expect(page.locator('.page-footer')).toContainText('cnb2api v1.0')
+  await expect(page.locator('.page-footer')).toContainText(`cnb2api v${version}`)
   await page.getByRole('button', { name: '收起侧栏', exact: true }).click()
   await expect.poll(async () => (await page.locator('.sidebar').boundingBox())?.width).toBe(64)
   await expect(page.getByRole('heading', { name: '账号池' })).toBeInViewport()

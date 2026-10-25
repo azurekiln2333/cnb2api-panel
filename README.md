@@ -861,13 +861,13 @@ git push gitlab main
 同时更新 `web/package-lock.json` 的包版本。
 提交修改。
 再将 `main` 推送到三个远程。
-版本 `1.1.0` 使用以下标签。
+版本 `1.1.1` 使用以下标签。
 
 ```bash
-git tag -a v1.1.0 -m "Release v1.1.0"
-git push origin v1.1.0
-git push cnb v1.1.0
-git push gitlab v1.1.0
+git tag -a v1.1.1 -m "Release v1.1.1"
+git push origin v1.1.1
+git push cnb v1.1.1
+git push gitlab v1.1.1
 ```
 
 GitHub 和 CNB 接收标签后各自构建并发布。
