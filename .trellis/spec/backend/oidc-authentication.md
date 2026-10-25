@@ -22,6 +22,9 @@ GET returns `hasClientSecret`, never the secret.
 The secret uses existing AES-256-GCM storage in `panel.json` and `master.key`.
 `PANEL_SSO_ENABLED`, `PANEL_KEY_LOGIN_ENABLED`, and `PANEL_OIDC_*` bootstrap
 unconfigured installations. Saved settings take precedence.
+The default `.env.example` omits these optional bootstrap variables.
+Configure SSO in the console and retain `data/panel.json` and `data/master.key`.
+Removing bootstrap variables does not disable saved SSO settings.
 
 ## Validation & Error Matrix
 

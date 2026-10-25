@@ -61,6 +61,7 @@ openssl rand -hex 24
 PANEL_ADMIN_KEY=replace-with-first-random-key
 GATEWAY_KEY=replace-with-second-random-key
 PANEL_PUBLIC_URL=https://ai.example.com
+PANEL_PORT=9002
 PANEL_BIND_HOST=127.0.0.1
 ```
 
@@ -92,8 +93,17 @@ GHCR 镜像也可通过 `PANEL_IMAGE` 指定。
 切换镜像后，重新运行拉取和启动命令。
 
 默认端口映射为 `127.0.0.1:9002:9002`。
+宿主机端口由 `.env` 的 `PANEL_PORT` 指定。
+容器内部端口固定为 `9002`。
+例如，`PANEL_PORT=19002` 映射为 `127.0.0.1:19002:9002`。
 宿主机 Nginx 可连接此端口。
 需要直接从外部访问时，配置 `PANEL_BIND_HOST=0.0.0.0`。
+
+Compose 通过 `env_file` 将 `.env` 注入容器。
+密钥和域名无需在 Compose 中重复声明。
+`environment` 仅固定容器的监听地址、端口和数据目录。
+这些固定值会覆盖 `.env` 中的同名变量。
+普通 Node 仍使用 `.env` 中的原值。
 
 Compose 将宿主机的 `./data` 挂载到 `/app/data`。
 容器内固定使用 `PANEL_DATA_DIR=/app/data`。
@@ -269,8 +279,26 @@ https://ai.example.com/api/auth/oidc/callback
 后端也会拒绝新的 Key 登录请求。
 关闭 Key 登录不会改变 API 的网关密钥。
 
-也可通过 `.env` 提供初始 SSO 配置。
-配置项见 `.env.example` 中的 `PANEL_OIDC_*`。
+面板将 SSO 配置保存到 `data/panel.json`。
+`.env` 无需重复填写 SSO 参数。
+已有部署可删除 `.env` 中的 SSO 变量。
+删除这些变量不会关闭已保存的 SSO。
+
+首次部署也可通过 `.env` 初始化 SSO。
+以下配置仅用于尚未配置 SSO 的面板。
+
+```dotenv
+PANEL_SSO_ENABLED=true
+PANEL_KEY_LOGIN_ENABLED=true
+PANEL_OIDC_ISSUER=https://login.example.com
+PANEL_OIDC_CLIENT_ID=replace-with-client-id
+PANEL_OIDC_CLIENT_SECRET=replace-with-client-secret
+PANEL_OIDC_SCOPES=openid profile email
+PANEL_OIDC_PROVIDER_NAME=SSO
+PANEL_OIDC_ALLOWED_SUBJECTS=replace-with-admin-user-id
+PANEL_OIDC_ALLOWED_EMAILS=
+```
+
 面板保存的 SSO 配置优先于初始环境变量。
 `PANEL_PUBLIC_URL` 应填写面板的公开 HTTPS 地址。
 SSO 客户端密钥使用现有 `master.key` 加密保存。
