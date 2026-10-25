@@ -22,7 +22,13 @@ const count = (value) =>
 const first = (...values) => values.map(count).find((n) => n !== null) ?? null;
 
 export function normalizeTokenUsage(usage) {
-  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
+  if (
+    !usage ||
+    typeof usage !== "object" ||
+    Array.isArray(usage) ||
+    usage.usage_estimated === true
+  )
+    return null;
   const anthropic =
     "input_tokens" in usage ||
     "output_tokens" in usage ||

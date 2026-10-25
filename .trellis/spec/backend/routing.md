@@ -22,4 +22,11 @@ higher-priority tier does. Never replay a response after headers have been sent.
 
 Tests must distinguish independent sessions from subsequent turns. Cover weighted
 distribution, concurrency, failover, eligibility changes, disabling affinity,
-settings migration, bounded storage, expiry, unchanged payloads and streaming.
+settings migration, bounded storage, expiry, preserved payload fields and streaming.
+
+For `/v1/chat/completions`, merge `stream_options.include_usage: true` into the
+forwarded body while retaining other options and all generation fields. CNB
+workers force upstream streaming even for non-streaming clients, so request
+usage in both modes. Other routes keep the original body. Derive affinity from
+the original payload, and keep response bytes transparent. Never recover local
+usage by subtracting workspace snapshots; concurrent/direct traffic is ambiguous.

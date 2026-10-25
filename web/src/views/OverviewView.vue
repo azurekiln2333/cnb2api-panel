@@ -14,7 +14,7 @@ import {
 } from '@lucide/vue'
 import { number, compact, useConsole, accountState, time } from '../console'
 import { api } from '../api'
-import type { Page, UsageComparison } from '../types'
+import type { Page, TokenTotals, UsageComparison } from '../types'
 import { summarizeQuota } from '../quota'
 import StatusBadge from '../components/StatusBadge.vue'
 const emit = defineEmits<{ navigate: [page: Page] }>()
@@ -24,6 +24,10 @@ const tokenPeriod = ref<'today' | 'total'>('today')
 const credits = computed(() => summarizeQuota(accounts.value))
 const tokens = computed(() => overview.value?.stats.tokenUsage?.[tokenPeriod.value])
 const todayTokens = computed(() => overview.value?.stats.tokenUsage?.today)
+const unreported = (usage: TokenTotals | null | undefined) =>
+  !!usage && !usage.reportedRequests && usage.missingRequests > 0
+const tokenNumber = (usage: TokenTotals | null | undefined, key: keyof TokenTotals) =>
+  unreported(usage) ? '—' : number(usage?.[key])
 const tokenSummaryStatus = computed(() => {
   const usage = todayTokens.value
   if (!usage) return '暂无用量数据，等待请求上报。'
@@ -151,25 +155,25 @@ const states = computed(() => [
         <span class="stat-icon blue"><Coins :size="19" /></span>
       </div>
       <div class="overview-summary-value">
-        <strong data-testid="summary-token-total">{{ number(todayTokens?.total) }}</strong
+        <strong data-testid="summary-token-total">{{ tokenNumber(todayTokens, 'total') }}</strong
         ><span>Tokens</span>
       </div>
       <dl class="overview-summary-breakdown">
         <div>
           <dt>输入</dt>
-          <dd>{{ number(todayTokens?.input) }}</dd>
+          <dd>{{ tokenNumber(todayTokens, 'input') }}</dd>
         </div>
         <div>
           <dt>输出</dt>
-          <dd>{{ number(todayTokens?.output) }}</dd>
+          <dd>{{ tokenNumber(todayTokens, 'output') }}</dd>
         </div>
         <div>
           <dt>缓存读取</dt>
-          <dd>{{ number(todayTokens?.cacheRead) }}</dd>
+          <dd>{{ tokenNumber(todayTokens, 'cacheRead') }}</dd>
         </div>
         <div>
           <dt>缓存写入</dt>
-          <dd>{{ number(todayTokens?.cacheWrite) }}</dd>
+          <dd>{{ tokenNumber(todayTokens, 'cacheWrite') }}</dd>
         </div>
       </dl>
       <p class="overview-summary-state">{{ tokenSummaryStatus }}</p>
@@ -285,7 +289,7 @@ const states = computed(() => [
         :data-testid="`token-${item.key}`"
       >
         <span>{{ item.label }}</span>
-        <strong>{{ number(tokens?.[item.key]) }}</strong>
+        <strong>{{ tokenNumber(tokens, item.key) }}</strong>
         <small>{{ item.hint }}</small>
       </div>
     </div>
@@ -502,7 +506,7 @@ const states = computed(() => [
         <div class="comparison-totals">
           <div>
             <span>本地合计</span
-            ><strong data-testid="comparison-local">{{ number(row.local?.total) }}</strong>
+            ><strong data-testid="comparison-local">{{ tokenNumber(row.local, 'total') }}</strong>
           </div>
           <div>
             <span>工作区合计</span
@@ -511,7 +515,7 @@ const states = computed(() => [
           <div>
             <span>差值（工作区 − 本地）</span
             ><strong data-testid="comparison-difference">{{
-              signed(row.difference?.total)
+              unreported(row.local) ? '—' : signed(row.difference?.total)
             }}</strong>
           </div>
         </div>
@@ -529,9 +533,9 @@ const states = computed(() => [
             <tbody>
               <tr v-for="item in comparisonMetrics" :key="item.key">
                 <th>{{ item.label }}</th>
-                <td>{{ number(row.local?.[item.key]) }}</td>
+                <td>{{ tokenNumber(row.local, item.key) }}</td>
                 <td>{{ number(row.workspace?.[item.key]) }}</td>
-                <td>{{ signed(row.difference?.[item.key]) }}</td>
+                <td>{{ unreported(row.local) ? '—' : signed(row.difference?.[item.key]) }}</td>
               </tr>
             </tbody>
           </table>
@@ -542,6 +546,9 @@ const states = computed(() => [
             启动）。工作区接口未提供缓存写入数据。
           </p>
         </details>
+        <p v-if="row.local?.missingRequests" class="comparison-message">
+          {{ number(row.local.missingRequests) }} 次本地请求未上报用量，缺失部分不估算。
+        </p>
         <div v-if="row.startedAt || row.syncedAt" class="comparison-timestamps">
           <span v-if="row.startedAt">基线 {{ time(row.startedAt, true) }}</span
           ><span v-if="row.syncedAt">同步 {{ time(row.syncedAt, true) }}</span>

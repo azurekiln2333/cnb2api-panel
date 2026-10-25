@@ -179,12 +179,19 @@ test("request details preserve streaming bytes and survive storage alongside leg
   const response = await app.send("/v1/chat/completions", payload);
   assert.equal(response.status, 200);
   assert.equal(await response.text(), wire);
-  assert.equal(forwarded, JSON.stringify(payload));
+  const upstreamPayload = {
+    ...payload,
+    stream_options: { include_usage: true },
+  };
+  assert.equal(forwarded, JSON.stringify(upstreamPayload));
   const logs = (await (await app.call("/api/logs")).json()).logs;
   const log = logs.find((entry) => entry.kind === "request");
   assert.equal(log.method, "POST");
   assert.equal(log.stream, true);
-  assert.equal(log.requestBytes, Buffer.byteLength(JSON.stringify(payload)));
+  assert.equal(
+    log.requestBytes,
+    Buffer.byteLength(JSON.stringify(upstreamPayload)),
+  );
   assert.equal(log.responseBytes, Buffer.byteLength(wire));
   assert.equal(log.upstreamEndpoint, app.endpoint);
   assert.equal(typeof log.firstByteMs, "number");

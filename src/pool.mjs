@@ -698,7 +698,16 @@ export class Pool {
   async forward(req, res, path, payload) {
     const requestId = randomUUID();
     const started = Date.now();
-    const requestBody = JSON.stringify(payload);
+    // CNB workers always stream from the model upstream, including when they
+    // aggregate a non-streaming response. Request usage in both client modes.
+    const requestBody = JSON.stringify(
+      path === "/v1/chat/completions"
+        ? {
+            ...payload,
+            stream_options: { ...payload.stream_options, include_usage: true },
+          }
+        : payload,
+    );
     const affinityKey = this.store.state.settings.sessionAffinity
       ? sessionKey(req.headers, payload)
       : null;

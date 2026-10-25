@@ -500,6 +500,68 @@ test('overview summary cards remain visible when token and credit data is absent
   await expect(credits).toContainText('尚未配置额度同步')
 })
 
+test('overview distinguishes missing token usage from measured zero in totals and comparison', async ({
+  page,
+  request,
+}) => {
+  await seed(request)
+  const overview = await (await request.get('/api/overview')).json()
+  const comparison = await (await request.post('/api/usage/comparison', { data: {} })).json()
+  let usage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: 0,
+    reportedRequests: 0,
+    missingRequests: 2,
+    partialRequests: 0,
+  }
+  await page.route('**/api/overview', (route) =>
+    route.fulfill({
+      json: {
+        ...overview,
+        stats: {
+          ...overview.stats,
+          tokenUsage: { ...overview.stats.tokenUsage, today: usage, total: usage },
+        },
+      },
+    }),
+  )
+  await page.route('**/api/usage/comparison', (route) =>
+    route.fulfill({
+      json: {
+        accounts: comparison.accounts.map((row: Record<string, unknown>) => ({
+          ...row,
+          local: usage,
+        })),
+      },
+    }),
+  )
+  await login(page)
+  await page.getByRole('link', { name: '运行概览', exact: true }).click()
+  await expect(page.getByTestId('summary-token-total')).toHaveText('—')
+  await expect(page.getByTestId('overview-token-summary')).toContainText('2 次请求未上报用量')
+  const tokenPanel = page.getByRole('region', { name: 'Token 用量', exact: true })
+  for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'total'])
+    await expect(tokenPanel.getByTestId(`token-${key}`).locator('strong')).toHaveText('—')
+  await tokenPanel.getByRole('button', { name: '累计', exact: true }).click()
+  await expect(tokenPanel.getByTestId('token-total').locator('strong')).toHaveText('—')
+  const account = page.getByTestId(`usage-comparison-${comparison.accounts[0].accountId}`)
+  await expect(account.getByTestId('comparison-local')).toHaveText('—')
+  await expect(account.getByTestId('comparison-difference')).toHaveText('—')
+  await expect(account).toContainText('2 次本地请求未上报用量')
+  await account.getByText('查看输入、输出与缓存明细', { exact: true }).click()
+  await expect(account.getByRole('row', { name: '输入 Tokens — 0 —', exact: true })).toBeVisible()
+  usage = { ...usage, reportedRequests: 1, missingRequests: 0 }
+  await page.reload()
+  await page.getByRole('link', { name: '运行概览', exact: true }).click()
+  await expect(page.getByTestId('summary-token-total')).toHaveText('0')
+  await expect(page.getByTestId('overview-token-summary')).toContainText('1 次已上报')
+  await expect(account.getByTestId('comparison-local')).toHaveText('0')
+  await expect(account.getByTestId('comparison-difference')).toHaveText('0')
+})
+
 test('overview shows measured token usage and compares aligned worker usage on desktop and phone', async ({
   page,
   request,

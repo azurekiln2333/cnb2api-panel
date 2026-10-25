@@ -48,6 +48,13 @@ exception messages into an audit record. Use static operation descriptions.
 - `upstreamEndpoint` identifies the last selected workspace without authentication headers.
 - `tokenUsage` keeps the existing reported/missing/partial accounting semantics.
 
+`TokenUsageCapture` ignores usage objects marked `usage_estimated: true`. Older
+workers synthesize zero counters when no upstream usage was received; these are
+missing usage, not measured zero. Genuine numeric zero counters still count as
+reported. The console shows `—` when all requests in the selected period lack
+usage, and keeps `0` for a period with no requests. Apply the same distinction to
+local comparison counters and hide the difference when no local usage is known.
+
 ## Initial user message
 
 `initialUserMessage()` in `src/request-details.mjs` selects the first message whose role is `user`. It supports text strings and OpenAI/Anthropic text blocks. The result contains `role`, `text` and `truncated` and is limited to 4,000 Unicode code points.

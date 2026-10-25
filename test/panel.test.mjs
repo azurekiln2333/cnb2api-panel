@@ -650,7 +650,7 @@ test('weighted routing distributes 2:1, replaces client authorization, and recor
   );
 });
 
-test('session affinity keeps subsequent turns on their account and forwards payloads unchanged', async (t) => {
+test('session affinity keeps subsequent turns on their account and preserves payload fields with usage enabled', async (t) => {
   const app = await fixture(t);
   const a = await worker(t, 'a');
   const b = await worker(t, 'b');
@@ -680,7 +680,10 @@ test('session affinity keeps subsequent turns on their account and forwards payl
       .worker,
     'a',
   );
-  assert.deepEqual(a.calls.at(-1).payload, data);
+  assert.deepEqual(a.calls.at(-1).payload, {
+    ...data,
+    stream_options: { include_usage: true },
+  });
   const cors = await app.call('/v1/chat/completions', { method: 'OPTIONS' });
   assert.match(
     cors.headers.get('access-control-allow-headers'),

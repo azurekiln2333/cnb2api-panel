@@ -66,6 +66,21 @@ test("JSON usage counts input/output/cache once and rejects invalid numeric coun
   );
 });
 
+test("estimated zero fallbacks are missing usage while measured zero remains reported", () => {
+  const zero = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  for (const sse of [false, true]) {
+    const body = JSON.stringify({ usage: { ...zero, usage_estimated: true } });
+    assert.deepEqual(capture(sse ? `data: ${body}\n\n` : body, { sse }), {
+      ...emptyTokenUsage(),
+      missingRequests: 1,
+    });
+  }
+  assert.deepEqual(capture(JSON.stringify({ usage: zero })), {
+    ...emptyTokenUsage(),
+    reportedRequests: 1,
+  });
+});
+
 test("SSE handles arbitrary byte boundaries, CRLF and terminal events without double counting", () => {
   const stream = [
     'data: {"choices":[{"delta":{"content":"你好"}}]}\r\n\r\n',
@@ -129,13 +144,14 @@ test("large content events remain bounded and do not hide later small usage even
   assert.equal(largeJSON.finish().missingRequests, 1);
 });
 
-async function fixture(t) {
+async function fixture(t, { reportUsage = true } = {}) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "cnb-panel-usage-"));
   const directory = join(fixtureRoot, "data");
-  const sse =
-    'data: {"choices":[{"delta":{"content":"秘密回复"}}]}\n\n' +
-    'data: {"usage":{"prompt_tokens":80,"completion_tokens":20,"prompt_cache_hit_tokens":50}}\n\n' +
-    "data: [DONE]\n\n";
+  const content = 'data: {"choices":[{"delta":{"content":"秘密回复"}}]}\n\n';
+  const usageEvent =
+    'data: {"usage":{"prompt_tokens":80,"completion_tokens":20,"prompt_cache_hit_tokens":50}}\n\n';
+  const sse = content + (reportUsage ? usageEvent : "") + "data: [DONE]\n\n";
+  const calls = [];
   const upstream = http.createServer(async (req, res) => {
     assert.equal(req.headers.authorization, `Bearer ${PROXY}`);
     if (req.url === "/v1/models") {
@@ -151,9 +167,16 @@ async function fixture(t) {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const payload = JSON.parse(Buffer.concat(chunks));
+    calls.push({ path: req.url, payload });
+    // CNB workers always stream upstream, even for non-streaming clients.
+    // A compliant upstream may omit usage unless include_usage is requested.
+    const hasUsage =
+      reportUsage && payload.stream_options?.include_usage === true;
     if (payload.stream) {
       res.setHeader("Content-Type", "text/event-stream");
-      for (let i = 0; i < sse.length; i += 13) res.write(sse.slice(i, i + 13));
+      const wire = content + (hasUsage ? usageEvent : "") + "data: [DONE]\n\n";
+      for (let i = 0; i < wire.length; i += 13)
+        res.write(wire.slice(i, i + 13));
       res.end();
       return;
     }
@@ -161,11 +184,18 @@ async function fixture(t) {
     res.end(
       JSON.stringify({
         choices: [{ message: { content: "秘密回复" } }],
-        usage: {
-          prompt_tokens: 100,
-          completion_tokens: 25,
-          prompt_cache_hit_tokens: 60,
-        },
+        usage: hasUsage
+          ? {
+              prompt_tokens: 100,
+              completion_tokens: 25,
+              prompt_cache_hit_tokens: 60,
+            }
+          : {
+              prompt_tokens: 0,
+              completion_tokens: 0,
+              total_tokens: 0,
+              usage_estimated: true,
+            },
       }),
     );
   });
@@ -231,8 +261,48 @@ async function fixture(t) {
     generate,
     id: created.account.id,
     sse,
+    calls,
   };
 }
+
+test("gateway enables upstream usage for both OpenAI modes while preserving other options", async (t) => {
+  const app = await fixture(t);
+  const extra = {
+    stream: true,
+    stream_options: { include_usage: false, include_obfuscation: false },
+    temperature: 0.7,
+  };
+  const response = await app.generate("/v1/chat/completions", extra);
+  assert.equal(await response.text(), app.sse);
+  assert.deepEqual(app.calls[0].payload.stream_options, {
+    include_usage: true,
+    include_obfuscation: false,
+  });
+  assert.equal(app.calls[0].payload.temperature, 0.7);
+  assert.equal(extra.stream_options.include_usage, false);
+  await (await app.generate("/v1/chat/completions", { stream: false })).text();
+  assert.deepEqual(app.calls[1].payload.stream_options, {
+    include_usage: true,
+  });
+  await (await app.generate("/v1/messages/count_tokens")).text();
+  assert.equal(app.calls[2].payload.stream_options, undefined);
+  assert.equal(app.store.state.tokenUsage.total, 225);
+});
+
+test("unreported upstream usage remains missing in local totals and account counters", async (t) => {
+  const app = await fixture(t, { reportUsage: false });
+  await (await app.generate("/v1/chat/completions", { stream: true })).text();
+  await (await app.generate("/v1/chat/completions", { stream: false })).text();
+  const expected = { ...emptyTokenUsage(), missingRequests: 2 };
+  const overview = await (await app.call("/api/overview")).json();
+  assert.deepEqual(overview.stats.tokenUsage.today, expected);
+  assert.deepEqual(overview.stats.tokenUsage.total, expected);
+  assert.deepEqual(overview.accounts[0].tokenUsage, expected);
+  assert.deepEqual(
+    new Store(app.directory, { allowLocal: true }).state.tokenUsage,
+    expected,
+  );
+});
 
 test("gateway persists local totals, preserves SSE bytes, and excludes count_tokens consumption", async (t) => {
   const app = await fixture(t);
@@ -256,7 +326,10 @@ test("gateway persists local totals, preserves SSE bytes, and excludes count_tok
   assert.deepEqual(overview.accounts[0].tokenUsage, expected);
   assert.equal(overview.stats.requests, 3);
   const disk = readFileSync(app.store.logFiles.requests, "utf8");
-  const requestLogs = disk.trim().split("\n").map((line) => JSON.parse(line));
+  const requestLogs = disk
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
   assert.equal(requestLogs.length, 3);
   for (const log of requestLogs)
     assert.deepEqual(log.initialMessage, {
@@ -283,7 +356,9 @@ test("legacy version 1 data receives empty usage and lifetime totals survive hou
   const directory = join(fixtureRoot, "data");
   t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
   const store = new Store(directory, { allowLocal: true });
-  const saved = { ...store.state, version: 1,
+  const saved = {
+    ...store.state,
+    version: 1,
     sso: { ...store.state.sso, clientSecret: store.encrypt("") },
   };
   delete saved.tokenUsage;

@@ -534,10 +534,16 @@ VPS 上的旧 Python 注册服务不再是面板依赖。
 ### 本地 Token
 
 面板提供今日和累计统计。
+面板为 OpenAI 请求启用 `stream_options.include_usage`。
+流式和非流式调用都请求用量。
+CNB 工作区仍以流式请求上游。
 输入与输出相加得到总 Token。
 缓存 Token 属于输入，不能重复加到总数。
 面板不会估算历史请求的用量。
 缺少 `usage` 或数据不完整时，页面会标明。
+标记 `usage_estimated` 的数据不计入统计。
+全部请求都未上报时，页面显示 `—`。
+没有请求时，页面仍显示 `0`。
 直接访问工作区的请求不计入本地统计。
 `/v1/messages/count_tokens` 不计入消耗。
 
@@ -882,13 +888,13 @@ git push gitlab main
 同时更新 `web/package-lock.json` 的包版本。
 提交修改。
 再将 `main` 推送到三个远程。
-版本 `1.1.2` 使用以下标签。
+版本 `1.1.3` 使用以下标签。
 
 ```bash
-git tag -a v1.1.2 -m "Release v1.1.2"
-git push origin v1.1.2
-git push cnb v1.1.2
-git push gitlab v1.1.2
+git tag -a v1.1.3 -m "Release v1.1.3"
+git push origin v1.1.3
+git push cnb v1.1.3
+git push gitlab v1.1.3
 ```
 
 GitHub 和 CNB 接收标签后各自构建并发布。
