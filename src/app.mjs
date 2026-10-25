@@ -96,6 +96,7 @@ export function createPanelServer(options) {
     adminKey,
     gatewayKey,
     dataDir,
+    logDir,
     publicUrl = "",
     allowLocal = false,
     ssoBootstrap = null,
@@ -132,7 +133,7 @@ export function createPanelServer(options) {
       );
     }
   }
-  const store = new Store(dataDir, { allowLocal });
+  const store = new Store(dataDir, { allowLocal, logDir });
   // Environment variables only seed an unconfigured panel; saved SSO settings win.
   if (ssoBootstrap && typeof ssoBootstrap === "object") {
     if (!ssoIsConfigured(store.state.sso)) {

@@ -34,7 +34,8 @@ const snapshot = (prompt, completion, cacheHit = 0, boot = "first-boot") => ({
 });
 
 async function fixture(t, options = {}) {
-  const directory = mkdtempSync(join(tmpdir(), "cnb-worker-usage-test-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "cnb-worker-usage-test-"));
+  const directory = join(fixtureRoot, "data");
   const store = new Store(directory, { allowLocal: true });
   let handler = (_req, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -57,7 +58,7 @@ async function fixture(t, options = {}) {
   t.after(async () => {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(fixtureRoot, { recursive: true, force: true });
   });
   return {
     store,

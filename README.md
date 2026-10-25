@@ -101,23 +101,27 @@ GHCR 镜像也可通过 `PANEL_IMAGE` 指定。
 
 Compose 通过 `env_file` 将 `.env` 注入容器。
 密钥和域名无需在 Compose 中重复声明。
-`environment` 仅固定容器的监听地址、端口和数据目录。
+`environment` 固定监听地址、端口和数据及日志目录。
 这些固定值会覆盖 `.env` 中的同名变量。
 普通 Node 仍使用 `.env` 中的原值。
 
 Compose 将宿主机的 `./data` 挂载到 `/app/data`。
+Compose 将宿主机的 `./logs` 挂载到 `/app/logs`。
 容器内固定使用 `PANEL_DATA_DIR=/app/data`。
-实际数据仍在宿主机的以下目录。
+容器内固定使用 `PANEL_LOG_DIR=/app/logs`。
+数据和日志分别保存在宿主机的以下目录。
 
 ```text
-/data/platform2api/cnb2api-panel/data/
-├── panel.json
-├── accounts.json
-├── stats.json
-├── requests.log
-├── audit.log
-├── system.log
-└── master.key
+/data/platform2api/cnb2api-panel/
+├── data/
+│   ├── panel.json
+│   ├── accounts.json
+│   ├── stats.json
+│   └── master.key
+└── logs/
+    ├── requests.log
+    ├── audit.log
+    └── system.log
 ```
 
 镜像启动成功后，目录只需保留以下内容。
@@ -126,18 +130,19 @@ Compose 将宿主机的 `./data` 挂载到 `/app/data`。
 cnb2api-panel/
 ├── docker-compose.yaml
 ├── .env
-└── data/
-    ├── panel.json
-    ├── accounts.json
-    ├── stats.json
+├── data/
+│   ├── panel.json
+│   ├── accounts.json
+│   ├── stats.json
+│   └── master.key
+└── logs/
     ├── requests.log
     ├── audit.log
-    ├── system.log
-    └── master.key
+    └── system.log
 ```
 
 手动更新时，运行 `pull` 和 `up -d`。
-更新无需替换 `.env` 和 `data/`。
+更新时保留 `.env`、`data/` 和 `logs/`。
 
 ### 自动更新镜像
 
@@ -191,7 +196,7 @@ docker compose stop watchtower
 若旧的 `compose.override.yaml` 只用于 Watchtower，也请删除。
 其他自定义覆盖配置应先合并。
 本地构建用户同时替换旧的 `compose.build.yaml`。
-保留原 `.env` 和 `data/`。
+保留原 `.env`、`data/` 和 `logs/`。
 然后启动更新后的配置。
 
 ```bash
@@ -237,15 +242,18 @@ Docker 构建与 CI 使用同一版本。
 
 进入项目目录，复制 `.env.example` 为 `.env`。
 填写两个密钥和域名。
-配置本机监听地址及数据目录。
+配置本机监听地址及数据和日志目录。
 
 ```dotenv
 PANEL_HOST=127.0.0.1
 PANEL_PORT=9002
 PANEL_DATA_DIR=/data/platform2api/cnb2api-panel/data
+PANEL_LOG_DIR=/data/platform2api/cnb2api-panel/logs
 ```
 
 `PANEL_DATA_DIR=./data` 也可使用。
+`PANEL_LOG_DIR=./logs` 也可使用。
+未配置日志目录时，使用数据目录旁的 `logs/`。
 相对路径以进程的工作目录为准。
 在项目根目录启动后端。
 
@@ -581,6 +589,9 @@ Docker 健康检查使用管理页面的可访问状态。
 默认数据目录是 `./data`。
 普通 Node 可用 `PANEL_DATA_DIR` 指定其他目录。
 Docker 使用 Compose 的宿主机 `./data` 挂载。
+日志使用独立的 `./logs` 目录。
+普通 Node 可用 `PANEL_LOG_DIR` 指定日志目录。
+日志目录必须位于数据目录之外。
 数据无需放在 `/var/lib`。
 
 | 文件 | 内容 | 加密情况 |
@@ -588,9 +599,9 @@ Docker 使用 Compose 的宿主机 `./data` 挂载。
 | `data/panel.json` | 面板配置、路由配置、SSO 配置 | SSO 客户端密钥加密 |
 | `data/accounts.json` | 账号定义、地址、权重、凭据 | 账号凭据加密 |
 | `data/stats.json` | 用量、探活状态、额度与对比基线 | 明文统计 |
-| `data/requests.log` | API 请求记录 | 明文日志 |
-| `data/audit.log` | 管理操作审计 | 明文日志 |
-| `data/system.log` | 工作区运行事件 | 明文日志 |
+| `logs/requests.log` | API 请求记录 | 明文日志 |
+| `logs/audit.log` | 管理操作审计 | 明文日志 |
+| `logs/system.log` | 工作区运行事件 | 明文日志 |
 | `data/master.key` | 解密账号凭据的本地密钥 | 原始密钥文件 |
 | `.env` | 两个系统密钥及启动配置 | 明文配置 |
 
@@ -613,7 +624,7 @@ Linux 首次生成的数据目录权限为 `0700`。
 请求日志记录首条用户消息，最多 4,000 个字符。
 消息过长时，面板标记截断。
 图片、音频和文件只保留类型占位。
-请求日志在 `requests.log` 中逐行追加。
+请求日志在 `logs/requests.log` 中逐行追加。
 每行是一个 JSON 对象。
 日志不会写入 `panel.json` 或 `accounts.json`。
 请求计数只更新 `stats.json`。
@@ -651,7 +662,7 @@ JSON 文件通过临时文件和原子替换写入。
 ### 备份、迁移与更新
 
 备份前先停止面板写入。
-一起备份 `.env` 和整个 `data/`。
+一起备份 `.env`、`data/` 和 `logs/`。
 备份应按密钥文件管理访问权限。
 只复制 `panel.json` 无法恢复账号凭据。
 
@@ -663,14 +674,24 @@ JSON 文件通过临时文件和原子替换写入。
 旧备份不会继续接收写入。
 保留完整 `data/`，无需手动拆分或清空文件。
 
+升级到 `1.1.2` 时，先更新 `docker-compose.yaml`。
+确认配置包含 `./logs:/app/logs` 挂载。
+再运行 `docker compose up -d --pull always`。
+Watchtower 无法修改容器挂载。
+面板会把旧版 `data/*.log` 自动迁入 `logs/`。
+复制完成后，面板删除数据目录中的旧日志。
+迁移中断后，重启会继续迁移。
+目标已有不同日志时，面板停止迁移并报告错误。
+
 迁移旧面板时，先停止原面板进程。
 找到原进程实际使用的 `PANEL_DATA_DIR`。
 将整个数据目录复制到新项目的 `data/`。
+已有独立日志时，将其复制到新项目的 `logs/`。
 保留原 `.env` 中的两个密钥和域名。
 普通 Node 需同步修改绝对数据路径。
 Docker 继续使用 `/app/data` 容器路径。
 
-使用远程镜像时，保留 `docker-compose.yaml`、`.env` 和 `data/`。
+使用远程镜像时，保留配置、`data/` 和 `logs/`。
 拉取镜像后，更新容器。
 
 ```bash
@@ -795,7 +816,7 @@ dist/
 `.sha256` 文件记录发布包的 SHA-256 值。
 `build-manifest.json` 记录版本、时间和 SHA-256 值。
 发布包包含后端和 `web/dist`。
-发布包不包含真实 `.env`、`data/` 和前端依赖。
+发布包不包含 `.env`、`data/`、`logs/` 和前端依赖。
 服务器解压后可选择 Docker 或普通 Node 启动。
 
 ### GitHub 与 CNB 自动构建
@@ -861,13 +882,13 @@ git push gitlab main
 同时更新 `web/package-lock.json` 的包版本。
 提交修改。
 再将 `main` 推送到三个远程。
-版本 `1.1.1` 使用以下标签。
+版本 `1.1.2` 使用以下标签。
 
 ```bash
-git tag -a v1.1.1 -m "Release v1.1.1"
-git push origin v1.1.1
-git push cnb v1.1.1
-git push gitlab v1.1.1
+git tag -a v1.1.2 -m "Release v1.1.2"
+git push origin v1.1.2
+git push cnb v1.1.2
+git push gitlab v1.1.2
 ```
 
 GitHub 和 CNB 接收标签后各自构建并发布。

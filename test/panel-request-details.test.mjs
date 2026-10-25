@@ -93,7 +93,8 @@ test("preview truncation counts Unicode characters without cutting a surrogate p
 });
 
 async function fixture(t, handler) {
-  const directory = mkdtempSync(join(tmpdir(), "panel-request-detail-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "panel-request-detail-"));
+  const directory = join(fixtureRoot, "data");
   const listen = async (server) => {
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
@@ -143,7 +144,7 @@ async function fixture(t, handler) {
       server.closeAllConnections();
       await new Promise((done) => server.close(done));
     }
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(fixtureRoot, { recursive: true, force: true });
   });
   const send = (path, payload) =>
     fetch(`${base}${path}`, {

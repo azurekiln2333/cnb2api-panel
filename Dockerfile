@@ -17,7 +17,8 @@ WORKDIR /app
 ENV NODE_ENV=production \
     PANEL_HOST=0.0.0.0 \
     PANEL_PORT=9002 \
-    PANEL_DATA_DIR=/app/data
+    PANEL_DATA_DIR=/app/data \
+    PANEL_LOG_DIR=/app/logs
 
 COPY src/ ./src/
 COPY --from=console /build/web/dist/ ./web/dist/

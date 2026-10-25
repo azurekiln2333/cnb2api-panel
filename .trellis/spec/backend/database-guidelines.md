@@ -11,9 +11,9 @@ multiple processes or containers.
 | `panel.json` | Version 2 JSON | Panel/routing settings and SSO configuration |
 | `accounts.json` | Version 1 JSON | Account definitions, endpoints, routing attributes and encrypted credentials |
 | `stats.json` | Version 1 JSON | Hourly/aggregate usage and account runtime, health, quota and comparison state |
-| `requests.log` | JSON lines | API requests only |
-| `audit.log` | JSON lines | Management audit and legacy account changes |
-| `system.log` | JSON lines | Registration, health failures, wake results and failover |
+| `../logs/requests.log` | JSON lines | API requests only |
+| `../logs/audit.log` | JSON lines | Management audit and legacy account changes |
+| `../logs/system.log` | JSON lines | Registration, health failures, wake results and failover |
 | `master.key` | 32 raw bytes | Local AES-256-GCM encryption key |
 
 `Store.state` merges these partitions in memory for existing application code.
@@ -21,6 +21,12 @@ multiple processes or containers.
 `RUNTIME_FIELDS` so they do not leak into account definitions. Event records
 never belong in the JSON documents. Updating request counters must leave
 `accounts.json` and `panel.json` untouched.
+
+Data and log directories are independent. Logs default to `../logs` relative to
+the data directory, or use the explicit `logDir`/`PANEL_LOG_DIR` setting. Never
+configure logs inside the data directory. Docker mounts each directory
+separately. Test fixtures use one temporary root with sibling `data/` and `logs/`
+directories, so concurrent fixtures cannot share logs accidentally.
 
 ## Writes and recovery
 
@@ -38,7 +44,7 @@ If applying a transaction fails, further commits remain blocked until restart
 recovers the pending intent. Do not delete the intent to bypass an error.
 
 Generated directories use mode `0700`; files use `0600`. Back up the whole data
-directory while the panel is stopped, together with deployment configuration.
+directory and log directory while the panel is stopped, together with deployment configuration.
 Account data without its original `master.key` cannot recover credentials.
 
 ## Legacy migration
@@ -54,10 +60,19 @@ Missing keys, damaged JSON, unsupported versions or mismatched log categories
 must fail visibly without resetting saved accounts. Never generate a replacement
 master key when saved account/configuration files already exist.
 
+Before journal recovery, migrate the three legacy `data/*.log` files into the
+log directory. Write a flushed temporary copy on the destination filesystem and
+rename it before unlinking the source; Docker bind mounts may be on different
+filesystems. Matching source/destination bytes let an interrupted copy resume.
+Different destination contents must fail without overwriting either copy.
+Preserve raw bytes, including incomplete pending UTF-8 appends, until recovery.
+
 ## Verification
 
 Use temporary directories for all tests. Never inspect or mutate the operator's
-real `.env` or `data/`. Test restart round trips, encrypted credentials,
+real `.env`, `data/` or `logs/`. Test restart round trips, encrypted credentials,
 partition write isolation, genuine version 1 migration, independent log
 retention, partial UTF-8 append recovery, completed append replay, interrupted
-migration, and damaged/missing storage without silent data loss.
+migration, log-directory migration/copy interruption/conflicts, pending append
+recovery across that migration, custom log paths, and damaged/missing storage
+without silent data loss.

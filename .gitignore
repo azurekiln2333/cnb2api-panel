@@ -3,6 +3,7 @@ web/dist/
 dist/
 test-results/
 data/
+logs/
 .env
 .env.*
 !.env.example

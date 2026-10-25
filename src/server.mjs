@@ -45,6 +45,7 @@ try {
     adminKey: process.env.PANEL_ADMIN_KEY,
     gatewayKey: process.env.GATEWAY_KEY,
     dataDir: resolve(process.env.PANEL_DATA_DIR || 'data'),
+    logDir: process.env.PANEL_LOG_DIR ? resolve(process.env.PANEL_LOG_DIR) : undefined,
     publicUrl: (process.env.PANEL_PUBLIC_URL || '').replace(/\/$/, ''),
     allowLocal: process.env.PANEL_ALLOW_LOCAL_UPSTREAM === 'true',
     ssoBootstrap: ssoBootstrapFromEnv(process.env),

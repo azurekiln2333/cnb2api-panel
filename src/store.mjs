@@ -329,18 +329,19 @@ export function publicAccount(account) {
 }
 
 export class Store {
-  constructor(directory, { allowLocal = false } = {}) {
+  constructor(directory, { allowLocal = false, logDir } = {}) {
     this.directory = resolve(directory);
     this.allowLocal = allowLocal;
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-    this.storage = new FileStorage(this.directory);
+    this.storage = new FileStorage(this.directory, logDir);
+    this.logDirectory = this.storage.logDirectory;
     this.file = join(this.directory, "panel.json");
     this.accountsFile = join(this.directory, "accounts.json");
     this.statsFile = join(this.directory, "stats.json");
     this.logFiles = Object.fromEntries(
       Object.entries(LOG_FILES).map(([key, name]) => [
         key,
-        join(this.directory, name),
+        this.storage.path(name),
       ]),
     );
     if (

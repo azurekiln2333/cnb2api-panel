@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,12 +22,14 @@ const close = async (server) => {
   await new Promise((resolve) => server.close(resolve));
 };
 
-async function fixture(t) {
-  const directory = mkdtempSync(join(tmpdir(), 'cnb-panel-test-'));
+async function fixture(t, { logDirectoryName } = {}) {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'cnb-panel-test-'));
+  const directory = join(fixtureRoot, 'data');
   const app = createPanelServer({
     adminKey: ADMIN,
     gatewayKey: GATEWAY,
     dataDir: directory,
+    logDir: logDirectoryName ? join(fixtureRoot, logDirectoryName) : undefined,
     allowLocal: true,
   });
   const base = await listen(app.server);
@@ -54,7 +56,7 @@ async function fixture(t) {
   cookie = login.headers.get('set-cookie').split(';')[0];
   t.after(async () => {
     await close(app.server);
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(fixtureRoot, { recursive: true, force: true });
   });
   return { ...app, base, directory, call };
 }
@@ -125,6 +127,16 @@ const completion = (
       ...data,
     },
   });
+
+test('the server writes and reads audit logs from an explicitly configured directory outside data', async (t) => {
+  const app = await fixture(t, { logDirectoryName: 'operator-logs' });
+  const auditFile = join(app.directory, '../operator-logs/audit.log');
+  assert.equal(app.store.logFiles.audit, auditFile);
+  const audit = await (await app.call('/api/logs/audit')).json();
+  assert.ok(audit.logs.some((entry) => entry.action === 'auth.login'));
+  assert.ok(readFileSync(auditFile, 'utf8').includes('auth.login'));
+  assert.equal(existsSync(join(app.directory, 'audit.log')), false);
+});
 
 test('account secrets survive restart encrypted, remain hidden in reads, and edits preserve blank credentials', async (t) => {
   const app = await fixture(t);
@@ -606,7 +618,7 @@ test('request, audit and system APIs remain separate and audits include successf
     assert.ok(!JSON.stringify(audits).includes(secret));
   for (const channel of ['requests', 'audit', 'system']) {
     assert.equal((await fetch(`${app.base}/api/logs/${channel}`)).status, 401);
-    const persisted = readFileSync(join(app.directory, `${channel}.log`), 'utf8').trim().split('\n').map(JSON.parse);
+    const persisted = readFileSync(app.store.logFiles[channel], 'utf8').trim().split('\n').map(JSON.parse);
     assert.ok(persisted.every((entry) => channel === 'requests' ? entry.kind === 'request' : channel === 'audit' ? entry.kind === 'audit' : !['request', 'audit'].includes(entry.kind)));
   }
 });

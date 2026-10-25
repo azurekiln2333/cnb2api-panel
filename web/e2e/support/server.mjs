@@ -6,7 +6,8 @@ import { join } from 'node:path'
 import { createPanelServer } from '../../../src/app.mjs'
 import { startOidcFixture } from './oidc.mjs'
 
-const dataDir = mkdtempSync(join(tmpdir(), 'cnb-panel-browser-'))
+const fixtureRoot = mkdtempSync(join(tmpdir(), 'cnb-panel-browser-'))
+const dataDir = join(fixtureRoot, 'data')
 const oidc = await startOidcFixture()
 const workerBootedAt = new Date().toISOString()
 const quotaState = { total: 2000, used: 100, freeze: 25, requests: 0 }
@@ -105,7 +106,7 @@ const shutdown = () => {
   server.close()
   worker.close()
   oidc.close()
-  rmSync(dataDir, { recursive: true, force: true })
+  rmSync(fixtureRoot, { recursive: true, force: true })
   process.exit(0)
 }
 process.on('SIGTERM', shutdown)

@@ -1,7 +1,7 @@
 # Logging Guidelines
 
 `Store.record()` routes events through `logChannel()` in `src/file-storage.mjs`.
-Keep three independent streams under the data directory:
+Keep three independent streams under the log directory, separate from data:
 
 | Stream | File | Event kinds | Management endpoint |
 | --- | --- | --- | --- |
@@ -18,6 +18,10 @@ All log endpoints require an authenticated management session. `/api/logs` is an
 alias for requests only. The console provides separate request, audit and system
 navigation entries. Never put event arrays in `panel.json` or `accounts.json`.
 Request counters and Token totals belong in `stats.json` and survive log cleanup.
+The default log directory is `logs/` beside the data directory. `PANEL_LOG_DIR`
+can override it for plain Node. Compose fixes `/app/logs` and bind-mounts `./logs`.
+Reject log paths inside the data directory. Startup relocates old `data/*.log`
+before journal recovery so pending append offsets remain valid.
 
 ## Management audit
 

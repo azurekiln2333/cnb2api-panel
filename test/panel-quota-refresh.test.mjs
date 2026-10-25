@@ -22,7 +22,8 @@ const deferred = () => {
 };
 
 function fixture(t, fetchQuotaImpl, options = {}) {
-  const directory = mkdtempSync(join(tmpdir(), "cnb-panel-auto-quota-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "cnb-panel-auto-quota-"));
+  const directory = join(fixtureRoot, "data");
   const store = new Store(directory, { allowLocal: true });
   let clock = Date.parse("2026-10-24T08:00:00.000Z");
   const pool = new Pool(store, {
@@ -32,7 +33,7 @@ function fixture(t, fetchQuotaImpl, options = {}) {
   });
   t.after(() => {
     pool.stop();
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(fixtureRoot, { recursive: true, force: true });
   });
   const account = (fields = {}) =>
     store.create({

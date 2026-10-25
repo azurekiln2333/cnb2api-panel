@@ -27,7 +27,7 @@ Validate both the production configuration and the merged local build
 configuration with the official Compose CLI. Use an isolated directory with a
 copy of `.env.example` as `.env`; never read real environment or account data.
 Run the packaging script and inspect the archive when changing deployment
-filenames. Packages must include both configurations and exclude `.env` and data.
+filenames. Packages must include both configurations and exclude `.env`, data and logs.
 
 Synchronize `main` and release tags to `origin` (GitHub), `cnb`, and `gitlab`
 (`git@gitlab.com:azurekiln-team/cnb2api-panel.git`, using SSH). Release tags must match
@@ -48,3 +48,10 @@ The v1.1.0 startup migrates legacy monolithic `panel.json` into separate account
 statistics and log files. Preserve the complete data directory and original
 `master.key`. The migration keeps the original as `panel.json.v1.bak` and uses
 the recoverable storage journal. Operators do not need to edit or clear files.
+
+Since v1.1.2, Compose bind-mounts `./logs:/app/logs` separately from `./data` and
+sets `PANEL_LOG_DIR=/app/logs`. Plain Node can set its own log path; the default
+is `logs/` beside the data directory. Startup migrates old data-directory logs.
+Operators must update Compose and recreate the container for the new mount:
+Watchtower only reuses existing container configuration. Preserve both host
+directories on updates, backups and restores.

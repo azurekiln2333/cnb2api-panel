@@ -1,6 +1,7 @@
 import {
   appendFileSync,
   existsSync,
+  mkdirSync,
   readFileSync,
   renameSync,
   statSync,
@@ -8,7 +9,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const LOG_FILES = {
   requests: "requests.log",
@@ -35,14 +36,54 @@ export const retainLogs = (entries) => {
 // A durable intent makes multi-file changes recoverable after a process stops.
 // Only encrypted account/SSO documents may be passed to this layer.
 export class FileStorage {
-  constructor(directory) {
-    this.directory = directory;
-    this.pending = join(directory, "store.pending");
+  constructor(directory, logDirectory = resolve(directory, "../logs")) {
+    this.directory = resolve(directory);
+    this.logDirectory = resolve(logDirectory);
+    const logRelative = relative(this.directory, this.logDirectory);
+    if (
+      !logRelative ||
+      (!isAbsolute(logRelative) &&
+        logRelative !== ".." &&
+        !logRelative.startsWith(`..${sep}`))
+    )
+      throw new Error("PANEL_LOG_DIR must be outside PANEL_DATA_DIR");
+    mkdirSync(this.logDirectory, { recursive: true, mode: 0o700 });
+    this.pending = join(this.directory, "store.pending");
+    this.migrateLogs();
     this.recover();
   }
 
+  path(name) {
+    return join(
+      Object.values(LOG_FILES).includes(name)
+        ? this.logDirectory
+        : this.directory,
+      name,
+    );
+  }
+
+  // Copy through the destination filesystem so separate Docker bind mounts work.
+  // Matching duplicates mean a previous copy completed before source cleanup.
+  migrateLogs() {
+    const copies = Object.values(LOG_FILES).flatMap((name) => {
+      const source = join(this.directory, name);
+      if (!existsSync(source)) return [];
+      const bytes = readFileSync(source);
+      const target = this.path(name);
+      if (existsSync(target) && !readFileSync(target).equals(bytes))
+        throw new Error(
+          `Cannot migrate ${name}: destination already has different logs`,
+        );
+      return [{ name, source, bytes }];
+    });
+    for (const { name, source, bytes } of copies) {
+      if (!existsSync(this.path(name))) this.atomic(name, bytes);
+      unlinkSync(source);
+    }
+  }
+
   atomic(name, text) {
-    const file = join(this.directory, name);
+    const file = this.path(name);
     writeFileSync(`${file}.tmp`, text, { mode: 0o600, flush: true });
     renameSync(`${file}.tmp`, file);
   }
@@ -67,7 +108,7 @@ export class FileStorage {
         operation.offset < 0
       )
         throw new Error("Invalid pending log append");
-      const file = join(this.directory, operation.file);
+      const file = this.path(operation.file);
       const size = existsSync(file) ? statSync(file).size : 0;
       const bytes = Buffer.from(operation.text, "utf8");
       if (size < operation.offset || size > operation.offset + bytes.length)
@@ -107,7 +148,7 @@ export class FileStorage {
 
   readLog(channel) {
     const name = LOG_FILES[channel];
-    const file = join(this.directory, name);
+    const file = this.path(name);
     if (!existsSync(file)) return { entries: [], lines: 0 };
     const lines = readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean);
     const entries = lines.map((line, index) => {

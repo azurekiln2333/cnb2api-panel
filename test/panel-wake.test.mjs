@@ -9,7 +9,8 @@ import { Pool } from "../src/pool.mjs";
 import { createPanelServer } from "../src/app.mjs";
 
 function fixture(t) {
-  const directory = mkdtempSync(join(tmpdir(), "cnb-panel-wake-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "cnb-panel-wake-"));
+  const directory = join(fixtureRoot, "data");
   const store = new Store(directory);
   const pool = new Pool(store);
   const account = store.create({
@@ -22,7 +23,7 @@ function fixture(t) {
   });
   t.after(() => {
     pool.stop();
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(fixtureRoot, { recursive: true, force: true });
   });
   return { store, pool, id: account.id };
 }
@@ -245,7 +246,8 @@ test("network and timeout failures are distinct, safely logged, and never start 
 });
 
 test("the HTTP wake endpoint returns safe 424 JSON for CNB auth failures while the admin session stays usable", async (t) => {
-  const directory = mkdtempSync(join(tmpdir(), "cnb-panel-wake-http-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "cnb-panel-wake-http-"));
+  const directory = join(fixtureRoot, "data");
   const app = createPanelServer({
     adminKey: "wake-test-admin-key",
     gatewayKey: "wake-test-gateway-key",
@@ -254,7 +256,7 @@ test("the HTTP wake endpoint returns safe 424 JSON for CNB auth failures while t
   t.after(async () => {
     app.server.closeAllConnections();
     await new Promise((resolve) => app.server.close(resolve));
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(fixtureRoot, { recursive: true, force: true });
   });
   app.server.listen(0, "127.0.0.1");
   await once(app.server, "listening");

@@ -172,7 +172,8 @@ async function provider(t, options = {}) {
 }
 
 async function fixture(t) {
-  const directory = mkdtempSync(join(tmpdir(), 'cnb-panel-auth-'));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'cnb-panel-auth-'));
+  const directory = join(fixtureRoot, "data");
   const app = createPanelServer({
     adminKey: ADMIN,
     gatewayKey: 'panel-test-client-key',
@@ -193,7 +194,7 @@ async function fixture(t) {
     });
   t.after(async () => {
     await close(app.server);
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(fixtureRoot, { recursive: true, force: true });
   });
   const login = async () => {
     const response = await call('/api/session', { method: 'POST', data: { key: ADMIN } });
@@ -656,7 +657,8 @@ test('UserInfo cannot inherit a verified email for a different address', () => {
 
 test('environment bootstrap seeds an unconfigured panel and rejects unsafe settings', async (t) => {
   const oidc = await provider(t);
-  const directory = mkdtempSync(join(tmpdir(), 'cnb-panel-bootstrap-'));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'cnb-panel-bootstrap-'));
+  const directory = join(fixtureRoot, "data");
   const app = createPanelServer({
     adminKey: ADMIN,
     gatewayKey: 'panel-test-client-key',
@@ -674,7 +676,7 @@ test('environment bootstrap seeds an unconfigured panel and rejects unsafe setti
   const base = await listen(app.server);
   t.after(async () => {
     await close(app.server);
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(fixtureRoot, { recursive: true, force: true });
   });
   const config = await (await fetch(`${base}/api/auth/config`)).json();
   assert.deepEqual(config, {
@@ -696,8 +698,9 @@ test('environment bootstrap seeds an unconfigured panel and rejects unsafe setti
   assert.equal(restarted.store.state.sso.clientSecret, CLIENT_SECRET);
   restarted.pool.stop();
 
-  const otherDir = mkdtempSync(join(tmpdir(), 'cnb-panel-bootstrap-bad-'));
-  t.after(() => rmSync(otherDir, { recursive: true, force: true }));
+  const otherRoot = mkdtempSync(join(tmpdir(), 'cnb-panel-bootstrap-bad-'));
+  const otherDir = join(otherRoot, 'data');
+  t.after(() => rmSync(otherRoot, { recursive: true, force: true }));
   assert.throws(
     () =>
       createPanelServer({

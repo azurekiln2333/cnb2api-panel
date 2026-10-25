@@ -130,7 +130,8 @@ test("large content events remain bounded and do not hide later small usage even
 });
 
 async function fixture(t) {
-  const directory = mkdtempSync(join(tmpdir(), "cnb-panel-usage-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "cnb-panel-usage-"));
+  const directory = join(fixtureRoot, "data");
   const sse =
     'data: {"choices":[{"delta":{"content":"秘密回复"}}]}\n\n' +
     'data: {"usage":{"prompt_tokens":80,"completion_tokens":20,"prompt_cache_hit_tokens":50}}\n\n' +
@@ -220,7 +221,7 @@ async function fixture(t) {
     app.pool.stop();
     await close(app.server);
     await close(upstream);
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(fixtureRoot, { recursive: true, force: true });
   });
   return {
     ...app,
@@ -254,7 +255,7 @@ test("gateway persists local totals, preserves SSE bytes, and excludes count_tok
   assert.deepEqual(overview.stats.tokenUsage.total, expected);
   assert.deepEqual(overview.accounts[0].tokenUsage, expected);
   assert.equal(overview.stats.requests, 3);
-  const disk = readFileSync(join(app.directory, "requests.log"), "utf8");
+  const disk = readFileSync(app.store.logFiles.requests, "utf8");
   const requestLogs = disk.trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(requestLogs.length, 3);
   for (const log of requestLogs)
@@ -278,8 +279,9 @@ test("gateway persists local totals, preserves SSE bytes, and excludes count_tok
 });
 
 test("legacy version 1 data receives empty usage and lifetime totals survive hourly pruning", (t) => {
-  const directory = mkdtempSync(join(tmpdir(), "cnb-panel-legacy-usage-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "cnb-panel-legacy-usage-"));
+  const directory = join(fixtureRoot, "data");
+  t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
   const store = new Store(directory, { allowLocal: true });
   const saved = { ...store.state, version: 1,
     sso: { ...store.state.sso, clientSecret: store.encrypt("") },

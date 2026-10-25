@@ -2,9 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   appendFileSync,
+  copyFileSync,
   existsSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -16,8 +18,9 @@ import { FileStorage, logChannel, retainLogs } from "../src/file-storage.mjs";
 import { emptyTokenUsage } from "../src/token-usage.mjs";
 
 function fixture(t) {
-  const directory = mkdtempSync(join(tmpdir(), "cnb-split-storage-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "cnb-split-storage-"));
+  const directory = join(fixtureRoot, "data");
+  t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
   return new Store(directory, { allowLocal: true });
 }
 const account = (store) =>
@@ -104,6 +107,8 @@ test("accounts, configuration, statistics and three log streams persist separate
   assert.equal(savedAccount.tokenUsage, undefined);
   assert.equal(json(store.statsFile).accounts[a.id].requests, 1);
   for (const [channel, file] of Object.entries(store.logFiles)) {
+    assert.equal(file, join(store.directory, "../logs", `${channel}.log`));
+    assert.equal(existsSync(join(store.directory, `${channel}.log`)), false);
     assert.ok(lines(file).every((entry) => logChannel(entry) === channel));
     assert.equal(lines(file).length, 1);
   }
@@ -126,6 +131,145 @@ test("accounts, configuration, statistics and three log streams persist separate
   assert.equal(restored.state.tokenUsage.total, 10);
   assert.equal(restored.state.sso.clientSecret, "private-sso");
   assert.equal(restored.state.logs.length, 3);
+});
+
+function logsInLegacyDirectory(store) {
+  for (const [channel, file] of Object.entries(store.logFiles))
+    renameSync(file, join(store.directory, `${channel}.log`));
+}
+
+test("existing data-directory logs migrate into a sibling logs directory and resume without duplicates", (t) => {
+  const store = fixture(t);
+  const a = account(store);
+  for (const kind of ["request", "audit", "health"])
+    store.record({
+      kind,
+      accountId: a.id,
+      status: 200,
+      message: `migrate-${kind}`,
+    });
+  const expected = structuredClone(store.state);
+  const savedAccounts = readFileSync(store.accountsFile);
+  logsInLegacyDirectory(store);
+  const restored = new Store(store.directory);
+  const byId = (logs) => [...logs].sort((a, b) => a.id.localeCompare(b.id));
+  assert.deepEqual(
+    { ...restored.state, logs: byId(restored.state.logs) },
+    { ...expected, logs: byId(expected.logs) },
+  );
+  assert.deepEqual(readFileSync(restored.accountsFile), savedAccounts);
+  for (const [channel, file] of Object.entries(restored.logFiles)) {
+    assert.equal(existsSync(join(store.directory, `${channel}.log`)), false);
+    assert.equal(lines(file).length, 1);
+  }
+  restored.record({ kind: "audit", status: 200, message: "after-migration" });
+  assert.equal(lines(restored.logFiles.audit).length, 2);
+  assert.equal(new Store(store.directory).state.logs.length, 4);
+});
+
+test("interrupted log-directory migration resumes a completed destination copy safely", (t) => {
+  const store = fixture(t);
+  store.record({ kind: "request", status: 200, message: "copy-once" });
+  logsInLegacyDirectory(store);
+  const atomic = FileStorage.prototype.atomic;
+  try {
+    FileStorage.prototype.atomic = function (name, bytes) {
+      atomic.call(this, name, bytes);
+      throw new Error("stopped after copying a log");
+    };
+    assert.throws(() => new Store(store.directory), /stopped after copying/);
+  } finally {
+    FileStorage.prototype.atomic = atomic;
+  }
+  assert.equal(existsSync(join(store.directory, "requests.log")), true);
+  const restored = new Store(store.directory);
+  assert.equal(restored.state.logs.length, 1);
+  assert.equal(lines(restored.logFiles.requests).length, 1);
+  assert.equal(existsSync(join(store.directory, "requests.log")), false);
+});
+
+test("old pending appends recover after moving logs out of the data directory", (t) => {
+  const store = fixture(t);
+  const a = account(store);
+  store.record({
+    kind: "request",
+    accountId: a.id,
+    status: 200,
+    message: "before",
+  });
+  const apply = store.storage.apply.bind(store.storage);
+  store.storage.apply = (operations) => {
+    apply(operations.filter((operation) => operation.type === "replace"));
+    const append = operations.find((operation) => operation.type === "append");
+    appendFileSync(
+      store.storage.path(append.file),
+      Buffer.from(append.text).subarray(0, 17),
+    );
+    throw new Error("old process interrupted");
+  };
+  assert.throws(
+    () =>
+      store.record({
+        kind: "request",
+        accountId: a.id,
+        status: 200,
+        message: "recovered",
+      }),
+    /old process interrupted/,
+  );
+  logsInLegacyDirectory(store);
+  const restored = new Store(store.directory);
+  assert.equal(restored.get(a.id).requests, 2);
+  assert.deepEqual(
+    lines(restored.logFiles.requests).map((entry) => entry.message),
+    ["before", "recovered"],
+  );
+  assert.equal(new Store(store.directory).get(a.id).requests, 2);
+});
+
+test("conflicting destination logs stop migration without overwriting either copy", (t) => {
+  const store = fixture(t);
+  store.record({ kind: "audit", status: 200, message: "original" });
+  const source = join(store.directory, "audit.log");
+  copyFileSync(store.logFiles.audit, source);
+  const target = readFileSync(store.logFiles.audit);
+  appendFileSync(
+    source,
+    JSON.stringify({
+      id: "other",
+      at: new Date().toISOString(),
+      kind: "audit",
+      message: "conflict",
+    }) + "\n",
+  );
+  const original = readFileSync(source);
+  assert.throws(
+    () => new Store(store.directory),
+    /destination already has different logs/,
+  );
+  assert.deepEqual(readFileSync(source), original);
+  assert.deepEqual(readFileSync(store.logFiles.audit), target);
+});
+
+test("a custom log directory works and logs cannot be placed inside the data directory", (t) => {
+  const store = fixture(t);
+  const logDir = join(store.directory, "../operator-logs");
+  const configured = new Store(store.directory, { logDir });
+  configured.record({
+    kind: "audit",
+    status: 200,
+    message: "custom-directory",
+  });
+  assert.equal(configured.logFiles.audit, join(logDir, "audit.log"));
+  assert.equal(
+    new Store(store.directory, { logDir }).state.logs[0].message,
+    "custom-directory",
+  );
+  for (const invalid of [store.directory, join(store.directory, "logs")])
+    assert.throws(
+      () => new Store(store.directory, { logDir: invalid }),
+      /outside PANEL_DATA_DIR/,
+    );
 });
 
 test("legacy panel.json migrates without losing accounts, credentials, metrics or event categories", (t) => {
@@ -206,7 +350,7 @@ test("interrupted log appends recover partial UTF-8 writes without duplication o
     const emojiOffset = bytes.indexOf(Buffer.from("😀", "utf8"));
     assert.ok(emojiOffset >= 0);
     appendFileSync(
-      join(store.directory, append.file),
+      store.storage.path(append.file),
       bytes.subarray(0, emojiOffset + 2),
     );
     throw new Error("interrupted append");
