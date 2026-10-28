@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Preserve logging boundaries while adding observable request overrides."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Persist settings and protect credential-bearing values."}
+{"file":".trellis/spec/backend/routing.md","reason":"Preserve account selection, retry and session-affinity behavior."}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"Fit settings and diagnostics into existing console conventions."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Coordinate body and header behavior across the proxy, storage and UI."}

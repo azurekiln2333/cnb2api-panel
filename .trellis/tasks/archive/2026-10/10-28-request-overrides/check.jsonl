@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify privacy, log access and retention boundaries."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Check persistence, migration and secret handling."}
+{"file":".trellis/spec/backend/routing.md","reason":"Check failover and affinity semantics across override attempts."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Verify usable settings and diagnostics states."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check the end-to-end request contract across components."}
