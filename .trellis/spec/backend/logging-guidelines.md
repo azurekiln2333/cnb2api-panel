@@ -63,6 +63,21 @@ Use media-type placeholders for image, audio, file and tool-result blocks. Do no
 
 Initial message previews are stored in plaintext with event metadata, as documented in the README. Historical records have no preview and must remain readable. The frontend renders previews as escaped text and labels missing or truncated data.
 
+## Request structure
+
+New request records may include bounded `requestDiagnostics` with separately
+labelled received and forwarded shapes. Shapes contain only known field names,
+message positions, known role names, content kinds and lengths. They do not
+retain system text, assistant text, tool data or arbitrary request keys.
+Rule results include operation names, sanitized paths and status, not values.
+The header section contains allowed names and workspace capability acknowledgements,
+not header values. Keep the existing initial user preview policy unchanged.
+
+`GET /api/logs/requests/:id` returns one full request record to a logged-in
+administrator. Bulk log endpoints omit `requestDiagnostics` to keep responses
+bounded. Old records may omit diagnostics. Copying request details must not
+introduce any content the record does not already expose.
+
 ## Verification
 
 Cover text formats, Unicode truncation, media omission, unchanged upstream forwarding, streaming byte counts, empty responses, failure descriptions and persisted legacy records. Browser checks cover preview search, details, copying and mobile wrapping.

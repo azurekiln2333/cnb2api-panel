@@ -14,6 +14,10 @@ import {
 import { resolve, join } from "node:path";
 import { addTokenUsage, emptyTokenUsage } from "./token-usage.mjs";
 import {
+  validateRequestOverrides,
+  validateUpstreamHeaders,
+} from "./request-overrides.mjs";
+import {
   FileStorage,
   LOG_FILES,
   logChannel,
@@ -69,6 +73,9 @@ export const DEFAULT_SETTINGS = {
   healthIntervalSeconds: 60,
   connectTimeoutSeconds: 20,
   idleTimeoutSeconds: 300,
+  dshCompat: true,
+  requestOverrides: { operations: [] },
+  upstreamHeaders: {},
 };
 
 export const DEFAULT_SSO = {
@@ -408,9 +415,18 @@ export class Store {
           logs.push(...loaded.entries);
           this.logLines[channel] = loaded.lines;
         }
+      const settings = { ...DEFAULT_SETTINGS, ...saved.settings };
+      if (typeof settings.dshCompat !== "boolean")
+        throw new Error("Invalid DSH compatibility setting");
+      try {
+        settings.requestOverrides = validateRequestOverrides(settings.requestOverrides);
+        settings.upstreamHeaders = validateUpstreamHeaders(settings.upstreamHeaders);
+      } catch {
+        throw new Error("Invalid request override settings; restore the data backup");
+      }
       this.state = {
         version: 2,
-        settings: { ...DEFAULT_SETTINGS, ...saved.settings },
+        settings,
         logs: legacy
           ? retainLogs(saved.logs || [])
           : logs.sort((a, b) => b.at.localeCompare(a.at)),
@@ -795,6 +811,19 @@ export class Store {
 
   settings(input) {
     const next = { ...this.state.settings };
+    if (input.dshCompat !== undefined) {
+      if (typeof input.dshCompat !== "boolean")
+        throw new InputError("DSH 兼容开关必须为布尔值");
+      next.dshCompat = input.dshCompat;
+    }
+    try {
+      if (input.requestOverrides !== undefined)
+        next.requestOverrides = validateRequestOverrides(input.requestOverrides);
+      if (input.upstreamHeaders !== undefined)
+        next.upstreamHeaders = validateUpstreamHeaders(input.upstreamHeaders);
+    } catch (error) {
+      throw new InputError(error.message);
+    }
     if (input.sessionAffinity !== undefined) {
       if (typeof input.sessionAffinity !== "boolean")
         throw new InputError("会话粘性必须为布尔值");

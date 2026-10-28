@@ -698,6 +698,9 @@ test('request details show the first user message, usage and routing metadata on
   const dialog = page.getByRole('dialog', { name: 'API 请求详情', exact: true })
   const initial = dialog.getByTestId('initial-message')
   await expect(initial).toHaveText(initialMessage)
+  await expect(dialog.getByTestId('request-shape-received')).toContainText('messages')
+  await expect(dialog.getByTestId('request-shape-received')).toContainText('system')
+  await expect(dialog.getByTestId('request-shape-forwarded')).toContainText('stream_options')
   await expect(dialog.locator('script')).toHaveCount(0)
   expect(await page.evaluate(() => '__requestPreviewExecuted' in window)).toBe(false)
   await expect(dialog).not.toContainText(systemMessage)
@@ -748,25 +751,23 @@ test('request details show the first user message, usage and routing metadata on
   await page.screenshot({ path: '../test-results/request-details-mobile.png' })
   await dialog.getByRole('button', { name: '关闭', exact: true }).click()
 
+  const legacyLog = {
+    id: 'legacy-request-preview',
+    at: new Date().toISOString(),
+    kind: 'request',
+    accountId: accounts[0].id,
+    accountName: '旧请求记录',
+    status: 200,
+    message: '旧版请求完成',
+    path: '/v1/chat/completions',
+    requestId: 'legacy-request-id',
+  }
+  await page.route('**/api/logs/requests/legacy-request-preview', (route) =>
+    route.fulfill({ json: { log: legacyLog } }),
+  )
   await page.route('**/api/logs', async (route) => {
     await new Promise<void>((resolve) => setTimeout(resolve, 150))
-    await route.fulfill({
-      json: {
-        logs: [
-          {
-            id: 'legacy-request-preview',
-            at: new Date().toISOString(),
-            kind: 'request',
-            accountId: accounts[0].id,
-            accountName: '旧请求记录',
-            status: 200,
-            message: '旧版请求完成',
-            path: '/v1/chat/completions',
-            requestId: 'legacy-request-id',
-          },
-        ],
-      },
-    })
+    await route.fulfill({ json: { logs: [legacyLog] } })
   })
   await page.getByLabel('搜索事件', { exact: true }).fill('')
   await page.getByRole('button', { name: '刷新记录', exact: true }).click()
@@ -777,6 +778,7 @@ test('request details show the first user message, usage and routing metadata on
   await legacyRow.getByRole('button', { name: '查看事件详情', exact: true }).click()
   await expect(dialog).toContainText('此记录未保存首条用户消息。')
   await expect(dialog).toContainText('此记录未保存 Token 用量。')
+  await expect(dialog).toContainText('此记录未保存请求结构。')
   await expect(dialog.getByTestId('initial-message')).toHaveCount(0)
 })
 

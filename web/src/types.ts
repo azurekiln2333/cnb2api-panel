@@ -90,6 +90,37 @@ export interface Settings {
   healthIntervalSeconds: number
   connectTimeoutSeconds: number
   idleTimeoutSeconds: number
+  dshCompat: boolean
+  requestOverrides: { operations: Array<Record<string, unknown>> }
+  upstreamHeaders: Record<string, string>
+}
+export interface RequestShape {
+  fields: string[]
+  messageCount: number
+  messages: Array<{
+    index: number
+    role: string
+    contentType: string
+    length: number | null
+  }>
+  truncated: boolean
+}
+export interface RequestDiagnostics {
+  received: RequestShape
+  forwarded: RequestShape
+  rules: Array<{
+    name: string
+    mode: string
+    path: string
+    outcome: 'applied' | 'unmatched' | 'skipped'
+    count?: number
+    changed?: boolean
+  }>
+  headers: {
+    configured: string[]
+    supported: boolean | null
+    attempts?: Array<{ attempt: number; status: number; supported: boolean | null }>
+  }
 }
 export interface HourBucket {
   at: string
@@ -136,6 +167,7 @@ export interface LogEntry {
   upstreamEndpoint?: string
   initialMessage?: { role: 'user'; text: string; truncated: boolean }
   tokenUsage?: TokenTotals
+  requestDiagnostics?: RequestDiagnostics
 }
 export interface Overview {
   accounts: Account[]

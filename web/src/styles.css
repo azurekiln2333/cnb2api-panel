@@ -1864,6 +1864,60 @@ button.button,
   grid-template-columns: 1fr 1fr;
   gap: 20px;
 }
+.override-settings {
+  padding: 0 23px 23px;
+}
+.override-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+  margin-top: 20px;
+}
+.override-field {
+  min-width: 0;
+}
+.override-field-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin-bottom: 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.override-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.override-actions .text-link {
+  font-size: 12px;
+  font-weight: 500;
+}
+.override-field > p {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.override-field > textarea {
+  display: block;
+  width: 100%;
+  min-height: 175px;
+  resize: vertical;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.override-field > textarea + p {
+  margin-top: 8px;
+}
+.override-header-names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
 .settings-fields {
   padding: 0 23px 22px;
 }
@@ -3582,6 +3636,13 @@ button.button,
   }
   .routing-settings-grid {
     gap: 15px;
+  }
+  .override-settings {
+    padding-left: 19px;
+    padding-right: 19px;
+  }
+  .override-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
   .section-heading {
     padding: 19px;

@@ -4,7 +4,8 @@ import { fetchQuota } from "./quota.mjs";
 import { InputError, normalizeEndpoint, publicAccount } from "./store.mjs";
 import { emptyTokenUsage, TokenUsageCapture } from "./token-usage.mjs";
 import { WorkerUsageMonitor } from "./worker-usage.mjs";
-import { initialUserMessage } from "./request-details.mjs";
+import { initialUserMessage, requestShape } from "./request-details.mjs";
+import { MAX_REQUEST_BYTES, rewriteRequest } from "./request-overrides.mjs";
 import { SessionAffinity, sessionKey } from "./session-affinity.mjs";
 
 export const isCooling = (a) =>
@@ -698,16 +699,27 @@ export class Pool {
   async forward(req, res, path, payload) {
     const requestId = randomUUID();
     const started = Date.now();
+    const { dshCompat, requestOverrides, upstreamHeaders } = this.store.state.settings;
+    const rewritten = rewriteRequest(payload, { dshCompat, requestOverrides }, path);
+    const forwardedPayload = path === "/v1/chat/completions"
+      ? {
+          ...rewritten.payload,
+          stream_options: { ...rewritten.payload.stream_options, include_usage: true },
+        }
+      : rewritten.payload;
     // CNB workers always stream from the model upstream, including when they
     // aggregate a non-streaming response. Request usage in both client modes.
-    const requestBody = JSON.stringify(
-      path === "/v1/chat/completions"
-        ? {
-            ...payload,
-            stream_options: { ...payload.stream_options, include_usage: true },
-          }
-        : payload,
-    );
+    const requestBody = JSON.stringify(forwardedPayload);
+    const headerNames = Object.keys(upstreamHeaders);
+    const headerCarrier = headerNames.length
+      ? Buffer.from(JSON.stringify(upstreamHeaders), "utf8").toString("base64url")
+      : "";
+    const diagnostics = {
+      received: requestShape(payload),
+      forwarded: requestShape(forwardedPayload),
+      rules: rewritten.rules,
+      headers: { configured: headerNames, supported: null, attempts: [] },
+    };
     const affinityKey = this.store.state.settings.sessionAffinity
       ? sessionKey(req.headers, payload)
       : null;
@@ -729,18 +741,30 @@ export class Pool {
     let usageComplete = false;
     let failureMessage = "没有可用账号，请检查工作区状态、模型范围或冷却时间";
     try {
+      if (Buffer.byteLength(requestBody, "utf8") > MAX_REQUEST_BYTES) {
+        finalStatus = 413;
+        failureMessage = "请求体经覆盖后超出大小限制";
+        const error = { type: "invalid_request_error", message: failureMessage };
+        res.writeHead(finalStatus, {
+          "Content-Type": "application/json",
+          "X-Request-Id": requestId,
+        });
+        res.end(JSON.stringify(path.startsWith("/v1/messages") ? { type: "error", error } : { error }));
+        return;
+      }
       for (; attempts < this.store.state.settings.maxAttempts;) {
         if (controller.signal.aborted) {
           finalStatus = 499;
           return;
         }
-        const selected = this.select(payload.model, excluded, affinityKey);
+        const selected = this.select(forwardedPayload.model, excluded, affinityKey);
         if (!selected) break;
         account = selected;
         attempts++;
         excluded.add(account.id);
         this.active.set(account.id, (this.active.get(account.id) || 0) + 1);
         let timer;
+        if (headerCarrier) diagnostics.headers.supported = null;
         try {
           const attempt = new AbortController();
           timer = setTimeout(
@@ -756,6 +780,9 @@ export class Pool {
               ...(req.headers["anthropic-version"]
                 ? { "anthropic-version": req.headers["anthropic-version"] }
                 : {}),
+              ...(headerCarrier
+                ? { "x-cnb2api-upstream-headers": headerCarrier }
+                : {}),
             },
             body: requestBody,
             signal,
@@ -763,6 +790,13 @@ export class Pool {
           });
           clearTimeout(timer);
           finalStatus = response.status;
+          if (headerCarrier) {
+            const supported = response.headers.get("x-cnb2api-override-support") === "1"
+              ? true
+              : null;
+            diagnostics.headers.supported = supported;
+            diagnostics.headers.attempts.push({ attempt: attempts, status: response.status, supported });
+          }
           if (retryable(response.status)) {
             await response.body?.cancel();
             failureMessage = `工作区返回 HTTP ${response.status}，已进入冷却`;
@@ -881,6 +915,7 @@ export class Pool {
         responseBytes,
         firstByteMs,
         upstreamEndpoint: account?.endpoint || "",
+        requestDiagnostics: diagnostics,
         ...(initialMessage ? { initialMessage } : {}),
         attempts,
         durationMs: Date.now() - started,

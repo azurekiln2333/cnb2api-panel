@@ -13,20 +13,98 @@ import {
   Server,
   LoaderCircle,
   Info,
+  Braces,
 } from '@lucide/vue'
 import { api } from '../api'
 import { notify, useConsole, accountState } from '../console'
 import type { Settings } from '../types'
 
 const { overview, accounts, refresh } = useConsole()
-const form = reactive<Settings>({ ...overview.value!.settings })
+type RoutingFields = Omit<Settings, 'requestOverrides' | 'upstreamHeaders'>
+
+const allowedHeaders = [
+  'user-agent',
+  'accept',
+  'x-product-code',
+  'x-ide-name',
+  'x-ide-type',
+  'x-ide-version',
+  'x-agent-intent',
+  'x-agent-type',
+]
+const json = (value: unknown) => JSON.stringify(value, null, 2)
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+function normalized(settings: Settings): Settings {
+  return JSON.parse(
+    JSON.stringify({
+      ...settings,
+      dshCompat: settings.dshCompat ?? true,
+      requestOverrides: settings.requestOverrides ?? { operations: [] },
+      upstreamHeaders: settings.upstreamHeaders ?? {},
+    }),
+  ) as Settings
+}
+function routingFields(settings: Settings): RoutingFields {
+  const { requestOverrides: _overrides, upstreamHeaders: _headers, ...fields } = settings
+  return fields
+}
+const saved = ref(normalized(overview.value!.settings))
+const form = reactive<RoutingFields>(routingFields(saved.value))
+const overridesText = ref(json(saved.value.requestOverrides))
+const headersText = ref(json(saved.value.upstreamHeaders))
 const saving = ref(false)
 const error = ref('')
-const dirty = computed(() => JSON.stringify(form) !== JSON.stringify(overview.value?.settings))
+const attempted = ref(false)
+const overridesTouched = ref(false)
+const headersTouched = ref(false)
+const dirty = computed(
+  () =>
+    JSON.stringify(form) !== JSON.stringify(routingFields(saved.value)) ||
+    overridesText.value !== json(saved.value.requestOverrides) ||
+    headersText.value !== json(saved.value.upstreamHeaders),
+)
+function applyDraft(settings: Settings) {
+  Object.assign(form, routingFields(settings))
+  overridesText.value = json(settings.requestOverrides)
+  headersText.value = json(settings.upstreamHeaders)
+  attempted.value = false
+  overridesTouched.value = false
+  headersTouched.value = false
+}
+const overridesValidation = computed(() => {
+  let value: unknown
+  try {
+    value = JSON.parse(overridesText.value)
+  } catch {
+    return { value: null, error: '参数覆盖不是有效的 JSON。' }
+  }
+  if (!isObject(value) || !Array.isArray(value.operations) || !value.operations.every(isObject))
+    return { value: null, error: '参数覆盖须包含 operations 对象数组。' }
+  return { value: value as Settings['requestOverrides'], error: '' }
+})
+const headersValidation = computed(() => {
+  let value: unknown
+  try {
+    value = JSON.parse(headersText.value)
+  } catch {
+    return { value: null, error: '请求头覆盖不是有效的 JSON。' }
+  }
+  if (!isObject(value)) return { value: null, error: '请求头覆盖须为 JSON 对象。' }
+  if (Object.keys(value).some((name) => !allowedHeaders.includes(name.toLowerCase())))
+    return { value: null, error: '请求头名称不在允许列表中。' }
+  if (Object.values(value).some((header) => typeof header !== 'string'))
+    return { value: null, error: '请求头的值须为字符串。' }
+  return { value: value as Settings['upstreamHeaders'], error: '' }
+})
 watch(
   () => overview.value?.settings,
-  (value, previous) => {
-    if (value && JSON.stringify(form) === JSON.stringify(previous)) Object.assign(form, value)
+  (value) => {
+    // The PATCH response is authoritative while an older overview request may still be in flight.
+    if (!value || saving.value) return
+    const wasDirty = dirty.value
+    saved.value = normalized(value)
+    if (!wasDirty) applyDraft(saved.value)
   },
 )
 const strategies = [
@@ -62,9 +140,21 @@ const eligible = computed(() =>
 )
 async function save() {
   error.value = ''
+  attempted.value = true
+  const overrides = overridesValidation.value.value
+  const headers = headersValidation.value.value
+  if (!overrides || !headers) return
+  const submitted = JSON.stringify([form, overridesText.value, headersText.value])
   saving.value = true
   try {
-    await api('/settings', 'PATCH', form)
+    const result = await api<{ settings: Settings }>('/settings', 'PATCH', {
+      ...form,
+      requestOverrides: overrides,
+      upstreamHeaders: headers,
+    })
+    const unchanged = submitted === JSON.stringify([form, overridesText.value, headersText.value])
+    saved.value = normalized(result.settings)
+    if (unchanged) applyDraft(saved.value)
     await refresh()
     notify('路由配置已保存并即时生效')
   } catch (e) {
@@ -218,6 +308,111 @@ async function save() {
         </div>
       </section>
     </div>
+    <section class="section-panel overrides-panel">
+      <header class="section-heading">
+        <Braces :size="20" />
+        <div>
+          <h2>请求覆盖</h2>
+          <p>配置全局参数规则和上游请求头。</p>
+        </div>
+      </header>
+      <div class="override-settings">
+        <label class="affinity-toggle">
+          <input v-model="form.dshCompat" type="checkbox" />
+          <span>
+            <strong>CNB / DSH 兼容预设</strong>
+            <small>
+              预设把 Chat Completions 请求的所有 developer 角色改为 system。 这项转换不依赖 DSH
+              标识。角色转换会改变消息优先级。检测到 DSH 标识时，预设会改写 system / developer 的
+              DSH 身份、名称和路径提示。预设也会替换 assistant 历史中的两种 DSH 身份句。
+              模型收到改写后的内容。用户和工具内容不变。
+            </small>
+          </span>
+        </label>
+        <div class="override-grid">
+          <div class="override-field">
+            <div class="override-field-heading">
+              <label for="request-overrides">参数覆盖</label>
+              <div class="override-actions">
+                <button
+                  type="button"
+                  class="text-link"
+                  @click="overridesText = json({ operations: [] })"
+                >
+                  清空规则
+                </button>
+                <button
+                  type="button"
+                  class="text-link"
+                  @click="overridesText = json(saved.requestOverrides)"
+                >
+                  恢复已保存的规则
+                </button>
+              </div>
+            </div>
+            <p class="subtle">按 operations 数组顺序应用规则。</p>
+            <textarea
+              id="request-overrides"
+              v-model="overridesText"
+              class="mono"
+              spellcheck="false"
+              rows="9"
+              :aria-invalid="(attempted || overridesTouched) && !!overridesValidation.error"
+              aria-describedby="request-overrides-error"
+              @blur="overridesTouched = true"
+            />
+            <p
+              v-if="(attempted || overridesTouched) && overridesValidation.error"
+              id="request-overrides-error"
+              class="form-error"
+              role="alert"
+            >
+              {{ overridesValidation.error }}
+            </p>
+          </div>
+          <div class="override-field">
+            <div class="override-field-heading">
+              <label for="upstream-headers">请求头覆盖</label>
+              <div class="override-actions">
+                <button type="button" class="text-link" @click="headersText = json({})">
+                  清空请求头
+                </button>
+                <button
+                  type="button"
+                  class="text-link"
+                  @click="headersText = json(saved.upstreamHeaders)"
+                >
+                  恢复已保存的请求头
+                </button>
+              </div>
+            </div>
+            <p class="subtle">仅允许以下请求头名称：</p>
+            <p class="override-header-names">
+              <code v-for="name in allowedHeaders" :key="name">{{ name }}</code>
+            </p>
+            <textarea
+              id="upstream-headers"
+              v-model="headersText"
+              class="mono"
+              spellcheck="false"
+              rows="9"
+              :aria-invalid="(attempted || headersTouched) && !!headersValidation.error"
+              aria-describedby="upstream-headers-error"
+              @blur="headersTouched = true"
+            />
+            <p
+              v-if="(attempted || headersTouched) && headersValidation.error"
+              id="upstream-headers-error"
+              class="form-error"
+              role="alert"
+            >
+              {{ headersValidation.error }}
+            </p>
+            <p class="subtle">工作区支持不代表服务商已收到请求头。</p>
+          </div>
+        </div>
+      </div>
+    </section>
     <p v-if="error" class="form-error" role="alert">{{ error }}</p>
   </form>
   <section class="section-panel route-map-panel">

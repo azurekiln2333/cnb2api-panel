@@ -21,6 +21,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Deployment](./deployment.md) | Compose naming, scoped image updates, release packaging | Implemented |
 | [Session Routing](./routing.md) | Session affinity, eligibility and bounded bindings | Implemented |
 | [Logging Guidelines](./logging-guidelines.md) | Separate request/audit/runtime logs, bounded previews and retention | Implemented |
+| [Request Overrides](./request-overrides.md) | Request transformation, safe header carrier and diagnostics | Implemented |
 | [OIDC Authentication](./oidc-authentication.md) | Management sessions, SSO settings, provider validation | Implemented |
 
 ---

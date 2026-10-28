@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { Search, RefreshCw, ArrowUpRight, ScrollText, X, Copy } from '@lucide/vue'
+import { Search, RefreshCw, ArrowUpRight, ScrollText, X, Copy, LoaderCircle } from '@lucide/vue'
+import { api } from '../api'
 import { useConsole, time, number, copy } from '../console'
-import type { LogChannel, LogEntry } from '../types'
+import type { LogChannel, LogEntry, RequestShape } from '../types'
 import ModalShell from '../components/ModalShell.vue'
 const props = withDefaults(defineProps<{ channel?: LogChannel }>(), { channel: 'requests' })
 const { logStreams, refreshLogs } = useConsole()
@@ -32,6 +33,9 @@ const kind = ref('all')
 const page = ref(1)
 const selected = ref<LogEntry | null>(null)
 const refreshing = ref(false)
+const detailLoading = ref(false)
+const detailError = ref('')
+let detailGeneration = 0
 const labels: Record<LogEntry['kind'], string> = {
   request: 'API 请求',
   audit: '管理操作',
@@ -68,14 +72,95 @@ const tokenFields = [
   { key: 'cacheWrite', label: '缓存写入' },
   { key: 'total', label: '合计' },
 ] as const
+const ruleOutcomes = { applied: '已应用', unmatched: '未匹配', skipped: '已跳过' } as const
+const supportLabel = (supported: boolean | null) =>
+  supported === true ? '工作区确认支持' : supported === false ? '工作区不支持' : '暂无工作区确认'
+const diagnosticShapes = computed(() => {
+  const diagnostics = selected.value?.requestDiagnostics
+  return diagnostics
+    ? [
+        { label: '接收的请求', key: 'received', shape: diagnostics.received },
+        { label: '转发的请求', key: 'forwarded', shape: diagnostics.forwarded },
+      ]
+    : []
+})
 function bytes(value: number) {
   if (value < 1024) return `${number(value)} B`
   const unit = value < 1024 * 1024 ? 'KiB' : 'MiB'
   const divisor = unit === 'KiB' ? 1024 : 1024 * 1024
   return `${(value / divisor).toLocaleString('zh-CN', { maximumFractionDigits: 2 })} ${unit}`
 }
+function safeShape(shape: RequestShape): RequestShape {
+  return {
+    fields: shape.fields,
+    messageCount: shape.messageCount,
+    messages: shape.messages.map(({ index, role, contentType, length }) => ({
+      index,
+      role,
+      contentType,
+      length,
+    })),
+    truncated: shape.truncated,
+  }
+}
 function copyDetails() {
-  if (selected.value) void copy(JSON.stringify(selected.value, null, 2))
+  if (!selected.value) return
+  const { requestDiagnostics, ...entry } = selected.value
+  const diagnostics = requestDiagnostics && {
+    received: safeShape(requestDiagnostics.received),
+    forwarded: safeShape(requestDiagnostics.forwarded),
+    rules: requestDiagnostics.rules.map(({ name, mode, path, outcome, count, changed }) => ({
+      name,
+      mode,
+      path,
+      outcome,
+      ...(count == null ? {} : { count }),
+      ...(changed == null ? {} : { changed }),
+    })),
+    headers: {
+      configured: requestDiagnostics.headers.configured,
+      supported: requestDiagnostics.headers.supported,
+      ...(requestDiagnostics.headers.attempts
+        ? {
+            attempts: requestDiagnostics.headers.attempts.map(({ attempt, status, supported }) => ({
+              attempt,
+              status,
+              supported,
+            })),
+          }
+        : {}),
+    },
+  }
+  void copy(
+    JSON.stringify(
+      { ...entry, ...(diagnostics ? { requestDiagnostics: diagnostics } : {}) },
+      null,
+      2,
+    ),
+  )
+}
+function closeDetails() {
+  detailGeneration++
+  selected.value = null
+  detailLoading.value = false
+  detailError.value = ''
+}
+async function openDetails(log: LogEntry) {
+  const generation = ++detailGeneration
+  selected.value = log
+  detailError.value = ''
+  detailLoading.value = log.kind === 'request'
+  if (log.kind !== 'request') return
+  try {
+    const result = await api<{ log: LogEntry }>(`/logs/requests/${encodeURIComponent(log.id)}`)
+    if (!result.log || result.log.id !== log.id) throw new Error('invalid request detail')
+    if (generation === detailGeneration && selected.value?.id === log.id)
+      selected.value = { ...selected.value, ...result.log }
+  } catch {
+    if (generation === detailGeneration) detailError.value = '读取请求详情失败，请重试。'
+  } finally {
+    if (generation === detailGeneration) detailLoading.value = false
+  }
 }
 watch([search, kind], () => {
   page.value = 1
@@ -176,7 +261,7 @@ onMounted(refresh)
               {{ log.durationMs != null ? `${number(log.durationMs)} ms` : '—' }}
             </td>
             <td>
-              <button class="icon-button" aria-label="查看事件详情" @click="selected = log">
+              <button class="icon-button" aria-label="查看事件详情" @click="openDetails(log)">
                 <ArrowUpRight :size="16" />
               </button>
             </td>
@@ -216,7 +301,7 @@ onMounted(refresh)
     "
     :subtitle="time(selected.at, true)"
     :wide="selected.kind === 'request'"
-    @close="selected = null"
+    @close="closeDetails"
     ><div class="modal-body">
       <dl class="detail-list" :class="{ 'request-details': selected.kind === 'request' }">
         <div>
@@ -306,6 +391,104 @@ onMounted(refresh)
         </div>
       </dl>
       <template v-if="selected.kind === 'request'">
+        <section class="request-section" aria-label="请求结构与覆盖结果">
+          <div class="request-section-heading"><h3>请求结构与覆盖结果</h3></div>
+          <p v-if="detailLoading" class="request-note diagnostic-loading" role="status">
+            <LoaderCircle :size="14" class="spin" />正在读取请求详情
+          </p>
+          <div v-else-if="detailError" class="diagnostic-error" role="alert">
+            <span>{{ detailError }}</span>
+            <button class="text-link" @click="openDetails(selected)">重试</button>
+          </div>
+          <template v-else-if="selected.requestDiagnostics">
+            <div
+              v-for="item in diagnosticShapes"
+              :key="item.key"
+              class="diagnostic-shape"
+              :data-testid="`request-shape-${item.key}`"
+            >
+              <h4>{{ item.label }}</h4>
+              <dl class="diagnostic-summary">
+                <div>
+                  <dt>字段</dt>
+                  <dd>
+                    <template v-if="item.shape.fields.length">
+                      <code v-for="field in item.shape.fields" :key="field">{{ field }}</code>
+                    </template>
+                    <span v-else>无</span>
+                  </dd>
+                </div>
+                <div>
+                  <dt>消息数</dt>
+                  <dd>{{ number(item.shape.messageCount) }}</dd>
+                </div>
+              </dl>
+              <ul v-if="item.shape.messages.length" class="diagnostic-messages">
+                <li v-for="message in item.shape.messages" :key="message.index">
+                  <span
+                    ><code>#{{ message.index }}</code> <strong>{{ message.role }}</strong></span
+                  >
+                  <span
+                    >{{ message.contentType }} · 长度
+                    {{ message.length == null ? '未知' : number(message.length) }}</span
+                  >
+                </li>
+              </ul>
+              <p v-if="item.shape.truncated" class="request-note usage-incomplete">
+                结构记录已截断。
+              </p>
+            </div>
+            <div class="diagnostic-group" data-testid="request-rules">
+              <h4>规则结果</h4>
+              <ul v-if="selected.requestDiagnostics.rules.length" class="diagnostic-rules">
+                <li v-for="(rule, index) in selected.requestDiagnostics.rules" :key="index">
+                  <div>
+                    <strong>{{ rule.name }}</strong
+                    ><span class="diagnostic-outcome">{{ ruleOutcomes[rule.outcome] }}</span>
+                  </div>
+                  <p>
+                    <code>{{ rule.mode }}</code> · <code>{{ rule.path || '—' }}</code
+                    ><template v-if="rule.count != null"> · 次数 {{ number(rule.count) }}</template
+                    ><template v-if="rule.changed != null">
+                      · {{ rule.changed ? '字段已改变' : '字段未改变' }}</template
+                    >
+                  </p>
+                </li>
+              </ul>
+              <p v-else class="request-note">没有规则结果。</p>
+            </div>
+            <div class="diagnostic-group" data-testid="request-headers">
+              <h4>请求头覆盖</h4>
+              <p class="request-note diagnostic-header-status">
+                {{ supportLabel(selected.requestDiagnostics.headers.supported) }}。
+                工作区确认不代表服务商已收到请求头。
+              </p>
+              <p class="diagnostic-header-names">
+                <template v-if="selected.requestDiagnostics.headers.configured.length">
+                  <code
+                    v-for="name in selected.requestDiagnostics.headers.configured"
+                    :key="name"
+                    >{{ name }}</code
+                  >
+                </template>
+                <span v-else>未配置请求头。</span>
+              </p>
+              <ul
+                v-if="selected.requestDiagnostics.headers.attempts?.length"
+                class="diagnostic-messages"
+              >
+                <li
+                  v-for="attempt in selected.requestDiagnostics.headers.attempts"
+                  :key="attempt.attempt"
+                >
+                  <span>第 {{ number(attempt.attempt) }} 次 · HTTP {{ attempt.status }}</span>
+                  <span>{{ supportLabel(attempt.supported) }}</span>
+                </li>
+              </ul>
+            </div>
+          </template>
+          <p v-else class="request-note">此记录未保存请求结构。</p>
+        </section>
         <section class="request-section" aria-label="请求 Token 用量">
           <div class="request-section-heading"><h3>Token 用量</h3></div>
           <template v-if="selected.tokenUsage">
@@ -363,8 +546,10 @@ onMounted(refresh)
     <footer class="modal-footer">
       <span />
       <div class="button-group">
-        <button class="button" @click="copyDetails"><Copy :size="14" />复制详情</button>
-        <button class="button" @click="selected = null">关闭</button>
+        <button class="button" :disabled="detailLoading" @click="copyDetails">
+          <Copy :size="14" />复制详情
+        </button>
+        <button class="button" @click="closeDetails">关闭</button>
       </div>
     </footer></ModalShell
   >
@@ -432,6 +617,93 @@ onMounted(refresh)
   color: var(--muted);
   font-size: 12px;
   line-height: 1.7;
+}
+.diagnostic-loading,
+.diagnostic-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.diagnostic-error {
+  color: var(--red);
+  font-size: 12px;
+}
+.diagnostic-shape,
+.diagnostic-group {
+  margin-top: 16px;
+  min-width: 0;
+}
+.diagnostic-shape h4,
+.diagnostic-group h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.diagnostic-summary {
+  margin: 0;
+  font-size: 12px;
+}
+.diagnostic-summary > div {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 8px;
+  margin: 5px 0;
+}
+.diagnostic-summary dt {
+  color: var(--muted);
+}
+.diagnostic-summary dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.diagnostic-messages,
+.diagnostic-rules {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+.diagnostic-messages li,
+.diagnostic-rules li {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.diagnostic-messages li,
+.diagnostic-rules li > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+.diagnostic-messages li > span,
+.diagnostic-rules li > div > * {
+  min-width: 0;
+}
+.diagnostic-messages li > span:last-child,
+.diagnostic-rules li > p {
+  color: var(--secondary);
+}
+.diagnostic-rules li > p {
+  margin-top: 3px;
+  line-height: 1.6;
+}
+.diagnostic-outcome {
+  color: var(--primary);
+  white-space: nowrap;
+}
+.diagnostic-header-names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 .usage-incomplete {
   color: var(--amber);

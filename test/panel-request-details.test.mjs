@@ -185,7 +185,9 @@ test("request details preserve streaming bytes and survive storage alongside leg
   };
   assert.equal(forwarded, JSON.stringify(upstreamPayload));
   const logs = (await (await app.call("/api/logs")).json()).logs;
-  const log = logs.find((entry) => entry.kind === "request");
+  const summary = logs.find((entry) => entry.kind === "request");
+  assert.equal(summary.requestDiagnostics, undefined);
+  const log = (await (await app.call(`/api/logs/requests/${summary.id}`)).json()).log;
   assert.equal(log.method, "POST");
   assert.equal(log.stream, true);
   assert.equal(
@@ -203,6 +205,11 @@ test("request details preserve streaming bytes and survive storage alongside leg
   });
   assert.equal(log.tokenUsage.total, 15);
   assert.equal(log.requestId, response.headers.get("x-request-id"));
+  assert.equal(log.requestDiagnostics.received.messageCount, 3);
+  assert.deepEqual(
+    log.requestDiagnostics.received.messages.map((message) => message.role),
+    ["system", "user", "assistant"],
+  );
   for (const omitted of [
     "private-system-text",
     "private-history-text",

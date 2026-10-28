@@ -24,6 +24,7 @@ import {
   verifyIdTokenForConfig,
 } from "./auth.mjs";
 import { Pool, isReady, isCooling } from "./pool.mjs";
+import { MAX_REQUEST_BYTES } from "./request-overrides.mjs";
 import { addTokenUsage, emptyTokenUsage } from "./token-usage.mjs";
 import { auditRequest } from "./audit.mjs";
 import { logChannel } from "./file-storage.mjs";
@@ -449,7 +450,7 @@ export function createPanelServer(options) {
         }
         if (method !== "POST")
           return json(res, 405, { error: { message: "method not allowed" } });
-        const input = await body(req, 4 * 1024 * 1024);
+        const input = await body(req, MAX_REQUEST_BYTES);
         if (
           input.model !== undefined &&
           (typeof input.model !== "string" || input.model.length > 120)
@@ -721,6 +722,14 @@ export function createPanelServer(options) {
           return json(res, 200, { settings: store.state.settings });
         if (path === "/api/settings" && method === "PATCH")
           return json(res, 200, { settings: store.settings(await body(req)) });
+        const requestLogDetail = /^\/api\/logs\/requests\/([a-f0-9-]{36})$/i.exec(path);
+        if (requestLogDetail && method === "GET") {
+          const log = store.state.logs.find(
+            (entry) => entry.kind === "request" && entry.id === requestLogDetail[1],
+          );
+          if (!log) throw new InputError("请求记录不存在", 404);
+          return json(res, 200, { log });
+        }
         const logRoute = /^\/api\/logs(?:\/(requests|audit|system))?$/.exec(
           path,
         );
@@ -728,7 +737,7 @@ export function createPanelServer(options) {
           return json(res, 200, {
             logs: store.state.logs.filter(
               (entry) => logChannel(entry) === (logRoute[1] || "requests"),
-            ),
+            ).map(({ requestDiagnostics, ...entry }) => entry),
           });
         if (path === "/api/access" && method === "GET")
           return json(res, 200, {
