@@ -1,6 +1,6 @@
 {
   "name": "cnb2api-panel",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "private": true,
   "description": "Standalone CNB account pool, API gateway and Vue management console.",
   "type": "module",
