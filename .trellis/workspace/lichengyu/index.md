@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 2
+- **Total Sessions**: 3
 - **Last Active**: 2026-10-29
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~64 | Active |
+| `journal-1.md` | ~86 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 3 | 2026-10-29 | Codex Responses compatibility v1.1.7 | `e856370` | `main` |
 | 2 | 2026-10-29 | v1.1.5 gateway recovery and Responses release | `3fb805f` | `main` |
 | 1 | 2026-10-29 | Release v1.1.4 with DSH compatibility | `5b74a62`, `e9960db` | `main` |
 <!-- @@@/auto:session-history -->

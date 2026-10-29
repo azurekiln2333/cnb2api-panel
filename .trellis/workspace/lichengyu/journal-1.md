@@ -62,3 +62,25 @@ Fixed inference false-offline detection, probe races and cooldown recovery with 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 3: Codex Responses compatibility v1.1.7
+<!-- trellis-session: v=2 fp=35003f34504bf230 -->
+
+**Date**: 2026-10-29
+**Task**: Codex Responses compatibility v1.1.7
+**Branch**: `main`
+
+### Summary
+
+Fixed Codex client_metadata rejection, namespace/custom tool mapping, full-history round trips and streamed tool-name fragments. Validated with a strict Chat-only upstream, 252 backend tests, 35 browser tests, build/typecheck/format, package checksum and a real isolated Codex CLI 0.164.0 two-turn tool run. Documented hosted-search and remote-compaction limits plus tested provider settings. Published main and v1.1.7 to GitHub, CNB and GitLab. GitHub tag run 40860960492 passed test, console, release and image jobs. CNB v1.1.7 and latest share index sha256:495d9789c7cb3a6c87b05fa5b3a16b31f9a0d8a20dc7622d0a315b919837c4f4; amd64 image created 2026-10-29T10:52:42Z. Existing untracked workspace scaffolding and old tasks were left outside the release.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e856370` | fix: bridge Codex Responses requests in v1.1.7 |
+
+### Status
+
+[OK] **Completed**
