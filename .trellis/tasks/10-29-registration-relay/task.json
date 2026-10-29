@@ -15,12 +15,16 @@
   "branch": "feat/registration-relay",
   "base_branch": "main",
   "worktree_path": null,
-  "commit": null,
+  "commit": "005f725",
   "pr_url": null,
   "subtasks": [],
   "children": [],
   "parent": null,
   "relatedFiles": [],
   "notes": "",
-  "meta": {}
+  "meta": {
+    "release": "v1.2.0",
+    "github_tag_run": "40887617458",
+    "cloud_verified": true
+  }
 }

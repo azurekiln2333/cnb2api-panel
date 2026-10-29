@@ -44,7 +44,13 @@ Workers must use explicit file ownership, read task artifacts/native injected co
   It includes both new runtime modules and the compiled console, excludes real
   environment and account data, and has SHA-256
   `d5e33a654d8a6fcfa574d59c621dc43007cae2b67b4086faa9f9f4c62234428f`.
-- Cloud publication remains the final acceptance gate after committing/tagging.
+- Cloud publication passed: all three remotes contain `main` and tag `v1.2.0`.
+  GitHub tag run `40887617458` completed successfully for test, console, release
+  and image. Release `427943015` contains the uploaded tar.gz and SHA-256 file.
+- CNB `v1.2.0` and `latest` both resolve to OCI index
+  `sha256:bcdeb4f20b9a2403d1c5f773352304871351f43a3591d07d89226dcd4ff3c17f`.
+  The amd64 image was created at `2026-10-29T14:03:09.774149654Z`
+  (`2026-10-29 22:03:09` Asia/Shanghai).
 
 ## Risk checks
 

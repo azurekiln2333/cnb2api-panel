@@ -37,7 +37,7 @@ Configure a primary panel to update workspace registration locally and forward t
 - [x] AC6 (R5): A newer URI supersedes queued older work; stale completions cannot acknowledge newer work. Account/token/peer changes cannot send an obsolete job using unrelated credentials.
 - [x] AC7 (R1, R6): Administrators can add, edit, enable, disable and remove peers, preserve drafts across refreshes, inspect state, and manually retry from desktop and mobile layouts.
 - [x] AC8 (R3, R6): Management responses, statistics documents, audit/runtime logs and transport errors contain no registration-token values or raw peer response bodies.
-- [ ] AC9 (R7, R8): Backend tests, browser tests, build/typecheck/format, documentation checks and cloud release validation pass.
+- [x] AC9 (R7, R8): Backend tests, browser tests, build/typecheck/format, documentation checks and cloud release validation pass.
 - [x] AC10 (R9): The model page is available from desktop/mobile navigation, supports searching and copying IDs, distinguishes discovered/configured models, and reflects disabled/offline/cooling account readiness. Empty and failed loads remain usable. The documented model-selection explanation matches the inspected upstream source.
 - [x] AC11 (R10): New API's actual `hard_limit_usd - total_usage / 100` calculation returns the deduplicated available CNB-credit amount. Both billing URL prefixes require the gateway key. Disabled organizations, frozen/overdrawn credits, missing quota, and credential/privacy boundaries have regression coverage. Setup instructions identify OpenAI channel type, root base URL and the credit-unit interpretation.
 
