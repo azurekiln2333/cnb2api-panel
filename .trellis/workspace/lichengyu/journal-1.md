@@ -40,3 +40,25 @@ Published v1.1.4 on GitHub and CNB. GitHub tag workflow passed all four jobs. Ve
 ### Next Steps
 
 - Publish the separately modified workspace proxy when its source repository is confirmed.
+
+
+## Session 2: v1.1.5 gateway recovery and Responses release
+<!-- trellis-session: v=2 fp=36180e141ed3db03 -->
+
+**Date**: 2026-10-29
+**Task**: v1.1.5 gateway recovery and Responses release
+**Branch**: `main`
+
+### Summary
+
+Fixed inference false-offline detection, probe races and cooldown recovery with automatic wake. Added Responses-to-Chat conversion, usable bulk probes, quota percentages, request outcome filters and filtered JSON export. Passed 235 backend tests and 31 browser tests plus the updated access sample test. Pushed main and v1.1.5 to GitHub and CNB to trigger cloud builds, and synchronized GitLab. Cloud build completion remains pending.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3fb805f` | fix: restore gateway health and bridge Responses in v1.1.5 |
+
+### Status
+
+[OK] **Completed**
