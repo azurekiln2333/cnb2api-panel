@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend verification"}
+{"file":".trellis/spec/backend/routing.md","reason":"Readiness and routing regressions"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"No secrets or response bodies in logs"}
+{"file":".trellis/spec/backend/request-overrides.md","reason":"Preserve overrides and carrier"}
+{"file":".trellis/tasks/10-29-workspace-probe-timeouts/research/probe.md","reason":"Probe reproduction and test plan"}
+{"file":".trellis/tasks/10-29-workspace-probe-timeouts/research/responses.md","reason":"Protocol lifecycle and compatibility"}
+{"file":".trellis/spec/frontend/index.md","reason":"Quota and filtered export behavior"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Browser verification"}

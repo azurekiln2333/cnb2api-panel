@@ -27,6 +27,8 @@ settings migration, bounded storage, expiry, preserved payload fields and stream
 For `/v1/chat/completions`, merge `stream_options.include_usage: true` into the
 forwarded body while retaining other options and all generation fields. CNB
 workers force upstream streaming even for non-streaming clients, so request
-usage in both modes. Other routes keep the original body. Derive affinity from
-the original payload, and keep response bytes transparent. Never recover local
+usage in both modes. Responses requests convert to Chat before this merge.
+Derive affinity from the original semantic messages. Keep Chat and Messages
+response bytes transparent; Responses converts output as described in
+`gateway-compatibility.md`. Never recover local
 usage by subtracting workspace snapshots; concurrent/direct traffic is ambiguous.

@@ -1,5 +1,16 @@
 import type { Account, Quota } from './types'
 
+export function formatRemainingQuotaPercent(credits: {
+  total: number | null
+  used: number | null
+  freeze: number | null
+}) {
+  const { total, used, freeze } = credits
+  if (total == null || total <= 0 || used == null || freeze == null) return '—'
+  const remaining = Math.max(0, Math.min(total, total - used - freeze))
+  return `${((remaining / total) * 100).toLocaleString('zh-CN', { maximumFractionDigits: 1 })}%`
+}
+
 export function summarizeQuota(accounts: Account[]) {
   const snapshots = new Map<string, Quota>()
   const syncs = new Map<string, NonNullable<Account['quotaSync']>>()

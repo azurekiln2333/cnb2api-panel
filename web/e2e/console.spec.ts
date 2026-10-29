@@ -866,6 +866,103 @@ test('release version and selected sidebar remain distinct in light, dark, colla
   await page.screenshot({ path: '../test-results/sidebar-selected-mobile.png', fullPage: true })
 })
 
+test('bulk probing stays available while another account operation is pending', async ({
+  page,
+  request,
+}) => {
+  const accounts = await seed(request)
+  await login(page)
+  let releaseProbe!: () => void
+  const pendingProbe = new Promise<void>((resolve) => {
+    releaseProbe = resolve
+  })
+  let otherProbes = 0
+  await page.route('**/api/accounts/*/probe', async (route) => {
+    if (route.request().url().includes(`/accounts/${accounts[0].id}/`)) await pendingProbe
+    else otherProbes++
+    await route.continue()
+  })
+  const firstProbe = page.getByRole('button', { name: '探活AzureKiln · 主力', exact: true })
+  try {
+    await firstProbe.click()
+    await expect(firstProbe).toBeDisabled()
+    const bulk = page.getByRole('button', { name: '全部探活', exact: true })
+    await expect(bulk).toBeEnabled()
+    await bulk.click()
+    await expect.poll(() => otherProbes).toBe(1)
+    await expect(bulk).toBeEnabled()
+    expect(otherProbes).toBe(1)
+  } finally {
+    releaseProbe()
+  }
+  await expect(firstProbe).toBeEnabled()
+})
+
+test('request outcomes filter results and export every matching page', async ({
+  page,
+  request,
+}) => {
+  await seed(request)
+  const matching = [...Array.from({ length: 22 }, () => 200), 302, 400, 499, 503].map(
+    (status, index) => ({
+      id: `export-request-${index}`,
+      at: '2026-10-29T07:00:00.000Z',
+      kind: 'request',
+      accountId: 'filter-account',
+      accountName: '筛选工作区',
+      status,
+      message: '筛选导出标记',
+      durationMs: 10,
+    }),
+  )
+  await page.route('**/api/logs', (route) =>
+    route.fulfill({
+      json: {
+        logs: [...matching, { ...matching[0], id: 'outside-search', message: '其他记录' }],
+      },
+    }),
+  )
+  await login(page)
+  await page.getByRole('link', { name: '请求日志', exact: true }).click()
+  const outcome = page.getByLabel('请求结果', { exact: true })
+  await expect(outcome).toBeVisible()
+  await expect(page.getByLabel('事件类型', { exact: true })).toHaveCount(0)
+  await page.getByLabel('搜索事件', { exact: true }).fill('筛选导出标记')
+  await outcome.selectOption('success')
+  await expect(page.locator('.activity-table tbody tr')).toHaveCount(20)
+  await expect(page.locator('.table-footer')).toContainText('共 23 条记录')
+  await page.getByRole('button', { name: '下一页', exact: true }).click()
+  await expect(page.locator('.activity-table tbody tr')).toHaveCount(3)
+  const exportButton = page.getByRole('button', { name: '导出筛选记录', exact: true })
+  const successDownload = page.waitForEvent('download')
+  await exportButton.click()
+  const successFile = await (await successDownload).path()
+  expect(successFile).not.toBeNull()
+  const successful = JSON.parse(readFileSync(successFile!, 'utf8'))
+  expect(successful).toHaveLength(23)
+  expect(successful.map((entry: { id: string }) => entry.id)).toEqual(
+    matching.filter((entry) => entry.status < 400).map((entry) => entry.id),
+  )
+  await outcome.selectOption('failure')
+  await expect(page.locator('.activity-table tbody tr')).toHaveCount(3)
+  await expect(page.getByRole('button', { name: '上一页', exact: true })).toBeDisabled()
+  await expect(page.locator('.http-status')).toHaveText(['400', '499', '503'])
+  const failureDownload = page.waitForEvent('download')
+  await exportButton.click()
+  const failureFile = await (await failureDownload).path()
+  expect(failureFile).not.toBeNull()
+  const failed = JSON.parse(readFileSync(failureFile!, 'utf8'))
+  expect(failed.map((entry: { status: number }) => entry.status)).toEqual([400, 499, 503])
+  await page.screenshot({ path: '../test-results/request-log-filters-desktop.png' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.locator('.app-shell')).toHaveCSS('grid-template-columns', '0px 390px')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+  await expect(exportButton).toBeVisible()
+  await page.screenshot({ path: '../test-results/request-log-filters-mobile.png' })
+  await page.getByLabel('搜索事件', { exact: true }).fill('没有匹配的请求')
+  await expect(exportButton).toBeDisabled()
+})
+
 test('request logs, audit logs and system events have separate navigation and never mix records', async ({
   page,
   request,
@@ -950,6 +1047,17 @@ test('routing changes persist and access examples match each protocol', async ({
     .toBe(true)
   await page.getByRole('link', { name: '接入配置', exact: true }).click()
   await expect(page.locator('pre')).toContainText('/v1/chat/completions')
+  await expect(page.getByText('工作区启动后向面板注册地址。', { exact: true })).toBeVisible()
+  await page.getByRole('tab', { name: 'Responses', exact: true }).click()
+  await expect(page.locator('pre')).toContainText('curl http://127.0.0.1:19220/v1/responses')
+  await expect(page.locator('pre')).toContainText('"input": "你好"')
+  await expect(page.locator('pre')).toContainText('"store": false')
+  await expect(page.locator('pre')).toContainText('"stream": true')
+  await expect(page.locator('pre')).toContainText('Authorization: Bearer YOUR_GATEWAY_KEY')
+  await expect(page.locator('pre')).not.toContainText('\n+')
+  await page.getByRole('tab', { name: 'New API', exact: true }).click()
+  await expect(page.locator('pre')).toContainText('渠道类型    OpenAI')
+  await expect(page.locator('pre')).toContainText('http://127.0.0.1:19220')
   await page.getByRole('tab', { name: 'Claude Code' }).click()
   await expect(page.locator('pre')).toContainText('ANTHROPIC_BASE_URL')
   await page.getByRole('button', { name: '显示网关密钥' }).click()
@@ -1121,11 +1229,13 @@ test('Credits are fetched periodically by the backend and update in the open con
     .filter({ has: page.getByRole('button', { name: 'AzureKiln · 主力 主力账号', exact: true }) })
   const creditsCard = page.locator('.stat-card').filter({ hasText: '组织剩余额度' })
   await expect(accountRow.locator('.quota-numbers > strong')).toHaveText('1,875')
+  await expect(accountRow.locator('.quota-percentage')).toHaveText('93.8%')
   await expect(creditsCard.locator('.stat-value')).toContainText('1,875')
   await page.getByRole('link', { name: '运行概览', exact: true }).click()
   const overviewCredits = page.getByTestId('overview-credits-remaining').locator('strong')
   await expect(overviewCredits).toHaveText('1,875')
   await expect(page.getByTestId('summary-credits-remaining')).toHaveText('1,875')
+  await expect(page.getByTestId('summary-credits-percent')).toHaveText('93.8%')
   const initial = await (await request.get(`/api/accounts/${accounts[0].id}`)).json()
   await request.post('http://127.0.0.1:19221/test/quota', { data: { used: 450 } })
   await expect
@@ -1140,9 +1250,16 @@ test('Credits are fetched periodically by the backend and update in the open con
   await page.clock.fastForward(15001)
   await expect(overviewCredits).toHaveText('1,525')
   await expect(page.getByTestId('summary-credits-remaining')).toHaveText('1,525')
+  await expect(page.getByTestId('summary-credits-percent')).toHaveText('76.3%')
   await page.getByRole('button', { name: '管理账号池', exact: true }).click()
   await expect(accountRow.locator('.quota-numbers > strong')).toHaveText('1,525')
+  await expect(accountRow.locator('.quota-percentage')).toHaveText('76.3%')
   await expect(creditsCard.locator('.stat-value')).toContainText('1,525')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.locator('.app-shell')).toHaveCSS('grid-template-columns', '0px 390px')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+  await expect(page.getByTestId('accounts-credits-percent')).toBeVisible()
+  await page.screenshot({ path: '../test-results/quota-percentage-mobile.png', fullPage: true })
 })
 
 test('a stalled refresh times out and the next automatic poll recovers without reloading', async ({

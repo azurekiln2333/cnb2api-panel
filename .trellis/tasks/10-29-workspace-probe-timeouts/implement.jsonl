@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend guide routing"}
+{"file":".trellis/spec/backend/routing.md","reason":"Eligibility, retries and affinity"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Safe diagnostics and token accounting"}
+{"file":".trellis/spec/backend/request-overrides.md","reason":"Apply overrides to converted Chat"}
+{"file":".trellis/tasks/10-29-workspace-probe-timeouts/research/probe.md","reason":"Reproduced stale probe race"}
+{"file":".trellis/tasks/10-29-workspace-probe-timeouts/research/responses.md","reason":"Official protocol mapping and limits"}
+{"file":".trellis/spec/frontend/index.md","reason":"Account controls and logs UI"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Wait for refreshed rows in browser regressions"}

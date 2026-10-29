@@ -42,7 +42,7 @@ import {
   strategyLabels,
 } from '../console'
 import type { Account, Page } from '../types'
-import { summarizeQuota } from '../quota'
+import { formatRemainingQuotaPercent, summarizeQuota } from '../quota'
 import AccountDialog from '../components/AccountDialog.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import ModalShell from '../components/ModalShell.vue'
@@ -123,9 +123,14 @@ const totalToday = (id: string) => {
   )
 }
 const rowOps = ref<Record<string, 'probe' | 'wake' | 'quota' | undefined>>({})
+const probingAll = ref(false)
+const probeCandidates = computed(() =>
+  accounts.value.filter((a) => a.enabled && a.endpoint && !busy.value.has(a.id)),
+)
 const wakeBlockedReason = (a: Account) =>
   !a.repo ? '需先填写 CNB 仓库路径' : !a.hasPat ? '需先配置 CNB 个人令牌' : ''
 async function rowAction(id: string, operation: 'probe' | 'wake' | 'quota') {
+  if (busy.value.has(id)) return
   rowOps.value[id] = operation
   try {
     await action(id, operation)
@@ -163,7 +168,14 @@ function confirmAction(operation: 'rotate' | 'delete') {
   managing.value = null
 }
 async function probeAll() {
-  await Promise.all(accounts.value.filter((a) => a.enabled).map((a) => rowAction(a.id, 'probe')))
+  if (probingAll.value || !probeCandidates.value.length) return
+  const candidates = [...probeCandidates.value]
+  probingAll.value = true
+  try {
+    await Promise.all(candidates.map((a) => rowAction(a.id, 'probe')))
+  } finally {
+    probingAll.value = false
+  }
 }
 async function batch(enabled: boolean) {
   await Promise.all(
@@ -212,10 +224,10 @@ async function confirm() {
       </button>
       <button
         class="button probe-all"
-        :disabled="loading || busy.size > 0 || !accounts.length"
+        :disabled="probingAll || !probeCandidates.length"
         @click="probeAll"
       >
-        <RefreshCw :size="15" :class="{ spin: busy.size > 0 }" />全部探活</button
+        <RefreshCw :size="15" :class="{ spin: probingAll }" />全部探活</button
       ><button class="button primary" @click="edit()"><Plus :size="17" />接入账号</button>
     </div>
   </div>
@@ -264,6 +276,9 @@ async function confirm() {
       </div>
       <div class="stat-value">
         {{ number(overview?.stats.remainingCredits, 1) }}<small>Credits</small>
+        <small data-testid="accounts-credits-percent">{{
+          formatRemainingQuotaPercent(credits)
+        }}</small>
       </div>
       <div class="stat-bottom">
         <span>{{
@@ -461,6 +476,9 @@ async function confirm() {
                     )
                   }}</strong
                   ><span>/ {{ number(account.quota.credits.total) }}</span>
+                  <span class="quota-percentage">{{
+                    formatRemainingQuotaPercent(account.quota.credits)
+                  }}</span>
                 </div>
                 <div class="quota-track">
                   <i
@@ -757,6 +775,7 @@ async function confirm() {
 }
 .stat-value {
   gap: 5px;
+  flex-wrap: wrap;
   margin-top: 4px;
   font-size: 24px;
   letter-spacing: -0.7px;

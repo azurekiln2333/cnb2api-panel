@@ -15,7 +15,7 @@ import {
 import { number, compact, useConsole, accountState, time } from '../console'
 import { api } from '../api'
 import type { Page, TokenTotals, UsageComparison } from '../types'
-import { summarizeQuota } from '../quota'
+import { formatRemainingQuotaPercent, summarizeQuota } from '../quota'
 import StatusBadge from '../components/StatusBadge.vue'
 const emit = defineEmits<{ navigate: [page: Page] }>()
 const { overview, accounts, lastUpdated } = useConsole()
@@ -193,6 +193,9 @@ const states = computed(() => [
           number(overview?.stats.remainingCredits, 1)
         }}</strong
         ><span>Credits</span>
+        <span data-testid="summary-credits-percent">{{
+          formatRemainingQuotaPercent(credits)
+        }}</span>
       </div>
       <dl class="overview-summary-breakdown">
         <div>
@@ -322,7 +325,9 @@ const states = computed(() => [
     <div class="credits-metrics">
       <div class="token-metric" data-testid="overview-credits-remaining">
         <span>剩余 Credits</span><strong>{{ number(overview?.stats.remainingCredits, 1) }}</strong
-        ><small>已扣除使用和冻结额度</small>
+        ><small data-testid="overview-credits-percent"
+          >{{ formatRemainingQuotaPercent(credits) }} · 已扣除使用和冻结额度</small
+        >
       </div>
       <div class="token-metric">
         <span>总额度</span><strong>{{ number(credits.total, 1) }}</strong

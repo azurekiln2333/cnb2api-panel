@@ -1,0 +1,96 @@
+# Gateway health and Responses compatibility
+
+## Scope / Trigger
+
+Use this contract when changing `Pool.forward`, probes, automatic recovery or
+the stateless Responses bridge. A reachable workspace and a successful model
+generation are different observations.
+
+## Signatures
+
+- `Pool.probe(id)`: authenticated, bounded `GET <endpoint>/v1/models` check.
+- `Pool.confirmConnectionFailure(source)`: confirm inference transport failure
+  against the current endpoint, key and successful-health generation.
+- `Pool.recover(id)`: apply enabled-account, credentials and auto-wake policy.
+- `POST /v1/responses`: gateway-key authenticated Responses input.
+- `toChatRequest(payload)`: validate and map input to Chat Completions.
+- `toResponsesResponse(body, { model, requestId })`: map completed Chat JSON.
+- `ResponsesStream({ model, requestId }).push(bytes)/finish()`: return `Buffer[]`
+  containing named Responses SSE events.
+
+## Contracts
+
+Keep probe time bounded by `connectTimeoutSeconds`. Use `idleTimeoutSeconds`
+for inference first response and subsequent reads: workers may wait for model
+output or a complete non-streaming generation before sending response headers.
+Do not classify that entire interval as a TCP connection timeout.
+
+Deduplicate probes only for the same endpoint/key. An obsolete promise must not
+delete newer work. A newer successful probe invalidates old inference transport
+failures. Actual HTTP rate/auth/capacity responses still establish route
+cooldown. An earlier in-flight probe must not erase a newer upstream cooldown.
+Read at most 256 KiB of models JSON and require `{ object: "list", data: [] }`.
+Persist `failureKind` as runtime state in stats, not account definitions.
+Connection failures remain eligible for periodic recovery during route cooldown.
+Upstream/auth/rate/capacity and invalid-response cooldowns stay effective across
+process restarts. Repeated confirmed connection failures may trigger auto-wake
+at three failures; preserve the existing 30-minute successful-wake throttle.
+
+Responses requests always use upstream `/v1/chat/completions`. Convert before
+Chat request overrides and usage-option merging. Derive session affinity and
+previews from the original semantic messages. Preserve the accepted client
+route in logs. Capture raw Chat usage before response conversion to avoid
+Anthropic input/cache accounting rules on Responses usage.
+
+Support stateless text/history, image URLs, function calls and results, tools,
+JSON formats, refusal and incomplete generation. JSON output and SSE use stable
+response/item/call IDs. SSE supports fragmented UTF-8, separate tool indices,
+increasing sequence numbers and trailing usage. Emit completion only after a
+valid terminal Chat choice. Bound response state to 8 MiB and one event to 1 MiB.
+Keep retries before response headers only, abort on client disconnect, and await
+downstream drain. Existing Chat and Messages continue through their normal paths.
+
+Return a neutral public 503 message with request ID and retry metadata.
+Management logs retain safe internal failure categories, never raw exceptions,
+provider bodies or credentials.
+
+## Validation & Error Matrix
+
+| Condition | Behavior |
+| --- | --- |
+| Slow inference, authenticated models succeeds | Preserve worker health |
+| DNS/TLS/refused connection or probe timeout | Safe category, connection failure |
+| Probe HTTP auth failure or invalid models | Explicit safe error, no pointless wake |
+| Old endpoint/key or older health generation | Ignore stale mutation |
+| Persisted upstream cooldown | Do not bypass via automatic models check |
+| Unsupported state/hosted tool/content | HTTP 400 before account selection |
+| Malformed or interrupted Chat output | Failure, never false completion |
+| No ready account or exhausted retries | Public service-unavailable HTTP 503 |
+
+## Good / Base / Bad Cases
+
+Good: a model returns after the probe timeout but within the inference idle
+budget; the result succeeds and the account remains healthy.
+Base: a full-history Responses request reaches a Chat-only mock worker and
+returns Responses JSON/SSE with original measured usage.
+Bad: mark a worker offline because generation exceeded the short probe deadline,
+or forward Responses unchanged to an unsupported upstream route.
+
+## Tests Required
+
+`test/panel-probes.test.mjs` proves slow first response, health generation,
+endpoint/key replacement, bounded body/timeout diagnostics, recovery in cooldown,
+failure categories, persisted cooldowns and automatic-wake throttling.
+`test/responses.test.mjs` covers pure mappings, malformed and split SSE, tools,
+usage, limits, refusal and incomplete responses. `test/panel-responses.test.mjs`
+proves authentication/CORS, actual upstream path, overrides, accounting, retries,
+errors and disconnect behavior over HTTP.
+
+## Wrong vs Correct
+
+Wrong: `catch { fail(account.id, "connection timeout") }` after any inference error.
+Correct: reject stale results, confirm authenticated workspace reachability and
+apply the correct connection or upstream cooldown category.
+
+Wrong: count converted Responses input tokens with Anthropic cache semantics.
+Correct: capture the raw upstream Chat usage once before conversion.

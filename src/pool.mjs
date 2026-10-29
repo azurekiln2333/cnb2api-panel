@@ -7,6 +7,7 @@ import { WorkerUsageMonitor } from "./worker-usage.mjs";
 import { initialUserMessage, requestShape } from "./request-details.mjs";
 import { MAX_REQUEST_BYTES, rewriteRequest } from "./request-overrides.mjs";
 import { SessionAffinity, sessionKey } from "./session-affinity.mjs";
+import { toChatRequest, toResponsesResponse, ResponsesStream } from "./responses.mjs";
 
 export const isCooling = (a) =>
   Boolean(a.cooldownUntil && Date.parse(a.cooldownUntil) > Date.now());
@@ -14,6 +15,62 @@ export const isReady = (a) =>
   a.enabled && a.status === "healthy" && a.endpoint && !isCooling(a);
 const retryable = (status) =>
   [401, 402, 403, 408, 429].includes(status) || status >= 500;
+const sameConnection = (a, b) =>
+  a.endpoint === b.endpoint && a.secrets.proxyKey === b.secrets.proxyKey;
+const blocksRecovery = (a) =>
+  ["upstream", "response"].includes(a.failureKind) ||
+  (!a.failureKind && /^工作区返回 HTTP \d+/.test(a.lastError || ""));
+const newerRoutingCooldown = (current, source) =>
+  isCooling(current) && blocksRecovery(current) &&
+  (current.cooldownUntil !== source.cooldownUntil || current.failureKind !== source.failureKind);
+const MODEL_RESPONSE_BYTES = 256 * 1024;
+const RESPONSE_CONVERSION_BYTES = 8 * 1024 * 1024;
+
+function probeFailure(error, stage) {
+  if (error instanceof InputError) return error;
+  if (wakeTimedOut(error))
+    return new InputError(
+      stage === "body" ? "工作区探活超时：读取模型列表超时" : "工作区探活超时：未收到响应头",
+      504,
+    );
+  const code = error?.cause?.code || error?.code || "";
+  if (["ENOTFOUND", "EAI_AGAIN"].includes(code))
+    return new InputError("工作区域名解析失败，请检查面板服务器 DNS", 502);
+  if (code === "ECONNREFUSED")
+    return new InputError("工作区拒绝连接，请检查代理服务端口", 502);
+  if (/CERT|TLS|SSL/.test(code))
+    return new InputError("工作区 TLS 握手失败，请检查证书和网络", 502);
+  if (error instanceof SyntaxError)
+    return new InputError("工作区模型响应不是有效 JSON", 502);
+  return new InputError(
+    stage === "body" ? "工作区模型响应中断" : "面板无法连接工作区，请检查代理服务和网络",
+    502,
+  );
+}
+
+async function readModelList(response) {
+  const reader = response.body?.getReader();
+  if (!reader) throw new InputError("工作区未返回模型列表", 502);
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MODEL_RESPONSE_BYTES)
+        throw new InputError("工作区模型响应超出大小限制", 502);
+      chunks.push(value);
+    }
+    const data = JSON.parse(Buffer.concat(chunks, size).toString("utf8"));
+    if (!data || !Array.isArray(data.data) || data.object !== "list")
+      throw new InputError("工作区模型列表格式无效", 502);
+    return data;
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
 const wakeHttpHint = (status) =>
   ({
     400: "启动参数无效，请检查仓库路径和分支名称",
@@ -140,7 +197,9 @@ export class Pool {
     this.scores = new Map();
     this.affinity = new SessionAffinity({ now });
     this.probes = new Map();
+    this.healthVersions = new Map();
     this.wakes = new Map();
+    this.autoWakeAttempts = new Map();
     this.lastCycle = 0;
     this.workerUsage = new WorkerUsageMonitor(store);
     this.fetchQuotaImpl = fetchQuotaImpl;
@@ -219,7 +278,7 @@ export class Pool {
     return bind(chosen);
   }
 
-  fail(id, reason, status = 502, source) {
+  fail(id, reason, status = 502, source, { routing = false, kind = routing ? "upstream" : "connection" } = {}) {
     let a;
     try {
       a = this.store.get(id);
@@ -228,8 +287,9 @@ export class Pool {
     }
     if (
       source &&
-      (a.endpoint !== source.endpoint ||
-        a.secrets.proxyKey !== source.secrets.proxyKey)
+      (!sameConnection(a, source) ||
+        (!routing && source.healthVersion !== undefined &&
+          source.healthVersion !== (this.healthVersions.get(id) || 0)))
     )
       return;
     const failures = a.failures + 1;
@@ -242,6 +302,7 @@ export class Pool {
       status: "unhealthy",
       lastError: reason,
       failures,
+      failureKind: kind,
       cooldownUntil: new Date(Date.now() + seconds * 1000).toISOString(),
       checkedAt: new Date().toISOString(),
     });
@@ -255,16 +316,22 @@ export class Pool {
   }
 
   probe(id) {
-    if (this.probes.has(id)) return this.probes.get(id);
-    const work = this.check(id).finally(() => this.probes.delete(id));
-    this.probes.set(id, work);
-    return work;
+    const account = this.store.get(id);
+    const previous = this.probes.get(id);
+    if (previous && sameConnection(previous, account)) return previous.promise;
+    const current = { endpoint: account.endpoint, secrets: account.secrets };
+    current.promise = this.check(id).finally(() => {
+      if (this.probes.get(id) === current) this.probes.delete(id);
+    });
+    this.probes.set(id, current);
+    return current.promise;
   }
 
   async check(id) {
     const a = this.store.get(id);
     if (!a.endpoint) return publicAccount(a);
     const started = Date.now();
+    let stage = "headers";
     try {
       const response = await fetch(`${a.endpoint}/v1/models`, {
         headers: { Authorization: `Bearer ${a.secrets.proxyKey}` },
@@ -280,24 +347,28 @@ export class Pool {
           response.status,
         );
       }
-      const data = await response.json();
-      if (!Array.isArray(data.data) || data.object !== "list")
-        throw new Error("invalid models");
+      stage = "body";
+      const data = await readModelList(response);
       const current = this.store.get(id);
       if (
         current.endpoint !== a.endpoint ||
         current.secrets.proxyKey !== a.secrets.proxyKey
       )
         return publicAccount(current);
+      // An automatic check already in flight must not erase a provider cooldown
+      // established after that check started. A later explicit probe may retry.
+      if (newerRoutingCooldown(current, a)) return publicAccount(current);
+      this.healthVersions.set(id, (this.healthVersions.get(id) || 0) + 1);
       this.store.patch(id, {
         status: "healthy",
         failures: 0,
+        failureKind: null,
         cooldownUntil: null,
         lastError: "",
         checkedAt: new Date().toISOString(),
         latencyMs: Date.now() - started,
         discoveredModels: data.data
-          .map((m) => m.id)
+          .map((m) => m?.id)
           .filter((id) => typeof id === "string")
           .slice(0, 100),
       });
@@ -310,18 +381,49 @@ export class Pool {
       }
       if (
         current.endpoint === a.endpoint &&
-        current.secrets.proxyKey === a.secrets.proxyKey
+        current.secrets.proxyKey === a.secrets.proxyKey &&
+        !newerRoutingCooldown(current, a)
       ) {
+        const failure = probeFailure(error, stage);
         this.fail(
           id,
-          error instanceof InputError
-            ? error.message
-            : "工作区无法连接或模型响应无效",
-          error.status || 502,
+          failure.message,
+          failure.status,
+          undefined,
+          { kind: stage === "body" && (error instanceof InputError || error instanceof SyntaxError)
+            ? "response"
+            : failure.status < 500 && failure.status !== 408 ? "upstream" : "connection" },
         );
       }
     }
     return publicAccount(this.store.get(id));
+  }
+
+  async recover(id) {
+    const current = this.store.get(id);
+    if (
+      current.enabled && current.autoWake && current.repo && current.secrets.pat &&
+      current.status !== "healthy" &&
+      !blocksRecovery(current) &&
+      (!current.endpoint || current.failures >= 3)
+    )
+      await this.wake(id, { automatic: true });
+  }
+
+  async confirmConnectionFailure(source) {
+    let current;
+    try {
+      current = this.store.get(source.id);
+    } catch {
+      return;
+    }
+    if (!sameConnection(current, source) ||
+        source.healthVersion !== (this.healthVersions.get(source.id) || 0)) return;
+    if (isCooling(current) && blocksRecovery(current)) return;
+    // A model request can fail while the authenticated worker remains reachable.
+    // Only a failed readiness check can establish that the connection is down.
+    await this.probe(source.id);
+    await this.recover(source.id).catch(() => {});
   }
 
   async register(id, uri) {
@@ -335,6 +437,7 @@ export class Pool {
       status: "pending",
       cooldownUntil: null,
       failures: 0,
+      failureKind: null,
       lastError: "",
       discoveredModels: [],
     });
@@ -531,14 +634,16 @@ export class Pool {
   async wake(id, { automatic = false } = {}) {
     if (this.wakes.has(id)) return this.wakes.get(id);
     const a = this.store.get(id);
+    const previousAttempt = this.autoWakeAttempts.get(id);
     // Only background retries are throttled; explicit operator actions may retry.
     // Check before caching work so a skipped automatic wake cannot block a manual one.
     if (
       automatic &&
-      a.lastWakeAt &&
-      Date.now() - Date.parse(a.lastWakeAt) < 30 * 60000
+      ((a.lastWakeAt && Date.now() - Date.parse(a.lastWakeAt) < 30 * 60000) ||
+        (previousAttempt?.repo === a.repo && Date.now() - previousAttempt.at < 30 * 60000))
     )
       throw new InputError("工作区已发起唤醒，30 分钟冷却内请勿重复启动", 409);
+    if (automatic) this.autoWakeAttempts.set(id, { repo: a.repo, at: Date.now() });
     const work = this.startWorkspace(id).finally(() => this.wakes.delete(id));
     this.wakes.set(id, work);
     return work;
@@ -645,20 +750,18 @@ export class Pool {
         await Promise.allSettled(
           accounts
             .slice(i, i + 5)
-            .filter((a) => a.enabled && !isCooling(a))
+            .filter((a) => {
+              if (!a.enabled) return false;
+              // Provider/auth/rate-limit cooldowns still gate traffic. A broken
+              // connection must remain eligible for periodic recovery checks.
+              return !isCooling(a) || !blocksRecovery(a);
+            })
             .map(async (a) => {
               await this.probe(a.id);
               const current = this.store.get(a.id);
               if (current.status === "healthy")
                 await this.workerUsage.refresh(current.id);
-              if (
-                current.autoWake &&
-                current.repo &&
-                current.secrets.pat &&
-                current.status !== "healthy" &&
-                (!current.endpoint || current.failures >= 3)
-              )
-                await this.wake(a.id, { automatic: true });
+              await this.recover(a.id);
             }),
         );
       }
@@ -699,9 +802,12 @@ export class Pool {
   async forward(req, res, path, payload) {
     const requestId = randomUUID();
     const started = Date.now();
+    const responses = path === "/v1/responses";
+    const upstreamPath = responses ? "/v1/chat/completions" : path;
+    const semanticPayload = responses ? toChatRequest(payload) : payload;
     const { dshCompat, requestOverrides, upstreamHeaders } = this.store.state.settings;
-    const rewritten = rewriteRequest(payload, { dshCompat, requestOverrides }, path);
-    const forwardedPayload = path === "/v1/chat/completions"
+    const rewritten = rewriteRequest(semanticPayload, { dshCompat, requestOverrides }, upstreamPath);
+    const forwardedPayload = upstreamPath === "/v1/chat/completions"
       ? {
           ...rewritten.payload,
           stream_options: { ...rewritten.payload.stream_options, include_usage: true },
@@ -721,10 +827,10 @@ export class Pool {
       headers: { configured: headerNames, supported: null, attempts: [] },
     };
     const affinityKey = this.store.state.settings.sessionAffinity
-      ? sessionKey(req.headers, payload)
+      ? sessionKey(req.headers, semanticPayload)
       : null;
     if (!this.store.state.settings.sessionAffinity) this.affinity.clear();
-    const initialMessage = initialUserMessage(payload);
+    const initialMessage = initialUserMessage(semanticPayload);
     const excluded = new Set();
     const controller = new AbortController();
     const disconnected = () => {
@@ -760,6 +866,10 @@ export class Pool {
         const selected = this.select(forwardedPayload.model, excluded, affinityKey);
         if (!selected) break;
         account = selected;
+        const source = {
+          ...account,
+          healthVersion: this.healthVersions.get(account.id) || 0,
+        };
         attempts++;
         excluded.add(account.id);
         this.active.set(account.id, (this.active.get(account.id) || 0) + 1);
@@ -769,10 +879,13 @@ export class Pool {
           const attempt = new AbortController();
           timer = setTimeout(
             () => attempt.abort(),
-            this.store.state.settings.connectTimeoutSeconds * 1000,
+            // Workers may not send headers until generation produces its first
+            // token (or finishes a non-streaming response). This is inference
+            // idle time, not the authenticated readiness connection deadline.
+            this.store.state.settings.idleTimeoutSeconds * 1000,
           );
           const signal = AbortSignal.any([controller.signal, attempt.signal]);
-          const response = await fetch(`${account.endpoint}${path}`, {
+          const response = await fetch(`${account.endpoint}${upstreamPath}`, {
             method: "POST",
             headers: {
               Authorization: `Bearer ${account.secrets.proxyKey}`,
@@ -800,7 +913,7 @@ export class Pool {
           if (retryable(response.status)) {
             await response.body?.cancel();
             failureMessage = `工作区返回 HTTP ${response.status}，已进入冷却`;
-            this.fail(account.id, failureMessage, response.status, account);
+            this.fail(account.id, failureMessage, response.status, source, { routing: true });
             this.affinity.forget(affinityKey, account.id);
             this.store.record({
               kind: "failover",
@@ -816,18 +929,31 @@ export class Pool {
           if (path !== "/v1/messages/count_tokens")
             usageCapture = new TokenUsageCapture(
               response.headers.get("content-type") || "application/json",
-              path,
+              upstreamPath,
             );
-          res.writeHead(response.status, {
+          const convert = responses && response.ok;
+          const convertStream = convert && payload.stream === true;
+          const converter = convertStream ? new ResponsesStream({ model: payload.model, requestId }) : null;
+          const replyHeaders = {
             "Content-Type":
-              response.headers.get("content-type") || "application/json",
+              convert ? (convertStream ? "text/event-stream" : "application/json") :
+                response.headers.get("content-type") || "application/json",
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
             "X-Request-Id": requestId,
             ...(response.headers.has("retry-after")
               ? { "Retry-After": response.headers.get("retry-after") }
               : {}),
-          });
+          };
+          if (!convert || convertStream) res.writeHead(response.status, replyHeaders);
+          const emit = async (value) => {
+            const writable = res.write(value);
+            firstByteMs ??= Date.now() - started;
+            responseBytes += Buffer.byteLength(value);
+            if (!writable) await once(res, "drain", { signal: controller.signal });
+          };
+          const chunks = [];
+          let bufferedBytes = 0;
           const reader = response.body?.getReader();
           if (reader) {
             try {
@@ -840,11 +966,14 @@ export class Pool {
                 clearTimeout(timer);
                 if (done) break;
                 usageCapture?.push(value);
-                const writable = res.write(value);
-                firstByteMs ??= Date.now() - started;
-                responseBytes += value.byteLength;
-                if (!writable)
-                  await once(res, "drain", { signal: controller.signal });
+                if (converter) {
+                  for (const frame of converter.push(value)) await emit(frame);
+                } else if (convert) {
+                  bufferedBytes += value.byteLength;
+                  if (bufferedBytes > RESPONSE_CONVERSION_BYTES)
+                    throw new Error("Responses conversion response exceeds limit");
+                  chunks.push(value);
+                } else await emit(value);
               }
             } finally {
               clearTimeout(timer);
@@ -855,11 +984,21 @@ export class Pool {
             finalStatus = 499;
             return;
           }
+          if (converter) {
+            for (const frame of converter.finish()) await emit(frame);
+          } else if (convert) {
+            const converted = toResponsesResponse(
+              JSON.parse(Buffer.concat(chunks, bufferedBytes).toString("utf8")),
+              { model: payload.model, requestId },
+            );
+            res.writeHead(response.status, replyHeaders);
+            await emit(Buffer.from(JSON.stringify(converted)));
+          }
           success = response.ok;
           usageComplete = true;
           res.end();
           return;
-        } catch {
+        } catch (error) {
           clearTimeout(timer);
           if (controller.signal.aborted || res.destroyed) {
             finalStatus = 499;
@@ -868,8 +1007,10 @@ export class Pool {
           finalStatus = 502;
           failureMessage = res.headersSent
             ? "上游响应中断"
-            : "工作区连接失败或超时";
-          this.fail(account.id, failureMessage, 502, account);
+            : wakeTimedOut(error) || error?.name === "AbortError"
+              ? "推理响应等待超时，正在检查工作区连接"
+              : "推理请求连接失败，正在检查工作区连接";
+          await this.confirmConnectionFailure(source).catch(() => {});
           this.affinity.forget(affinityKey, account.id);
           if (res.headersSent) {
             res.destroy();
@@ -889,7 +1030,7 @@ export class Pool {
           "X-Request-Id": requestId,
         });
         finalStatus = 503;
-        const error = { type: "api_error", message: failureMessage };
+        const error = { type: "api_error", message: "服务暂时不可用，请稍后重试" };
         res.end(
           JSON.stringify(
             path.startsWith("/v1/messages")

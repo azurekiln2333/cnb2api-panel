@@ -20,7 +20,7 @@ const profile = ref({ publicUrl: '', maskedKey: '••••••••••�
 const actualKey = ref('')
 const reveal = ref(false)
 const keyLoading = ref(false)
-const protocol = ref<'openai' | 'anthropic' | 'newapi'>('openai')
+const protocol = ref<'openai' | 'responses' | 'anthropic' | 'newapi'>('openai')
 const baseUrl = computed(() => profile.value.publicUrl || location.origin)
 const model = computed(
   () =>
@@ -30,9 +30,11 @@ const model = computed(
 const example = computed(() =>
   protocol.value === 'openai'
     ? `curl ${baseUrl.value}/v1/chat/completions \\\n  -H "Authorization: Bearer YOUR_GATEWAY_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "model": "${model.value}",\n    "messages": [{"role": "user", "content": "你好"}],\n    "stream": true\n  }'`
-    : protocol.value === 'anthropic'
-      ? `export ANTHROPIC_BASE_URL="${baseUrl.value}"\nexport ANTHROPIC_AUTH_TOKEN="YOUR_GATEWAY_KEY"\nexport ANTHROPIC_MODEL="${model.value}"\n\nclaude`
-      : `渠道类型    OpenAI\n代理地址    ${baseUrl.value}\n密钥        YOUR_GATEWAY_KEY\n模型        ${model.value}`,
+    : protocol.value === 'responses'
+      ? `curl ${baseUrl.value}/v1/responses \\\n  -H "Authorization: Bearer YOUR_GATEWAY_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "model": "${model.value}",\n    "input": "你好",\n    "store": false,\n    "stream": true\n  }'`
+      : protocol.value === 'anthropic'
+        ? `export ANTHROPIC_BASE_URL="${baseUrl.value}"\nexport ANTHROPIC_AUTH_TOKEN="YOUR_GATEWAY_KEY"\nexport ANTHROPIC_MODEL="${model.value}"\n\nclaude`
+        : `渠道类型    OpenAI\n代理地址    ${baseUrl.value}\n密钥        YOUR_GATEWAY_KEY\n模型        ${model.value}`,
 )
 onMounted(async () => {
   try {
@@ -101,7 +103,7 @@ async function copyKey() {
         <Plug :size="20" />
         <div>
           <h2>连接信息</h2>
-          <p>网关地址固定，工作区随机域名可以自动跟随。</p>
+          <p>工作区启动后向面板注册地址。</p>
         </div>
       </header>
       <div class="connection-fields">
@@ -173,6 +175,13 @@ async function copyKey() {
           OpenAI / cURL</button
         ><button
           role="tab"
+          :aria-selected="protocol === 'responses'"
+          :class="{ active: protocol === 'responses' }"
+          @click="protocol = 'responses'"
+        >
+          Responses</button
+        ><button
+          role="tab"
           :aria-selected="protocol === 'anthropic'"
           :class="{ active: protocol === 'anthropic' }"
           @click="protocol = 'anthropic'"
@@ -212,7 +221,7 @@ async function copyKey() {
         ><small>账号选择 / 故障切换</small></span
       ><ArrowRight :size="20" /><span
         ><span class="flow-step">03</span><strong>CNB 工作区</strong
-        ><small>随机域名 / 自动注册</small></span
+        ><small>工作区地址 / 自动注册</small></span
       ><ArrowRight :size="20" /><span
         ><span class="flow-step">04</span><strong>CNB 内网 AI</strong
         ><small>官方临时令牌</small></span

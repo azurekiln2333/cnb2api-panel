@@ -1,6 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { Search, RefreshCw, ArrowUpRight, ScrollText, X, Copy, LoaderCircle } from '@lucide/vue'
+import {
+  Search,
+  RefreshCw,
+  ArrowUpRight,
+  ScrollText,
+  X,
+  Copy,
+  LoaderCircle,
+  Download,
+} from '@lucide/vue'
 import { api } from '../api'
 import { useConsole, time, number, copy } from '../console'
 import type { LogChannel, LogEntry, RequestShape } from '../types'
@@ -30,6 +39,7 @@ const pageInfo = computed(
 )
 const search = ref('')
 const kind = ref('all')
+const outcome = ref<'all' | 'success' | 'failure'>('all')
 const page = ref(1)
 const selected = ref<LogEntry | null>(null)
 const refreshing = ref(false)
@@ -54,10 +64,14 @@ const kindOptions = computed(() =>
         : !['request', 'audit', 'account'].includes(value),
   ),
 )
+const successful = (log: LogEntry) => log.status >= 200 && log.status < 400
 const filtered = computed(() =>
   logs.value.filter(
     (l) =>
       (kind.value === 'all' || l.kind === kind.value) &&
+      (props.channel !== 'requests' ||
+        outcome.value === 'all' ||
+        successful(l) === (outcome.value === 'success')) &&
       `${l.accountName} ${l.actor?.name ?? ''} ${l.action ?? ''} ${l.ip ?? ''} ${l.model ?? ''} ${l.message} ${l.requestId ?? ''} ${l.initialMessage?.text ?? ''}`
         .toLowerCase()
         .includes(search.value.toLowerCase()),
@@ -139,6 +153,20 @@ function copyDetails() {
     ),
   )
 }
+function exportLogs() {
+  if (!filtered.value.length) return
+  const file = new Blob([JSON.stringify(filtered.value, null, 2)], {
+    type: 'application/json;charset=utf-8',
+  })
+  const url = URL.createObjectURL(file)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `${props.channel}-logs-${new Date().toISOString().replaceAll(':', '-')}.json`
+  document.body.append(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
 function closeDetails() {
   detailGeneration++
   selected.value = null
@@ -162,7 +190,7 @@ async function openDetails(log: LogEntry) {
     if (generation === detailGeneration) detailLoading.value = false
   }
 }
-watch([search, kind], () => {
+watch([search, kind, outcome], () => {
   page.value = 1
 })
 async function refresh() {
@@ -201,12 +229,30 @@ onMounted(refresh)
           <X :size="13" />
         </button>
       </div>
-      <select v-model="kind" class="filter-select" aria-label="事件类型">
+      <select
+        v-if="channel === 'requests'"
+        v-model="outcome"
+        class="filter-select"
+        aria-label="请求结果"
+      >
+        <option value="all">全部请求</option>
+        <option value="success">成功请求</option>
+        <option value="failure">失败请求</option>
+      </select>
+      <select v-else v-model="kind" class="filter-select" aria-label="事件类型">
         <option value="all">全部事件</option>
         <option v-for="[value, label] in kindOptions" :key="value" :value="value">
           {{ label }}
         </option>
       </select>
+      <button
+        class="button"
+        :disabled="!filtered.length"
+        :title="`导出当前筛选的 ${filtered.length} 条记录`"
+        @click="exportLogs"
+      >
+        <Download :size="15" />导出筛选记录
+      </button>
     </div>
     <div v-if="rows.length" class="table-scroll">
       <table class="activity-table">
@@ -241,7 +287,7 @@ onMounted(refresh)
               <span v-if="log.actor" class="cell-secondary">操作人：{{ log.actor.name }}</span>
             </td>
             <td>
-              <span class="http-status" :class="log.status < 400 ? 'ok' : 'failed'"
+              <span class="http-status" :class="successful(log) ? 'ok' : 'failed'"
                 ><i />{{ log.status }}</span
               >
             </td>

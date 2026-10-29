@@ -43,8 +43,10 @@ exception messages into an audit record. Use static operation descriptions.
 
 - `method` and `stream` describe the accepted request.
 - `requestBytes` counts the UTF-8 JSON forwarded to each upstream attempt.
-- `responseBytes` counts upstream body bytes written to the client.
-- `firstByteMs` measures request start to the first forwarded body chunk. It is `null` if no upstream body was forwarded.
+- `responseBytes` counts body bytes written to the client, including generated
+  Responses JSON/SSE frames when protocol conversion is active.
+- `firstByteMs` measures request start to the first emitted body chunk. It is
+  `null` if no upstream response or converted body was emitted.
 - `upstreamEndpoint` identifies the last selected workspace without authentication headers.
 - `tokenUsage` keeps the existing reported/missing/partial accounting semantics.
 
