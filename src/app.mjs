@@ -28,6 +28,8 @@ import { MAX_REQUEST_BYTES } from "./request-overrides.mjs";
 import { addTokenUsage, emptyTokenUsage } from "./token-usage.mjs";
 import { auditRequest } from "./audit.mjs";
 import { queryLogs } from "./logs.mjs";
+import { parseRelayHeaders } from "./registration-relay.mjs";
+import { gatewayQuotaRoute, gatewayQuotaResponse } from "./gateway-quota.mjs";
 
 const SESSION_MS = 12 * 60 * 60 * 1000;
 const OIDC_TRANSACTION_MS = 10 * 60 * 1000;
@@ -134,7 +136,7 @@ export function createPanelServer(options) {
       );
     }
   }
-  const store = new Store(dataDir, { allowLocal, logDir });
+  const store = new Store(dataDir, { allowLocal, logDir, publicUrl });
   // Environment variables only seed an unconfigured panel; saved SSO settings win.
   if (ssoBootstrap && typeof ssoBootstrap === "object") {
     if (!ssoIsConfigured(store.state.sso)) {
@@ -144,7 +146,7 @@ export function createPanelServer(options) {
       store.saveSso(seeded);
     }
   }
-  const pool = new Pool(store, poolOptions);
+  const pool = new Pool(store, { ...poolOptions, publicUrl });
   const sessions = new Map();
   const ssoFingerprint = (sso) =>
     digest(
@@ -388,10 +390,19 @@ export function createPanelServer(options) {
         if (!account)
           return json(res, 403, { error: { message: "注册密钥无效" } });
         const input = await body(req, 4096);
-        return json(res, 200, await pool.register(account.id, input.uri));
+        let relayMetadata;
+        try {
+          relayMetadata = parseRelayHeaders(req.headers);
+        } catch (error) {
+          if (error.status === 400) throw new InputError(error.message);
+          throw error;
+        }
+        return json(res, 200, await pool.register(account.id, input.uri, relayMetadata));
       }
 
+      const quotaRoute = gatewayQuotaRoute(path);
       if (
+        quotaRoute ||
         path === "/v1/models" ||
         path === "/models" ||
         [
@@ -431,6 +442,12 @@ export function createPanelServer(options) {
               ? { type: "error", error }
               : { error },
           );
+        }
+        if (quotaRoute) {
+          if (method !== "GET")
+            return json(res, 405, { error: { message: "method not allowed" } });
+          const result = gatewayQuotaResponse(store.state.accounts, quotaRoute);
+          return json(res, result.status, result.body);
         }
         if ((path === "/v1/models" || path === "/models") && method === "GET") {
           const models = new Set(
@@ -665,8 +682,11 @@ export function createPanelServer(options) {
         }
         if (path === "/api/accounts" && method === "GET")
           return json(res, 200, { accounts: pool.accounts() });
+        if (path === "/api/models" && method === "GET")
+          return json(res, 200, { models: pool.models() });
         if (path === "/api/accounts" && method === "POST") {
           const account = store.create(await body(req));
+          pool.registrationRelay.reconcile();
           req.auditTarget = account;
           if (account.endpoint) pool.probe(account.id).catch(() => {});
           return json(res, 201, {
@@ -685,6 +705,7 @@ export function createPanelServer(options) {
             return json(res, 200, { account: publicAccount(account) });
           if (!action && method === "PATCH") {
             const updated = store.update(id, await body(req));
+            pool.registrationRelay.reconcile();
             req.auditTarget = updated;
             if (
               updated.endpoint &&
@@ -696,6 +717,7 @@ export function createPanelServer(options) {
           }
           if (!action && method === "DELETE") {
             store.remove(id);
+            pool.registrationRelay.reconcile();
             return json(res, 200, { ok: true });
           }
           if (action && method === "POST") {
@@ -715,14 +737,22 @@ export function createPanelServer(options) {
             if (action === "registration") {
               const token = randomBytes(24).toString("hex");
               store.update(id, { registrationToken: token });
+              pool.registrationRelay.reconcile();
               return json(res, 200, { registrationToken: token });
             }
           }
         }
         if (path === "/api/settings" && method === "GET")
           return json(res, 200, { settings: store.state.settings });
-        if (path === "/api/settings" && method === "PATCH")
-          return json(res, 200, { settings: store.settings(await body(req)) });
+        if (path === "/api/settings" && method === "PATCH") {
+          const settings = store.settings(await body(req));
+          pool.registrationRelay.reconcile();
+          return json(res, 200, { settings });
+        }
+        if (path === "/api/registration-relay" && method === "GET")
+          return json(res, 200, pool.registrationRelay.status());
+        if (path === "/api/registration-relay/sync" && method === "POST")
+          return json(res, 200, pool.registrationRelay.sync());
         const requestLogDetail = /^\/api\/logs\/requests\/([a-f0-9-]{36})$/i.exec(path);
         if (requestLogDetail && method === "GET") {
           const log = store.state.logs.find(

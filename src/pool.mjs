@@ -8,6 +8,7 @@ import { initialUserMessage, requestShape } from "./request-details.mjs";
 import { MAX_REQUEST_BYTES, rewriteRequest } from "./request-overrides.mjs";
 import { SessionAffinity, sessionKey } from "./session-affinity.mjs";
 import { prepareResponsesRequest, toResponsesResponse, ResponsesStream } from "./responses.mjs";
+import { RegistrationRelay } from "./registration-relay.mjs";
 
 export const isCooling = (a) =>
   Boolean(a.cooldownUntil && Date.parse(a.cooldownUntil) > Date.now());
@@ -190,6 +191,8 @@ export class Pool {
       now = Date.now,
       quotaIntervalMs = 60000,
       quotaPollMs = 1000,
+      registrationRelayOptions = {},
+      publicUrl = "",
     } = {},
   ) {
     this.store = store;
@@ -202,6 +205,10 @@ export class Pool {
     this.autoWakeAttempts = new Map();
     this.lastCycle = 0;
     this.workerUsage = new WorkerUsageMonitor(store);
+    this.registrationRelay = new RegistrationRelay(store, {
+      ...registrationRelayOptions,
+      publicUrl,
+    });
     this.fetchQuotaImpl = fetchQuotaImpl;
     this.quotaNow = now;
     this.quotaIntervalMs = quotaIntervalMs;
@@ -222,6 +229,22 @@ export class Pool {
     return this.store.state.accounts.map((a) => ({
       ...publicAccount(a),
       activeRequests: this.active.get(a.id) || 0,
+    }));
+  }
+
+  models() {
+    const accounts = this.store.state.accounts;
+    const ids = new Set(accounts.flatMap((a) => [...a.models, ...a.discoveredModels]));
+    const listed = new Set(
+      accounts.filter((a) => a.enabled).flatMap((a) => a.models.length ? a.models : a.discoveredModels),
+    );
+    const reference = ({ id, name }) => ({ id, name });
+    return [...ids].sort().map((id) => ({
+      id,
+      listed: listed.has(id),
+      configuredAccounts: accounts.filter((a) => a.models.includes(id)).map(reference),
+      discoveredAccounts: accounts.filter((a) => a.discoveredModels.includes(id)).map(reference),
+      eligibleAccounts: this.eligible(id).map(reference),
     }));
   }
 
@@ -426,21 +449,19 @@ export class Pool {
     await this.recover(source.id).catch(() => {});
   }
 
-  async register(id, uri) {
+  async register(id, uri, relayMetadata = null) {
     const a = this.store.get(id);
     const endpoint = normalizeEndpoint(uri, this.store.allowLocal);
     if (!endpoint) throw new InputError("缺少工作区地址");
-    // Disabled accounts may update their address but never become eligible for traffic.
-    this.store.patch(id, {
-      endpoint,
-      registeredAt: new Date().toISOString(),
-      status: "pending",
-      cooldownUntil: null,
-      failures: 0,
-      failureKind: null,
-      lastError: "",
-      discoveredModels: [],
-    });
+    // Endpoint, receipt and outgoing deliveries share one durable transaction.
+    let registration;
+    try {
+      registration = this.registrationRelay.register(id, endpoint, relayMetadata);
+    } catch (error) {
+      if (error.status === 400) throw new InputError(error.message);
+      throw error;
+    }
+    if (!registration.applied) return registration.result;
     this.store.record({
       kind: "register",
       accountId: id,
@@ -450,7 +471,8 @@ export class Pool {
     });
     // Registration only needs durable acknowledgement. Verification continues independently.
     this.probe(id).catch(() => {});
-    return { ok: true, accountId: id };
+    this.registrationRelay.kick();
+    return registration.result;
   }
 
   async quota(id) {
@@ -772,6 +794,7 @@ export class Pool {
 
   start() {
     if (this.timer) return;
+    this.registrationRelay.start();
     this.lastCycle = Date.now();
     this.cycle().catch(() => {});
     // Credits are an organization API, independent of workspace health and UI.
@@ -793,6 +816,7 @@ export class Pool {
     this.timer.unref();
   }
   stop() {
+    this.registrationRelay.stop();
     clearInterval(this.timer);
     clearInterval(this.quotaTimer);
     this.timer = null;

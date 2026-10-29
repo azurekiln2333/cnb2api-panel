@@ -21,6 +21,8 @@ This directory contains guidelines for frontend development. Fill in each file w
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
 | [Account and Log Controls](./account-log-controls.md) | Bulk probing, quota percentages and filtered export | Implemented |
 | [Console Loading](./console-loading.md) | Session startup, background refresh and paged logs | Implemented |
+| [Registration Relay](./registration-relay.md) | Linked-server configuration and independent delivery status | Implemented |
+| [Model List](./model-list.md) | Model inventory, source labels, search/copy and New API hints | Implemented |
 | [Type Safety](./type-safety.md) | Type patterns, validation | To fill |
 
 ---

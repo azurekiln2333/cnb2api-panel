@@ -21,6 +21,7 @@ import {
   LoaderCircle,
   ShieldCheck,
   Cloud,
+  Layers,
   UserRound,
   X,
 } from '@lucide/vue'
@@ -32,6 +33,7 @@ import OverviewView from './views/OverviewView.vue'
 import RoutingView from './views/RoutingView.vue'
 import ActivityView from './views/ActivityView.vue'
 import AccessView from './views/AccessView.vue'
+import ModelsView from './views/ModelsView.vue'
 import RegistrationDialog from './components/RegistrationDialog.vue'
 import ModalShell from './components/ModalShell.vue'
 
@@ -95,6 +97,7 @@ const {
 const nav = [
   { id: 'overview', label: '运行概览', icon: LayoutDashboard },
   { id: 'accounts', label: '账号管理', icon: UsersRound },
+  { id: 'models', label: '模型列表', icon: Layers },
   { id: 'routing', label: '路由策略', icon: Waypoints },
   { id: 'activity', label: '请求日志', icon: ScrollText },
   { id: 'audit', label: '审计日志', icon: ShieldCheck },
@@ -462,7 +465,7 @@ onBeforeUnmount(() => {
       <div class="nav-caption">控制台<span>CONSOLE</span></div>
       <nav class="main-nav" aria-label="主导航">
         <a
-          v-for="item in nav.slice(0, 3)"
+          v-for="item in nav.slice(0, 4)"
           :key="item.id"
           :href="`#${item.id}`"
           :class="{ active: page === item.id }"
@@ -476,7 +479,7 @@ onBeforeUnmount(() => {
       <div class="nav-caption">管理与接入</div>
       <nav class="main-nav" aria-label="管理导航">
         <a
-          v-for="item in nav.slice(3)"
+          v-for="item in nav.slice(4)"
           :key="item.id"
           :href="`#${item.id}`"
           :class="{ active: page === item.id }"
@@ -510,6 +513,7 @@ onBeforeUnmount(() => {
           :key="page"
           :channel="page === 'activity' ? 'requests' : page"
         />
+        <ModelsView v-else-if="page === 'models'" />
         <div v-else-if="!overview && loading" class="page-loading">
           <LoaderCircle :size="24" class="spin" /><span>正在读取账号池…</span>
         </div>

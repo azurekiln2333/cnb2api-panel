@@ -1,0 +1,14 @@
+{"file":".trellis/tasks/10-29-registration-relay/research/backend.md","reason":"Verify real cross-panel registration, ordering, retries and safe failure behavior"}
+{"file":".trellis/tasks/10-29-registration-relay/research/frontend.md","reason":"Verify matching-token prerequisite, settings drafts and separate runtime status"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Check migration, encryption and journal-backed atomicity"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Check token/raw-peer-body exclusion and audit coverage"}
+{"file":".trellis/spec/backend/deployment.md","reason":"Check aligned version tags and multi-remote cloud publication"}
+{"file":".trellis/spec/frontend/console-loading.md","reason":"Check status polling lifecycle and stale response suppression"}
+{"file": ".trellis/tasks/10-29-registration-relay/research/api-contract.md", "reason": "Cross-layer API and ownership contract"}
+{"file": ".trellis/spec/backend/registration-relay.md", "reason": "Final relay persistence, transport and ordering contracts"}
+{"file": ".trellis/spec/frontend/registration-relay.md", "reason": "Relay settings draft, polling and status contract"}
+{"file":".trellis/spec/backend/model-inventory.md","reason":"Model source/listed/eligibility and management privacy contract"}
+{"file":".trellis/spec/frontend/model-list.md","reason":"Model navigation, independent loading, search and copy contract"}
+{"file":".trellis/spec/backend/gateway-quota.md","reason":"New API quota arithmetic, organization scope and native credit units"}
+{"file":".trellis/tasks/10-29-registration-relay/research/models.md","reason":"Upstream catalog observation versus actual model selection evidence"}
+{"file":".trellis/tasks/10-29-registration-relay/research/new-api-quota.md","reason":"Actual New API OpenAI-channel billing request and subtraction"}

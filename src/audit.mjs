@@ -7,6 +7,7 @@ const actions = {
   "POST /api/accounts": ["account.create", "添加账号"],
   "POST /api/access/key": ["gateway.key.read", "查看网关密钥"],
   "POST /api/usage/comparison": ["usage.sync", "同步工作区用量"],
+  "POST /api/registration-relay/sync": ["registration.relay.sync", "同步注册信息"],
 };
 const accountActions = {
   PATCH: ["account.update", "修改账号"],

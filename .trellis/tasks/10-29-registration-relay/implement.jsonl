@@ -1,0 +1,10 @@
+{"file":".trellis/tasks/10-29-registration-relay/research/backend.md","reason":"Registration matching, persistence, lifecycle and transport evidence"}
+{"file":".trellis/tasks/10-29-registration-relay/research/frontend.md","reason":"Existing settings form, runtime status and credential boundaries"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Encrypted credentials, partition isolation and atomic durable outbox"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Credential-free runtime diagnostics and management audit"}
+{"file":".trellis/spec/backend/gateway-compatibility.md","reason":"Registration/probe lifecycle and stale generation protection"}
+{"file":".trellis/spec/frontend/console-loading.md","reason":"Background status must not block startup or overwrite newer requests"}
+{"file": ".trellis/tasks/10-29-registration-relay/research/api-contract.md", "reason": "Shared coordinator and UI API contract"}
+{"file":".trellis/spec/backend/model-inventory.md","reason":"Authorized model inventory extension"}
+{"file":".trellis/spec/frontend/model-list.md","reason":"Authorized model-list page extension"}
+{"file":".trellis/spec/backend/gateway-quota.md","reason":"Authorized New API quota extension"}

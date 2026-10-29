@@ -18,6 +18,7 @@ import {
 import { api } from '../api'
 import { notify, useConsole, accountState } from '../console'
 import type { Settings } from '../types'
+import RegistrationRelaySettings from '../components/RegistrationRelaySettings.vue'
 
 const { overview, accounts, refresh } = useConsole()
 type RoutingFields = Omit<Settings, 'requestOverrides' | 'upstreamHeaders'>
@@ -42,6 +43,7 @@ function normalized(settings: Settings): Settings {
       dshCompat: settings.dshCompat ?? true,
       requestOverrides: settings.requestOverrides ?? { operations: [] },
       upstreamHeaders: settings.upstreamHeaders ?? {},
+      registrationRelay: settings.registrationRelay ?? { enabled: false, servers: [] },
     }),
   ) as Settings
 }
@@ -97,6 +99,39 @@ const headersValidation = computed(() => {
     return { value: null, error: '请求头的值须为字符串。' }
   return { value: value as Settings['upstreamHeaders'], error: '' }
 })
+const relayValidation = computed(() => {
+  const relay = form.registrationRelay
+  if (relay.servers.length > 20) return { value: null, error: '最多添加 20 台服务器。' }
+  const origins = new Set<string>()
+  const servers = []
+  for (const [index, server] of relay.servers.entries()) {
+    const label = `第 ${index + 1} 台服务器`
+    const name = server.name.trim()
+    if (!name || name.length > 80) return { value: null, error: `${label}的名称须为 1 至 80 字。` }
+    let url: URL
+    try {
+      url = new URL(server.origin.trim())
+    } catch {
+      return { value: null, error: `${label}的域名须为完整 HTTPS 地址。` }
+    }
+    const loopback =
+      url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+    if (
+      (url.protocol !== 'https:' && !loopback) ||
+      url.username ||
+      url.password ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash ||
+      server.origin.length > 500
+    )
+      return { value: null, error: `${label}的域名不能包含路径、参数或凭据。` }
+    if (origins.has(url.origin)) return { value: null, error: '服务器域名不能重复。' }
+    origins.add(url.origin)
+    servers.push({ ...server, name, origin: url.origin })
+  }
+  return { value: { enabled: relay.enabled, servers }, error: '' }
+})
 watch(
   () => overview.value?.settings,
   (value) => {
@@ -143,7 +178,8 @@ async function save() {
   attempted.value = true
   const overrides = overridesValidation.value.value
   const headers = headersValidation.value.value
-  if (!overrides || !headers) return
+  const relay = relayValidation.value.value
+  if (!overrides || !headers || !relay) return
   const submitted = JSON.stringify([form, overridesText.value, headersText.value])
   saving.value = true
   try {
@@ -151,6 +187,7 @@ async function save() {
       ...form,
       requestOverrides: overrides,
       upstreamHeaders: headers,
+      registrationRelay: relay,
     })
     const unchanged = submitted === JSON.stringify([form, overridesText.value, headersText.value])
     saved.value = normalized(result.settings)
@@ -308,6 +345,13 @@ async function save() {
         </div>
       </section>
     </div>
+    <RegistrationRelaySettings
+      v-model="form.registrationRelay"
+      :saved-config="saved.registrationRelay"
+      :unsaved="dirty"
+      :saving="saving"
+      :validation-error="attempted ? relayValidation.error : ''"
+    />
     <section class="section-panel overrides-panel">
       <header class="section-heading">
         <Braces :size="20" />

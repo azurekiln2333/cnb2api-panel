@@ -93,6 +93,43 @@ export interface Settings {
   dshCompat: boolean
   requestOverrides: { operations: Array<Record<string, unknown>> }
   upstreamHeaders: Record<string, string>
+  registrationRelay: RegistrationRelayConfig
+}
+export interface RegistrationRelayServer {
+  id: string
+  name: string
+  origin: string
+  enabled: boolean
+}
+export interface RegistrationRelayConfig {
+  enabled: boolean
+  servers: RegistrationRelayServer[]
+}
+export interface RegistrationRelayServerStatus extends RegistrationRelayServer {
+  status: 'disabled' | 'idle' | 'pending' | 'success' | 'failed'
+  pending: number
+  failed: number
+  lastAttemptAt: string | null
+  lastSuccessAt: string | null
+  lastError: string
+}
+export interface RegistrationRelayStatus {
+  enabled: boolean
+  servers: RegistrationRelayServerStatus[]
+}
+export interface ModelAccount {
+  id: string
+  name: string
+}
+export interface ModelInventoryEntry {
+  id: string
+  listed: boolean
+  configuredAccounts: ModelAccount[]
+  discoveredAccounts: ModelAccount[]
+  eligibleAccounts: ModelAccount[]
+}
+export interface ModelInventory {
+  models: ModelInventoryEntry[]
 }
 export interface RequestShape {
   fields: string[]
@@ -210,4 +247,5 @@ export interface LogPage {
   limit: number
   offset: number
 }
-export type Page = 'accounts' | 'overview' | 'routing' | 'activity' | 'audit' | 'system' | 'access'
+export type Page =
+  'accounts' | 'overview' | 'models' | 'routing' | 'activity' | 'audit' | 'system' | 'access'

@@ -153,7 +153,7 @@ async function copyKey() {
       </div>
       <div class="access-security">
         <ShieldCheck :size="16" /><span
-          >客户端使用网关 Key；工作区 Key、CNB 个人令牌和注册密钥分别独立。</span
+          >客户端使用网关 Key。工作区 Key、CNB 个人令牌和注册密钥分别独立。</span
         >
       </div>
     </section>
@@ -207,6 +207,10 @@ async function copyKey() {
       </div>
       <p class="inline-hint">
         将 YOUR_GATEWAY_KEY 替换为左侧的统一网关 Key。模型须在 CNB 工作区中实际可用。
+      </p>
+      <p v-if="protocol === 'newapi'" class="inline-hint">
+        渠道类型选择 OpenAI。代理地址填写面板根域名，不加 /v1。 New API 通过 /v1/models
+        拉取模型。余额查询已支持，返回 CNB 积分。 New API 的美元符号仅为界面标记，不表示货币换算。
       </p>
     </section>
   </div>

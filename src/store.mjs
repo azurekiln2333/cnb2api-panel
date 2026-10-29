@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { resolve, join } from "node:path";
 import { addTokenUsage, emptyTokenUsage } from "./token-usage.mjs";
+import { loadRegistrationRelay, validateRegistrationRelay } from "./registration-relay.mjs";
 import {
   validateRequestOverrides,
   validateUpstreamHeaders,
@@ -41,6 +42,7 @@ const RUNTIME_FIELDS = [
   "lastWakeAt",
   "tokenUsage",
   "workerUsage",
+  "registrationTokenVersion",
 ];
 const runtimeDefaults = () => ({
   status: "pending",
@@ -58,6 +60,7 @@ const runtimeDefaults = () => ({
   errors: 0,
   lastWakeAt: null,
   tokenUsage: emptyTokenUsage(),
+  registrationTokenVersion: 0,
 });
 
 export class InputError extends Error {
@@ -78,6 +81,7 @@ export const DEFAULT_SETTINGS = {
   dshCompat: true,
   requestOverrides: { operations: [] },
   upstreamHeaders: {},
+  registrationRelay: { enabled: false, servers: [] },
 };
 
 export const DEFAULT_SSO = {
@@ -338,9 +342,10 @@ export function publicAccount(account) {
 }
 
 export class Store {
-  constructor(directory, { allowLocal = false, logDir } = {}) {
+  constructor(directory, { allowLocal = false, logDir, publicUrl = "" } = {}) {
     this.directory = resolve(directory);
     this.allowLocal = allowLocal;
+    this.publicUrl = publicUrl;
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     this.storage = new FileStorage(this.directory, logDir);
     this.logDirectory = this.storage.logDirectory;
@@ -423,12 +428,14 @@ export class Store {
       try {
         settings.requestOverrides = validateRequestOverrides(settings.requestOverrides);
         settings.upstreamHeaders = validateUpstreamHeaders(settings.upstreamHeaders);
+        settings.registrationRelay = validateRegistrationRelay(settings.registrationRelay, { allowLocal, publicUrl });
       } catch {
         throw new Error("Invalid request override settings; restore the data backup");
       }
       this.state = {
         version: 2,
         settings,
+        registrationRelay: loadRegistrationRelay(stats.registrationRelay),
         logs: legacy
           ? retainLogs(saved.logs || [])
           : logs.sort((a, b) => b.at.localeCompare(a.at)),
@@ -466,12 +473,19 @@ export class Store {
             flush: true,
           });
         this.persist(this.state, true);
-      } else this.snapshots = this.documents(this.state);
+      } else {
+        this.snapshots = this.documents(this.state);
+        if (stats.registrationRelay === undefined) {
+          this.snapshots["stats.json"] = "";
+          this.persist(this.state);
+        }
+      }
     } else {
       this.state = {
         version: 2,
         accounts: [],
-        settings: { ...DEFAULT_SETTINGS },
+        settings: { ...DEFAULT_SETTINGS, registrationRelay: { enabled: false, servers: [] } },
+        registrationRelay: loadRegistrationRelay(),
         sso: { ...DEFAULT_SSO },
         logs: [],
         hourly: [],
@@ -537,6 +551,7 @@ export class Store {
         hourly: state.hourly,
         tokenUsage: state.tokenUsage,
         tokenUsageStartedAt: state.tokenUsageStartedAt,
+        registrationRelay: state.registrationRelay,
         accounts: Object.fromEntries(
           state.accounts.map((a) => [
             a.id,
@@ -764,6 +779,7 @@ export class Store {
       errors: 0,
       lastWakeAt: null,
       tokenUsage: emptyTokenUsage(),
+      registrationTokenVersion: 0,
     };
     this.commit((s) => s.accounts.push(account));
     return account;
@@ -795,6 +811,9 @@ export class Store {
         old.repo !== fields.repo || old.secrets.pat !== fields.secrets.pat
           ? { quotaSync: null }
           : {},
+        old.secrets.registrationToken !== fields.secrets.registrationToken
+          ? { registrationTokenVersion: (old.registrationTokenVersion || 0) + 1 }
+          : {},
       );
     });
     return this.get(id);
@@ -825,6 +844,8 @@ export class Store {
         next.requestOverrides = validateRequestOverrides(input.requestOverrides);
       if (input.upstreamHeaders !== undefined)
         next.upstreamHeaders = validateUpstreamHeaders(input.upstreamHeaders);
+      if (input.registrationRelay !== undefined)
+        next.registrationRelay = validateRegistrationRelay(input.registrationRelay, { allowLocal: this.allowLocal, publicUrl: this.publicUrl });
     } catch (error) {
       throw new InputError(error.message);
     }
