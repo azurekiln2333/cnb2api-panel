@@ -13,9 +13,12 @@ generation are different observations.
   against the current endpoint, key and successful-health generation.
 - `Pool.recover(id)`: apply enabled-account, credentials and auto-wake policy.
 - `POST /v1/responses`: gateway-key authenticated Responses input.
-- `toChatRequest(payload)`: validate and map input to Chat Completions.
-- `toResponsesResponse(body, { model, requestId })`: map completed Chat JSON.
-- `ResponsesStream({ model, requestId }).push(bytes)/finish()`: return `Buffer[]`
+- `prepareResponsesRequest(payload)`: return `{ payload, toolContext }` with the
+  Chat request and request-scoped reverse tool mappings.
+- `toChatRequest(payload)`: return only the prepared Chat payload for callers
+  that do not need output conversion.
+- `toResponsesResponse(body, { model, requestId, toolContext })`: map Chat JSON.
+- `ResponsesStream({ model, requestId, toolContext }).push(bytes)/finish()`: return `Buffer[]`
   containing named Responses SSE events.
 
 ## Contracts
@@ -49,6 +52,36 @@ increasing sequence numbers and trailing usage. Emit completion only after a
 valid terminal Chat choice. Bound response state to 8 MiB and one event to 1 MiB.
 Keep retries before response headers only, abort on client disconnect, and await
 downstream drain. Existing Chat and Messages continue through their normal paths.
+
+Codex client metadata is a transport field. Validate its string-map shape on
+Responses input and omit it from Chat payloads. Strip `client_metadata` at the
+final Chat forwarding boundary too, including native Chat requests and request
+overrides. Preserve standard `metadata`. Accept bounded reasoning projection
+options (`reasoning.context`, `stream_options.reasoning_summary_delivery`) without
+forwarding Responses-only keys. Accept default `access_programs.cyber` selection
+only; reject non-default access plans before routing.
+
+Flatten namespace and custom tool definitions to deterministic, collision-free
+Chat function names of at most 64 characters. Keep reverse mappings local to
+the request; reserve ordinary function names before assigning aliases. Preserve
+`call_id`, namespace and custom input across full-history turns. Convert custom
+tools to a function with one required string `input`; include grammar as advisory
+description because Chat cannot enforce it. Decode the complete JSON arguments
+before emitting custom input. JSON and SSE must restore `custom_tool_call` and
+namespace. Custom SSE emits `response.custom_tool_call_input.delta/done` followed
+by a complete `response.output_item.done`, which Codex needs to execute the tool.
+
+Ignore echoed opaque reasoning/projection history while preserving visible
+messages and executable tool history. Never decrypt or fabricate reasoning.
+Stateful references, hosted tools, compaction and unsupported content remain
+explicit HTTP 400 errors. Hosted search errors tell Codex users to configure
+`web_search="disabled"`. Codex providers must use HTTP and local compaction
+(`supports_websockets=false`, `capabilities.remote_compaction="unsupported"`).
+Do not forward unsupported hosted tools as if the client could execute them.
+
+Validation errors expose bounded safe `param` and `code` strings. Do not include
+payload values or unsafe property names. Keep unknown semantic options explicit
+instead of silently discarding them.
 
 Return a neutral public 503 message with request ID and retry metadata.
 Management logs retain safe internal failure categories, never raw exceptions,
@@ -85,6 +118,15 @@ failure categories, persisted cooldowns and automatic-wake throttling.
 usage, limits, refusal and incomplete responses. `test/panel-responses.test.mjs`
 proves authentication/CORS, actual upstream path, overrides, accounting, retries,
 errors and disconnect behavior over HTTP.
+
+Codex regression fixtures must use a strict Chat-only worker that rejects
+Responses-only root fields. Cover full-history two-turn namespace/function/custom
+calls, custom SSE, original usage/log routes, direct Chat metadata stripping and
+safe error diagnostics. A permissive mock that only checks the upstream URL
+cannot prove compatibility. `scripts/smoke-codex.mjs <codex.js>` runs an installed
+Codex CLI with temporary `CODEX_HOME`, dummy keys, hosted search disabled and a
+strict loopback Chat worker. It validates real tool execution and the second
+history request without reading production configuration or credentials.
 
 ## Wrong vs Correct
 

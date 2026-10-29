@@ -817,6 +817,13 @@ export function createPanelServer(options) {
               ? "request_too_large"
               : "invalid_request_error",
       };
+      if (error instanceof InputError) {
+        if (typeof error.param === "string" && error.param.length <= 256 &&
+          /^[A-Za-z_][A-Za-z0-9_]*(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+))*$/.test(error.param))
+          errorBody.param = error.param;
+        if (typeof error.code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(error.code))
+          errorBody.code = error.code;
+      }
       json(
         res,
         status,

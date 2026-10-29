@@ -488,14 +488,65 @@ VPS 上的旧 Python 注册服务不再是面板依赖。
 客户端仍接收 Responses 格式的结果。
 普通响应和流式响应均支持转换。
 转换支持文本、图片地址和函数工具。
+转换支持命名空间工具和自定义工具。
+自定义工具语法作为说明传给上游。
+Chat 上游不检查工具语法。
 工具结果通过完整请求历史继续提交。
+面板接受 `client_metadata`。
+转发前，面板删除此字段。
+面板保留标准 `metadata` 字段。
 
 面板不保存 Responses 会话。
 客户端应提交完整历史。
 客户端应配置 `store: false`。
 面板拒绝历史响应 ID、后台任务和内置工具。
 面板不会生成加密推理内容。
+面板忽略历史中的推理投影。
+面板保留历史中的消息和工具结果。
 推理能力仍取决于工作区和模型。
+
+Codex 使用 Chat 上游时，关闭内置联网。
+在 Codex 的 `config.toml` 中配置：
+
+```toml
+model_provider = "panel"
+model = "your-upstream-model"
+web_search = "disabled"
+
+[model_providers.panel]
+name = "cnb2api-panel"
+base_url = "https://your-panel.example/v1"
+env_key = "CNB2API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+supports_standalone_web_search = false
+
+[model_providers.panel.capabilities]
+remote_compaction = "unsupported"
+
+[features]
+async_compaction = false
+```
+
+替换面板地址和上游模型名。
+环境变量 `CNB2API_KEY` 使用网关密钥。
+此配置适用于 Codex CLI 0.164.0。
+Codex 通过 HTTP 流式请求面板。
+Codex 在本地压缩历史。
+面板不实现内置联网和服务端压缩。
+本地工具和 MCP 工具仍可使用。
+
+开发者可用已安装的 Codex 验证转换：
+
+```bash
+node scripts/smoke-codex.mjs /path/to/@openai/codex/bin/codex.js
+```
+
+此检查使用临时目录和测试密钥。
+此检查不读取现有 Codex 配置。
+此检查验证两轮工具调用和完整历史。
+此检查使用严格的 Chat 测试上游。
 
 ## 请求分配与会话缓存
 

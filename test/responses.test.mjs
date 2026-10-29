@@ -1,12 +1,187 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { toChatRequest, toResponsesResponse, ResponsesStream } from "../src/responses.mjs";
+import { prepareResponsesRequest, toChatRequest, toResponsesResponse, ResponsesStream } from "../src/responses.mjs";
 
 const chunk = (delta, finish_reason = null) => ({ choices: [{ index: 0, delta, finish_reason }] });
 const frame = (value) => `data: ${JSON.stringify(value)}\n\n`;
 const parsed = (frames) => frames.map((value) => JSON.parse(value.toString().split("\ndata: ")[1].trim()));
 const chat = (message, finish_reason = "stop", extra = {}) => ({
   model: "upstream-model", choices: [{ message, finish_reason }], ...extra,
+});
+const codexTools = () => [
+  { type: "function", name: "lookup", parameters: { type: "object", properties: {} } },
+  { type: "namespace", name: "workspace", description: "Workspace operations", tools: [
+    { type: "function", name: "lookup", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } }, defer_loading: true },
+    { type: "custom", name: "apply_patch", description: "Apply the patch", format: { type: "grammar", syntax: "lark", definition: 'start: "*** Begin Patch" /.+/ "*** End Patch"' } },
+  ] },
+];
+
+test("accepts Codex transport metadata and reasoning projections without forwarding them to Chat", () => {
+  const request = {
+    model: "codex", input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Read the file" }] },
+      { type: "reasoning", id: "rs_old", encrypted_content: "opaque", summary: [{ type: "summary_text", text: "Summary projection" }], content: [{ type: "reasoning_text", text: "Reasoning projection" }] },
+    ],
+    stream: true, store: false, client_metadata: { originator: "codex_cli_rs", session_id: "session" },
+    access_programs: { cyber: "standard" }, metadata: { application: "test" },
+    include: ["reasoning.encrypted_content"], reasoning: { effort: "high", summary: "auto", context: "current_turn" },
+    stream_options: { include_obfuscation: false, reasoning_summary_delivery: "sequential_cutoff" },
+    tools: codexTools(), tool_choice: "auto", parallel_tool_calls: true,
+  };
+  const before = structuredClone(request);
+  const { payload } = prepareResponsesRequest(request);
+  assert.deepEqual(request, before);
+  assert.deepEqual(payload.messages, [{ role: "user", content: [{ type: "text", text: "Read the file" }] }]);
+  assert.deepEqual(payload.metadata, { application: "test" });
+  assert.equal(payload.reasoning_effort, "high");
+  for (const field of ["client_metadata", "access_programs", "reasoning", "stream_options", "include", "store"]) assert.equal(field in payload, false);
+  assert.equal(JSON.stringify(payload).includes("opaque"), false);
+  for (const access_programs of [{}, { cyber: null }])
+    assert.equal("access_programs" in toChatRequest({ input: "test", access_programs }), false);
+});
+
+test("flattens namespace and custom tools to deterministic collision-free Chat names", () => {
+  const tools = codexTools();
+  tools.push({ type: "namespace", name: "workspace__lookup", tools: [{ type: "function", name: "lookup" }] });
+  tools.push({ type: "namespace", name: "workspace", tools: [{ type: "function", name: "x".repeat(200) }] });
+  tools.push({ type: "function", name: "非 ASCII / function" });
+  const { payload } = prepareResponsesRequest({ input: "test", tools });
+  const reordered = prepareResponsesRequest({ input: "test", tools: [...tools].reverse() }).payload;
+  const names = payload.tools.map((tool) => tool.function.name);
+  assert.equal(new Set(names).size, names.length);
+  assert.ok(names.every((name) => /^[a-zA-Z0-9_-]{1,64}$/.test(name)));
+  assert.equal(names[0], "lookup");
+  assert.notEqual(names[1], "lookup");
+  assert.deepEqual([...names].sort(), reordered.tools.map((tool) => tool.function.name).sort());
+  const custom = payload.tools[2].function;
+  assert.deepEqual(custom.parameters, { type: "object", properties: { input: { type: "string" } }, required: ["input"], additionalProperties: false });
+  assert.match(custom.description, /not enforced by Chat/);
+  assert.match(custom.description, /Begin Patch/);
+  assert.equal("defer_loading" in payload.tools[1].function, false);
+  const functionChoice = toChatRequest({ input: "test", tools, tool_choice: { type: "function", namespace: "workspace", name: "lookup" } });
+  assert.equal(functionChoice.tool_choice.function.name, names[1]);
+  const customChoice = toChatRequest({ input: "test", tools, tool_choice: { type: "custom", namespace: "workspace", name: "apply_patch" } });
+  assert.equal(customChoice.tool_choice.function.name, names[2]);
+});
+
+test("restores namespace and custom calls, then preserves their IDs and values in the next turn", () => {
+  const tools = codexTools();
+  const first = prepareResponsesRequest({ input: "edit", tools });
+  const patch = "*** Begin Patch\n你😀\n*** End Patch";
+  const output = toResponsesResponse(chat({ tool_calls: [
+    { type: "function", id: "call_read", function: { name: first.payload.tools[1].function.name, arguments: '{"path":"file"}' } },
+    { type: "function", id: "call_patch", function: { name: first.payload.tools[2].function.name, arguments: JSON.stringify({ input: patch }) } },
+  ] }, "tool_calls"), { toolContext: first.toolContext }).output;
+  assert.deepEqual(output.map(({ type, name, namespace, call_id, input, arguments: args }) => ({ type, name, namespace, call_id, input, arguments: args })), [
+    { type: "function_call", name: "lookup", namespace: "workspace", call_id: "call_read", input: undefined, arguments: '{"path":"file"}' },
+    { type: "custom_tool_call", name: "apply_patch", namespace: "workspace", call_id: "call_patch", input: patch, arguments: undefined },
+  ]);
+  const next = prepareResponsesRequest({ tools, input: [
+    { role: "user", content: "edit" },
+    { type: "reasoning", encrypted_content: "opaque", summary: [] },
+    ...output.map((item) => ({ ...item, encrypted_content: "opaque", internal_chat_message_metadata_passthrough: { ignored: true } })),
+    { type: "function_call_output", call_id: "call_read", output: "file text" },
+    { type: "custom_tool_call_output", call_id: "call_patch", name: "apply_patch", output: [{ type: "input_text", text: "Applied" }] },
+  ] });
+  const calls = next.payload.messages[1].tool_calls;
+  assert.deepEqual(calls.map((call) => call.id), ["call_read", "call_patch"]);
+  assert.equal(calls[0].function.name, first.payload.tools[1].function.name);
+  assert.equal(calls[1].function.name, first.payload.tools[2].function.name);
+  assert.deepEqual(JSON.parse(calls[1].function.arguments), { input: patch });
+  assert.deepEqual(next.payload.messages.slice(2), [
+    { role: "tool", tool_call_id: "call_read", content: "file text" },
+    { role: "tool", tool_call_id: "call_patch", content: [{ type: "text", text: "Applied" }] },
+  ]);
+});
+
+test("keeps tool mappings local to each request", () => {
+  const first = prepareResponsesRequest({ input: "test", tools: [{ type: "custom", name: "edit" }] });
+  const second = prepareResponsesRequest({ input: "test", tools: [{ type: "function", name: "edit" }] });
+  const response = toResponsesResponse(chat({ tool_calls: [{ type: "function", id: "call_1", function: { name: "edit", arguments: "{}" } }] }, "tool_calls"), { toolContext: second.toolContext });
+  assert.equal(response.output[0].type, "function_call");
+  assert.equal(first.toolContext.byChatName.has("edit"), false);
+});
+
+test("returns safe field paths and rejects malformed or unsupported semantic options", () => {
+  const cases = [
+    [{ client_metadata: { originator: 1 } }, "client_metadata", "invalid_field"],
+    [{ access_programs: { cyber: "daybreak_blue" } }, "access_programs.cyber", "unsupported_parameter"],
+    [{ reasoning: { context: "unknown" } }, "reasoning.context", "invalid_field"],
+    [{ stream_options: { reasoning_summary_delivery: "unknown" } }, "stream_options.reasoning_summary_delivery", "invalid_field"],
+    [{ future_option: "private-value" }, "future_option", "unsupported_parameter"],
+    [{ "secret/key with spaces": true }, "request", "unsupported_parameter"],
+    [{ input: [{ type: "compaction", encrypted_content: "private-value" }] }, "input.0.item_type", "unsupported_parameter"],
+    [{ tools: [{ type: "web_search" }] }, "tools.0.type", "unsupported_parameter"],
+    [{ tools: [{ type: "custom", name: "edit", format: { type: "grammar", syntax: "unknown", definition: "private-value" } }] }, "tools.0.format.syntax", "invalid_field"],
+    [{ tools: [{ type: "function", name: "same" }, { type: "function", name: "same" }] }, "tools.1.name", "invalid_field"],
+  ];
+  for (const [extra, param, code] of cases) assert.throws(() => prepareResponsesRequest({ input: "test", ...extra }), (error) => {
+    assert.equal(error.status, 400);
+    assert.equal(error.param, param);
+    assert.equal(error.code, code);
+    assert.equal(error.message.includes("private-value"), false);
+    assert.equal(error.message.includes("secret/key"), false);
+    return true;
+  });
+  assert.throws(() => toChatRequest({ input: "test", tools: [{ type: "web_search" }] }), /web_search="disabled"/);
+});
+
+test("rejects malformed custom Chat arguments in JSON and streaming output", () => {
+  const { payload, toolContext } = prepareResponsesRequest({ input: "test", tools: [{ type: "custom", name: "edit" }] });
+  const name = payload.tools[0].function.name;
+  for (const args of ["", "{", "{}", "null", '"text"', '{"input":1}', '{"input":"x","other":true}']) {
+    const call = { type: "function", id: "call_edit", function: { name, arguments: args } };
+    assert.throws(() => toResponsesResponse(chat({ tool_calls: [call] }, "tool_calls"), { toolContext }), /^Error: Invalid or interrupted upstream Chat response$/);
+    const stream = new ResponsesStream({ toolContext });
+    const frames = stream.push(Buffer.from(frame(chunk({ tool_calls: [{ ...call, index: 0 }] }, "tool_calls"))));
+    assert.throws(() => stream.finish(), /^Error: Invalid or interrupted upstream Chat response$/);
+    assert.equal(parsed(frames).some((event) => event.type === "response.completed"), false);
+  }
+});
+
+test("streams fragmented custom JSON as custom input events and complete executable items", () => {
+  const { payload, toolContext } = prepareResponsesRequest({ input: "test", tools: codexTools() });
+  const name = payload.tools[2].function.name;
+  const stream = new ResponsesStream({ toolContext });
+  const frames = [];
+  frames.push(...stream.push(Buffer.from(frame(chunk({ tool_calls: [{ index: 0, id: "call_patch", type: "function", function: { name: name.slice(0, 5), arguments: '{"input":' } }] })))));
+  frames.push(...stream.push(Buffer.from(frame(chunk({ tool_calls: [{ index: 0, function: { name: name.slice(5), arguments: '"line\\n你😀"}' } }] })))));
+  frames.push(...stream.push(Buffer.from(frame(chunk({}, "tool_calls")))));
+  assert.equal(parsed(frames).some((event) => event.type.endsWith(".done")), false);
+  frames.push(...stream.finish());
+  const events = parsed(frames);
+  const done = events.find((event) => event.type === "response.custom_tool_call_input.done");
+  const delta = events.find((event) => event.type === "response.custom_tool_call_input.delta");
+  const item = events.find((event) => event.type === "response.output_item.done").item;
+  assert.equal(delta.delta, "line\n你😀");
+  assert.equal(done.input, delta.delta);
+  assert.equal(done.item_id, item.id);
+  assert.equal(item.type, "custom_tool_call");
+  assert.equal(item.namespace, "workspace");
+  assert.equal(item.name, "apply_patch");
+  assert.equal(item.call_id, "call_patch");
+  assert.equal(item.input, done.input);
+  assert.equal("arguments" in item, false);
+  assert.equal(events.some((event) => event.type.startsWith("response.function_call_arguments")), false);
+  assert.equal(events.at(-1).type, "response.completed");
+  assert.deepEqual(events.at(-1).response.output, [item]);
+});
+
+test("waits for ambiguous streamed tool names before selecting a declared function", () => {
+  const { toolContext } = prepareResponsesRequest({ input: "test", tools: [
+    { type: "function", name: "read" }, { type: "function", name: "read_file" },
+  ] });
+  for (const completeName of ["read", "read_file"]) {
+    const stream = new ResponsesStream({ toolContext });
+    const frames = stream.push(Buffer.from(frame(chunk({ tool_calls: [{ index: 0, id: "call_read", type: "function", function: { name: "read", arguments: "{" } }] }))));
+    assert.equal(parsed(frames).some((event) => event.type === "response.output_item.added"), false);
+    frames.push(...stream.push(Buffer.from(frame(chunk({ tool_calls: [{ index: 0, function: { name: completeName.slice(4), arguments: "}" } }] }, "tool_calls")))));
+    frames.push(...stream.finish());
+    const item = parsed(frames).find((event) => event.type === "response.output_item.done").item;
+    assert.equal(item.name, completeName);
+    assert.equal(item.call_id, "call_read");
+    assert.equal(item.arguments, "{}");
+  }
 });
 
 test("maps Responses generation controls and function schemas without changing input", () => {

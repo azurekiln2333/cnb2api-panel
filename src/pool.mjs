@@ -7,7 +7,7 @@ import { WorkerUsageMonitor } from "./worker-usage.mjs";
 import { initialUserMessage, requestShape } from "./request-details.mjs";
 import { MAX_REQUEST_BYTES, rewriteRequest } from "./request-overrides.mjs";
 import { SessionAffinity, sessionKey } from "./session-affinity.mjs";
-import { toChatRequest, toResponsesResponse, ResponsesStream } from "./responses.mjs";
+import { prepareResponsesRequest, toResponsesResponse, ResponsesStream } from "./responses.mjs";
 
 export const isCooling = (a) =>
   Boolean(a.cooldownUntil && Date.parse(a.cooldownUntil) > Date.now());
@@ -804,7 +804,8 @@ export class Pool {
     const started = Date.now();
     const responses = path === "/v1/responses";
     const upstreamPath = responses ? "/v1/chat/completions" : path;
-    const semanticPayload = responses ? toChatRequest(payload) : payload;
+    const prepared = responses ? prepareResponsesRequest(payload) : null;
+    const semanticPayload = prepared ? prepared.payload : payload;
     const { dshCompat, requestOverrides, upstreamHeaders } = this.store.state.settings;
     const rewritten = rewriteRequest(semanticPayload, { dshCompat, requestOverrides }, upstreamPath);
     const forwardedPayload = upstreamPath === "/v1/chat/completions"
@@ -813,6 +814,9 @@ export class Pool {
           stream_options: { ...rewritten.payload.stream_options, include_usage: true },
         }
       : rewritten.payload;
+    // Codex client metadata describes the client session, not the model request.
+    // Strict Chat-only workers reject it even on native Chat requests.
+    if (upstreamPath === "/v1/chat/completions") delete forwardedPayload.client_metadata;
     // CNB workers always stream from the model upstream, including when they
     // aggregate a non-streaming response. Request usage in both client modes.
     const requestBody = JSON.stringify(forwardedPayload);
@@ -933,7 +937,7 @@ export class Pool {
             );
           const convert = responses && response.ok;
           const convertStream = convert && payload.stream === true;
-          const converter = convertStream ? new ResponsesStream({ model: payload.model, requestId }) : null;
+          const converter = convertStream ? new ResponsesStream({ model: payload.model, requestId, toolContext: prepared.toolContext }) : null;
           const replyHeaders = {
             "Content-Type":
               convert ? (convertStream ? "text/event-stream" : "application/json") :
@@ -989,7 +993,7 @@ export class Pool {
           } else if (convert) {
             const converted = toResponsesResponse(
               JSON.parse(Buffer.concat(chunks, bufferedBytes).toString("utf8")),
-              { model: payload.model, requestId },
+              { model: payload.model, requestId, toolContext: prepared.toolContext },
             );
             res.writeHead(response.status, replyHeaders);
             await emit(Buffer.from(JSON.stringify(converted)));
