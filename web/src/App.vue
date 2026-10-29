@@ -155,7 +155,7 @@ function resumeRefresh() {
 watch(
   page,
   () => {
-    refreshPage()
+    if (authenticated.value && !document.hidden) void refresh()
     contentPane.value?.scrollTo({ top: 0, left: 0 })
   },
   { flush: 'post' },
@@ -225,8 +225,8 @@ async function establishSession() {
   const session = await api<{ authenticated: boolean; user?: SessionUser }>('/session')
   sessionUser.value = session.user ?? null
   authenticated.value = true
-  await refresh()
-  await refreshLogs()
+  checkingSession.value = false
+  void refresh()
 }
 async function signIn() {
   signingIn.value = true
@@ -264,7 +264,7 @@ function shortcuts(event: KeyboardEvent) {
 }
 onMounted(async () => {
   readAuthNotice()
-  await loadAuthConfig()
+  void loadAuthConfig()
   window.addEventListener('hashchange', hashChanged)
   window.addEventListener('session-expired', expired)
   window.addEventListener('keydown', shortcuts)
@@ -505,16 +505,18 @@ onBeforeUnmount(() => {
             诊断详情</button
           ><button @click="refresh">重试</button>
         </div>
-        <div v-if="!overview && loading" class="page-loading">
+        <ActivityView
+          v-if="page === 'activity' || page === 'audit' || page === 'system'"
+          :key="page"
+          :channel="page === 'activity' ? 'requests' : page"
+        />
+        <div v-else-if="!overview && loading" class="page-loading">
           <LoaderCircle :size="24" class="spin" /><span>正在读取账号池…</span>
         </div>
         <template v-else-if="overview"
           ><AccountsView v-if="page === 'accounts'" @navigate="navigate" /><OverviewView
             v-else-if="page === 'overview'"
-            @navigate="navigate" /><RoutingView v-else-if="page === 'routing'" /><ActivityView
-            v-else-if="page === 'activity' || page === 'audit' || page === 'system'"
-            :key="page"
-            :channel="page === 'activity' ? 'requests' : page" /><AccessView v-else
+            @navigate="navigate" /><RoutingView v-else-if="page === 'routing'" /><AccessView v-else
         /></template>
         <div v-else-if="!refreshError" class="page-loading">等待网关数据</div>
       </main>

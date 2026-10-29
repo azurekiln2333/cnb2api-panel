@@ -198,4 +198,16 @@ export interface SessionUser {
   provider: 'key' | 'oidc'
 }
 export type LogChannel = 'requests' | 'audit' | 'system'
+export interface LogQuery {
+  offset: number
+  q: string
+  outcome: 'all' | 'success' | 'failure'
+  kind: string
+}
+export interface LogPage {
+  logs: LogEntry[]
+  total: number
+  limit: number
+  offset: number
+}
 export type Page = 'accounts' | 'overview' | 'routing' | 'activity' | 'audit' | 'system' | 'access'

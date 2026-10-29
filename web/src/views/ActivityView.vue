@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
   Search,
   RefreshCw,
@@ -11,12 +11,13 @@ import {
   Download,
 } from '@lucide/vue'
 import { api } from '../api'
-import { useConsole, time, number, copy } from '../console'
+import { useConsole, time, number, copy, logPath, LOG_PAGE_SIZE } from '../console'
 import type { LogChannel, LogEntry, RequestShape } from '../types'
 import ModalShell from '../components/ModalShell.vue'
 const props = withDefaults(defineProps<{ channel?: LogChannel }>(), { channel: 'requests' })
-const { logStreams, refreshLogs } = useConsole()
+const { logStreams, logPages, refreshLogs } = useConsole()
 const logs = computed(() => logStreams[props.channel].value)
+const total = computed(() => logPages[props.channel].value.total)
 const pageInfo = computed(
   () =>
     ({
@@ -38,11 +39,15 @@ const pageInfo = computed(
     })[props.channel],
 )
 const search = ref('')
+const searchQuery = ref('')
+let searchTimer: number | undefined
 const kind = ref('all')
 const outcome = ref<'all' | 'success' | 'failure'>('all')
 const page = ref(1)
 const selected = ref<LogEntry | null>(null)
-const refreshing = ref(false)
+const refreshing = computed(
+  () => logPages[props.channel].value.loading || search.value !== searchQuery.value,
+)
 const detailLoading = ref(false)
 const detailError = ref('')
 let detailGeneration = 0
@@ -65,20 +70,14 @@ const kindOptions = computed(() =>
   ),
 )
 const successful = (log: LogEntry) => log.status >= 200 && log.status < 400
-const filtered = computed(() =>
-  logs.value.filter(
-    (l) =>
-      (kind.value === 'all' || l.kind === kind.value) &&
-      (props.channel !== 'requests' ||
-        outcome.value === 'all' ||
-        successful(l) === (outcome.value === 'success')) &&
-      `${l.accountName} ${l.actor?.name ?? ''} ${l.action ?? ''} ${l.ip ?? ''} ${l.model ?? ''} ${l.message} ${l.requestId ?? ''} ${l.initialMessage?.text ?? ''}`
-        .toLowerCase()
-        .includes(search.value.toLowerCase()),
-  ),
-)
-const pages = computed(() => Math.max(1, Math.ceil(filtered.value.length / 20)))
-const rows = computed(() => filtered.value.slice((page.value - 1) * 20, page.value * 20))
+const pages = computed(() => Math.max(1, Math.ceil(total.value / LOG_PAGE_SIZE)))
+const rows = logs
+const query = computed(() => ({
+  offset: (page.value - 1) * LOG_PAGE_SIZE,
+  q: searchQuery.value,
+  outcome: outcome.value,
+  kind: kind.value,
+}))
 const tokenFields = [
   { key: 'input', label: '输入' },
   { key: 'output', label: '输出' },
@@ -154,18 +153,13 @@ function copyDetails() {
   )
 }
 function exportLogs() {
-  if (!filtered.value.length) return
-  const file = new Blob([JSON.stringify(filtered.value, null, 2)], {
-    type: 'application/json;charset=utf-8',
-  })
-  const url = URL.createObjectURL(file)
+  if (!total.value || refreshing.value) return
   const link = document.createElement('a')
-  link.href = url
+  link.href = `/api${logPath(props.channel, query.value, true)}`
   link.download = `${props.channel}-logs-${new Date().toISOString().replaceAll(':', '-')}.json`
   document.body.append(link)
   link.click()
   link.remove()
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 function closeDetails() {
   detailGeneration++
@@ -190,15 +184,27 @@ async function openDetails(log: LogEntry) {
     if (generation === detailGeneration) detailLoading.value = false
   }
 }
-watch([search, kind, outcome], () => {
-  page.value = 1
+watch(search, (value) => {
+  window.clearTimeout(searchTimer)
+  searchTimer = window.setTimeout(() => {
+    searchQuery.value = value
+  }, 200)
 })
+onBeforeUnmount(() => window.clearTimeout(searchTimer))
+watch(
+  [searchQuery, kind, outcome],
+  () => {
+    page.value = 1
+  },
+  { flush: 'sync' },
+)
 async function refresh() {
-  refreshing.value = true
-  await refreshLogs(props.channel)
-  refreshing.value = false
+  await refreshLogs(props.channel, query.value)
 }
-onMounted(refresh)
+watch([query, () => props.channel], refresh, { immediate: true })
+watch([pages, refreshing], ([count, busy]) => {
+  if (!busy && page.value > count) page.value = count
+})
 </script>
 
 <template>
@@ -247,8 +253,8 @@ onMounted(refresh)
       </select>
       <button
         class="button"
-        :disabled="!filtered.length"
-        :title="`导出当前筛选的 ${filtered.length} 条记录`"
+        :disabled="refreshing || !total"
+        :title="`导出当前筛选的 ${total} 条记录`"
         @click="exportLogs"
       >
         <Download :size="15" />导出筛选记录
@@ -315,16 +321,28 @@ onMounted(refresh)
         </tbody>
       </table>
     </div>
+    <div v-else-if="refreshing" class="empty-filter" role="status">
+      <LoaderCircle :size="30" class="spin" />
+      <h3>正在读取日志</h3>
+    </div>
     <div v-else class="empty-filter">
       <ScrollText :size="30" />
-      <h3>{{ logs.length ? '没有匹配的记录' : `暂无${pageInfo.title}` }}</h3>
+      <h3>
+        {{
+          search || kind !== 'all' || outcome !== 'all' ? '没有匹配的记录' : `暂无${pageInfo.title}`
+        }}
+      </h3>
       <p>
-        {{ logs.length ? '试试其他关键词或事件类型。' : pageInfo.description }}
+        {{
+          search || kind !== 'all' || outcome !== 'all'
+            ? '试试其他关键词或筛选条件。'
+            : pageInfo.description
+        }}
       </p>
     </div>
     <footer class="table-footer">
       <span
-        >共 {{ filtered.length }} 条记录<template v-if="channel === 'requests'"
+        >共 {{ total }} 条记录<template v-if="channel === 'requests'"
           ><span class="footer-dot">·</span>首条用户消息最多保留 4,000 字符</template
         ></span
       >

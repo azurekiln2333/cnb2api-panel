@@ -1,10 +1,22 @@
 import { computed, ref } from 'vue'
 import { api, ApiError, type ApiDiagnostics } from './api'
-import type { Account, LogChannel, LogEntry, Overview, Settings } from './types'
+import type { Account, LogChannel, LogEntry, LogPage, LogQuery, Overview, Settings } from './types'
 
 const overview = ref<Overview | null>(null)
 const logs = ref<LogEntry[]>([])
 const logStreams = { requests: logs, audit: ref<LogEntry[]>([]), system: ref<LogEntry[]>([]) }
+export const LOG_PAGE_SIZE = 20
+const emptyLogQuery = (): LogQuery => ({ offset: 0, q: '', outcome: 'all', kind: 'all' })
+const logQueries = {
+  requests: ref(emptyLogQuery()),
+  audit: ref(emptyLogQuery()),
+  system: ref(emptyLogQuery()),
+}
+const logPages = {
+  requests: ref({ total: 0, loading: false }),
+  audit: ref({ total: 0, loading: false }),
+  system: ref({ total: 0, loading: false }),
+}
 const loading = ref(false)
 const refreshError = ref('')
 const refreshDiagnostics = ref<ApiDiagnostics | null>(null)
@@ -14,7 +26,7 @@ const toasts = ref<{ id: number; text: string; error: boolean; diagnostics?: Api
 const registration = ref<{ account: Account; token: string } | null>(null)
 let notificationId = 0
 let refreshPromise: Promise<void> | null = null
-const logsPromises: Partial<Record<LogChannel, Promise<void>>> = {}
+const logsRequests: Partial<Record<LogChannel, { path: string; promise: Promise<void> }>> = {}
 let sessionGeneration = 0
 
 function reset() {
@@ -29,7 +41,11 @@ function reset() {
   refreshDiagnostics.value = null
   loading.value = false
   refreshPromise = null
-  for (const channel of ['requests', 'audit', 'system'] as const) delete logsPromises[channel]
+  for (const channel of ['requests', 'audit', 'system'] as const) {
+    delete logsRequests[channel]
+    logQueries[channel].value = emptyLogQuery()
+    logPages[channel].value = { total: 0, loading: false }
+  }
 }
 
 export function notify(text: string, error = false, diagnostics?: ApiDiagnostics) {
@@ -71,27 +87,56 @@ async function refresh() {
   return refreshPromise
 }
 
-async function refreshLogs(channel: LogChannel = 'requests') {
-  if (logsPromises[channel]) return logsPromises[channel]
+export function logPath(channel: LogChannel, query: LogQuery, download = false) {
+  const params = new URLSearchParams({
+    ...(download
+      ? { download: '1' }
+      : { limit: String(LOG_PAGE_SIZE), offset: String(query.offset) }),
+    q: query.q,
+    outcome: query.outcome,
+    kind: query.kind,
+  })
+  return `${channel === 'requests' ? '/logs' : `/logs/${channel}`}?${params}`
+}
+
+async function refreshLogs(channel: LogChannel = 'requests', query = logQueries[channel].value) {
+  const path = logPath(channel, query)
+  const previous = logsRequests[channel]
+  if (previous?.path === path) return previous.promise
   const generation = sessionGeneration
-  logsPromises[channel] = (async () => {
+  if (logPath(channel, logQueries[channel].value) !== path) {
+    logStreams[channel].value = []
+    logPages[channel].value.total = 0
+  }
+  logQueries[channel].value = { ...query }
+  logPages[channel].value.loading = true
+  const request = { path, promise: Promise.resolve() }
+  logsRequests[channel] = request
+  const current = () => generation === sessionGeneration && logsRequests[channel] === request
+  request.promise = (async () => {
     try {
-      const result = await api<{ logs: LogEntry[] }>(
-        channel === 'requests' ? '/logs' : `/logs/${channel}`,
-      )
-      if (generation === sessionGeneration) logStreams[channel].value = result.logs
+      const result = await api<LogPage>(path)
+      if (!Array.isArray(result.logs) || !Number.isFinite(result.total))
+        throw new Error('日志数据格式不正确')
+      if (current()) {
+        logStreams[channel].value = result.logs
+        logPages[channel].value.total = result.total
+      }
     } catch (error) {
-      if (generation === sessionGeneration)
+      if (current())
         notify(
           error instanceof Error ? error.message : '日志加载失败',
           true,
           error instanceof ApiError ? error.diagnostics : undefined,
         )
     } finally {
-      if (generation === sessionGeneration) delete logsPromises[channel]
+      if (current()) {
+        logPages[channel].value.loading = false
+        delete logsRequests[channel]
+      }
     }
   })()
-  return logsPromises[channel]
+  return request.promise
 }
 
 async function action(id: string, operation: 'probe' | 'quota' | 'wake') {
@@ -238,6 +283,7 @@ export function useConsole() {
     overview,
     logs,
     logStreams,
+    logPages,
     loading,
     refreshError,
     refreshDiagnostics,

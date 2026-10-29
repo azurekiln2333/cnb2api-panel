@@ -23,6 +23,13 @@ const workerTotals = {
 const worker = http.createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json')
   // Test controls live only in this isolated mock worker, never in the panel.
+  if (req.url === '/test/request-logs' && req.method === 'POST') {
+    const chunks = []
+    for await (const chunk of req) chunks.push(chunk)
+    const { logs } = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    store.state.logs = [...logs, ...store.state.logs.filter((entry) => entry.kind !== 'request')]
+    return res.end(JSON.stringify({ ok: true }))
+  }
   if (req.url === '/test/quota') {
     if (req.method === 'POST') {
       const chunks = []
@@ -75,7 +82,7 @@ const worker = http.createServer(async (req, res) => {
   )
 })
 worker.listen(19221, '127.0.0.1')
-const { server, pool } = createPanelServer({
+const { server, pool, store } = createPanelServer({
   adminKey: 'browser-test-admin-key',
   gatewayKey: 'browser-test-gateway-key',
   dataDir,

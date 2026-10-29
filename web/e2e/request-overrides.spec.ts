@@ -193,8 +193,8 @@ test('request details fetch redacted diagnostics and handle legacy records and r
   }
   let detailRequests = 0
   let retryRequests = 0
-  await page.route('**/api/logs', (route) =>
-    route.fulfill({ json: { logs: [current, legacy, failed] } }),
+  await page.route('**/api/logs?**', (route) =>
+    route.fulfill({ json: { logs: [current, legacy, failed], total: 3, limit: 20, offset: 0 } }),
   )
   await page.route('**/api/logs/requests/*', async (route) => {
     const id = route.request().url().split('/').pop()

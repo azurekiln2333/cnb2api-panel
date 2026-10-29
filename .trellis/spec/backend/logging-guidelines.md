@@ -18,6 +18,23 @@ All log endpoints require an authenticated management session. `/api/logs` is an
 alias for requests only. The console provides separate request, audit and system
 navigation entries. Never put event arrays in `panel.json` or `accounts.json`.
 Request counters and Token totals belong in `stats.json` and survive log cleanup.
+
+Console list requests must use server pagination. A request with `limit`,
+`offset`, `q`, `outcome` or `kind` returns `{ logs, total, limit, offset }`.
+The default page size is 20 and the maximum is 100. Apply channel selection,
+case-insensitive search and outcome/kind filters before pagination. Search the
+full stored initial user message as well as the existing metadata fields.
+Keep the no-query `{ logs }` response for older clients.
+
+The same authenticated endpoint with `download=1` sends a JSON attachment array
+of all matching records, ignoring pagination. Lists and downloads omit
+`requestDiagnostics`; individual request details retain it. An export must not
+use only the current page or pass through the frontend's bounded JSON reader.
+
+Do not make console startup depend on bulk logs. A full 1,000-record channel
+with 4,000-character Chinese initial messages can exceed 12 MB, above the
+frontend's 8 MiB JSON limit and its 12-second read deadline. Pagination addresses
+the response size without discarding retained logs or increasing timeouts.
 The default log directory is `logs/` beside the data directory. `PANEL_LOG_DIR`
 can override it for plain Node. Compose fixes `/app/logs` and bind-mounts `./logs`.
 Reject log paths inside the data directory. Startup relocates old `data/*.log`

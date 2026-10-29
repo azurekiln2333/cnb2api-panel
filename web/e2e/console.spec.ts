@@ -10,6 +10,15 @@ async function login(page: Page) {
   await page.getByRole('button', { name: '进入控制台' }).click()
   await expect(page.getByRole('heading', { name: '账号池' })).toBeVisible()
 }
+async function searchLogs(page: Page, query: string, channel = 'requests') {
+  const path = channel === 'requests' ? '/api/logs' : `/api/logs/${channel}`
+  const response = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return url.pathname === path && url.searchParams.get('q') === query
+  })
+  await page.getByLabel('搜索事件', { exact: true }).fill(query)
+  await response
+}
 async function seed(request: APIRequestContext) {
   await request.post('/api/session', { data: { key: ADMIN } })
   const data = await (await request.get('/api/accounts')).json()
@@ -691,9 +700,11 @@ test('request details show the first user message, usage and routing metadata on
 
   await login(page)
   await page.getByRole('link', { name: '请求日志', exact: true }).click()
-  await page.getByLabel('搜索事件', { exact: true }).fill('首条消息 e2e')
-  await expect(page.getByTestId('initial-message-preview')).toContainText('首条消息 e2e')
-  const row = page.getByRole('row').filter({ has: page.getByTestId('initial-message-preview') })
+  await searchLogs(page, '首条消息 e2e')
+  const preview = page.getByTestId('initial-message-preview').filter({ hasText: '首条消息 e2e' })
+  const row = page.getByRole('row').filter({ has: preview })
+  await expect(row).toBeVisible()
+  await expect(row.getByTestId('initial-message-preview')).toContainText('首条消息 e2e')
   await row.getByRole('button', { name: '查看事件详情', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'API 请求详情', exact: true })
   const initial = dialog.getByTestId('initial-message')
@@ -765,9 +776,9 @@ test('request details show the first user message, usage and routing metadata on
   await page.route('**/api/logs/requests/legacy-request-preview', (route) =>
     route.fulfill({ json: { log: legacyLog } }),
   )
-  await page.route('**/api/logs', async (route) => {
+  await page.route('**/api/logs?**', async (route) => {
     await new Promise<void>((resolve) => setTimeout(resolve, 150))
-    await route.fulfill({ json: { logs: [legacyLog] } })
+    await route.fulfill({ json: { logs: [legacyLog], total: 1, limit: 20, offset: 0 } })
   })
   await page.getByLabel('搜索事件', { exact: true }).fill('')
   await page.getByRole('button', { name: '刷新记录', exact: true }).click()
@@ -915,13 +926,10 @@ test('request outcomes filter results and export every matching page', async ({
       durationMs: 10,
     }),
   )
-  await page.route('**/api/logs', (route) =>
-    route.fulfill({
-      json: {
-        logs: [...matching, { ...matching[0], id: 'outside-search', message: '其他记录' }],
-      },
-    }),
-  )
+  const seeded = await request.post('http://127.0.0.1:19221/test/request-logs', {
+    data: { logs: [...matching, { ...matching[0], id: 'outside-search', message: '其他记录' }] },
+  })
+  expect(seeded.ok()).toBe(true)
   await login(page)
   await page.getByRole('link', { name: '请求日志', exact: true }).click()
   const outcome = page.getByLabel('请求结果', { exact: true })
@@ -989,16 +997,17 @@ test('request logs, audit logs and system events have separate navigation and ne
   await login(page)
   await page.getByRole('link', { name: '请求日志', exact: true }).click()
   await expect(page.getByRole('heading', { name: '请求日志', exact: true })).toBeVisible()
-  await page.getByLabel('搜索事件', { exact: true }).fill('请求分流独立标记')
+  await searchLogs(page, '请求分流独立标记')
   await expect(page.locator('.event-type')).toHaveText(['API 请求'])
   await expect(page.getByLabel('事件类型').locator('option[value="audit"]')).toHaveCount(0)
   await page.getByRole('link', { name: '审计日志', exact: true }).click()
   await expect(page.getByRole('heading', { name: '审计日志', exact: true })).toBeVisible()
-  await page.getByLabel('搜索事件', { exact: true }).fill('审计分流目标')
+  await searchLogs(page, '审计分流目标', 'audit')
   await expect(page.getByTestId('initial-message-preview')).toHaveCount(0)
   await expect(page.getByLabel('事件类型').locator('option[value="request"]')).toHaveCount(0)
   const row = page
     .getByRole('row')
+    .filter({ hasText: '审计分流目标' })
     .filter({ has: page.getByRole('cell', { name: '查看账号凭据成功', exact: true }) })
   await expect(row).toBeVisible()
   await expect(row).toContainText('操作人：管理员')
@@ -1015,8 +1024,12 @@ test('request logs, audit logs and system events have separate navigation and ne
   await page.getByRole('button', { name: '展开导航' }).click()
   await page.getByRole('link', { name: '运行事件', exact: true }).click()
   await expect(page.getByRole('heading', { name: '运行事件', exact: true })).toBeVisible()
-  await page.getByLabel('搜索事件', { exact: true }).fill('审计分流目标')
-  await expect(page.getByRole('cell', { name: '域名注册', exact: true })).toBeVisible()
+  await searchLogs(page, '审计分流目标', 'system')
+  const registrationRow = page
+    .getByRole('row')
+    .filter({ hasText: '审计分流目标' })
+    .filter({ has: page.getByRole('cell', { name: '域名注册', exact: true }) })
+  await expect(registrationRow).toBeVisible()
   await expect(page.getByLabel('事件类型').locator('option[value="audit"]')).toHaveCount(0)
   await expect(page.getByLabel('事件类型').locator('option[value="request"]')).toHaveCount(0)
 })

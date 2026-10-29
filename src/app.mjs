@@ -27,7 +27,7 @@ import { Pool, isReady, isCooling } from "./pool.mjs";
 import { MAX_REQUEST_BYTES } from "./request-overrides.mjs";
 import { addTokenUsage, emptyTokenUsage } from "./token-usage.mjs";
 import { auditRequest } from "./audit.mjs";
-import { logChannel } from "./file-storage.mjs";
+import { queryLogs } from "./logs.mjs";
 
 const SESSION_MS = 12 * 60 * 60 * 1000;
 const OIDC_TRANSACTION_MS = 10 * 60 * 1000;
@@ -734,12 +734,27 @@ export function createPanelServer(options) {
         const logRoute = /^\/api\/logs(?:\/(requests|audit|system))?$/.exec(
           path,
         );
-        if (logRoute && method === "GET")
-          return json(res, 200, {
-            logs: store.state.logs.filter(
-              (entry) => logChannel(entry) === (logRoute[1] || "requests"),
-            ).map(({ requestDiagnostics, ...entry }) => entry),
-          });
+        if (logRoute && method === "GET") {
+          const channel = logRoute[1] || "requests";
+          const result = queryLogs(
+            store.state.logs,
+            channel,
+            new URL(req.url, "http://panel.local").searchParams,
+          );
+          if (result.download) {
+            const timestamp = new Date().toISOString().replaceAll(":", "-");
+            const filename = `${channel}-logs-${timestamp}.json`;
+            return json(res, 200, result.logs, {
+              "Content-Disposition": `attachment; filename="${filename}"`,
+            });
+          }
+          const { logs, total, limit, offset } = result;
+          return json(
+            res,
+            200,
+            result.paginated ? { logs, total, limit, offset } : { logs },
+          );
+        }
         if (path === "/api/access" && method === "GET")
           return json(res, 200, {
             publicUrl,

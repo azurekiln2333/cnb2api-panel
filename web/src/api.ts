@@ -28,6 +28,7 @@ export class ApiError extends Error {
 
 const ERROR_BODY_LIMIT = 16 * 1024
 const JSON_BODY_LIMIT = 8 * 1024 * 1024
+let sessionEpoch = 0
 const safeHeader = (value: string | null, max = 160) =>
   value?.replace(/[\x00-\x1f\x7f]/g, '').slice(0, max) || null
 const identifier = (value: unknown) => {
@@ -158,6 +159,7 @@ export function formatApiDiagnostics(value: ApiDiagnostics) {
 }
 
 export async function api<T>(path: string, method = 'GET', data?: unknown): Promise<T> {
+  const requestEpoch = sessionEpoch
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), method === 'GET' ? 12000 : 150000)
   const requestPath = `/api${path}`.split(/[?#]/)[0]!
@@ -191,8 +193,12 @@ export async function api<T>(path: string, method = 'GET', data?: unknown): Prom
       cache: 'no-store',
     })
     diagnostics = diagnose(response, '', { ...diagnostics, receivedAt: new Date().toISOString() })
-    if (response.status === 401 && path !== '/session')
+    if (response.ok && path === '/session' && (method === 'POST' || method === 'DELETE'))
+      sessionEpoch++
+    if (response.status === 401 && path !== '/session' && requestEpoch === sessionEpoch) {
+      sessionEpoch++
       window.dispatchEvent(new Event('session-expired'))
+    }
     const jsonResponse = /\b(?:application|text)\/(?:[\w.-]+\+)?json\b/i.test(
       response.headers.get('content-type') || '',
     )
