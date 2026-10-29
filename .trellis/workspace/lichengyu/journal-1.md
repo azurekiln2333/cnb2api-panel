@@ -84,3 +84,36 @@ Fixed Codex client_metadata rejection, namespace/custom tool mapping, full-histo
 ### Status
 
 [OK] **Completed**
+
+
+## Session 4: v1.2.0 registration relay, model inventory and New API quota
+<!-- trellis-session: v=2 fp=b9c56e355a4d362f -->
+
+**Date**: 2026-10-29
+**Task**: v1.2.0 registration relay, model inventory and New API quota
+**Branch**: `feat/registration-relay`
+
+### Summary
+
+Released registration relay, model inventory and New API quota; all local checks and GitHub/CNB publication passed.
+
+### Main Changes
+
+- Durable single-hop registration relay with independent settings and runtime status.
+- Read-only model inventory page with source labels, route readiness, search and copy.
+- Gateway-key CNB credit totals and New API OpenAI billing compatibility with organization deduplication.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `005f725` | feat: relay registrations and expose models and quota in v1.2.0 |
+
+### Testing
+
+- [OK] 302 backend tests and 43 browser tests passed; build/typecheck/format, README lint, package and diff checks passed.
+- [OK] GitHub tag run 40887617458 all four jobs succeeded; CNB v1.2.0/latest OCI index bcdeb4f20b9a2403d1c5f773352304871351f43a3591d07d89226dcd4ff3c17f verified.
+
+### Status
+
+[OK] **Completed**
