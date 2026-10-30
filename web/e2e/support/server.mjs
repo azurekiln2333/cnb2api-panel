@@ -35,6 +35,10 @@ const worker = http.createServer(async (req, res) => {
       const chunks = []
       for await (const chunk of req) chunks.push(chunk)
       const change = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      if (change.reset === true) {
+        quotaState.used = 0
+        quotaState.freeze = 0
+      }
       for (const field of ['total', 'used', 'freeze'])
         if (Number.isFinite(change[field])) quotaState[field] = change[field]
     }

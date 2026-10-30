@@ -117,6 +117,7 @@ async function fixture(t, handler) {
     dataDir: directory,
     allowLocal: true,
   });
+  app.store.settings({ quotaProtection: { enabled: false } });
   const base = await listen(app.server);
   const login = await fetch(`${base}/api/session`, {
     method: "POST",

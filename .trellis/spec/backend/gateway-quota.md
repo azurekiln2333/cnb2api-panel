@@ -76,3 +76,64 @@ Wrong: sum each account's quota or claim CNB Credits are USD.
 
 Correct: sum each enabled organization once and document the native unit even
 when satisfying legacy field names.
+
+## 8. Automatic quota protection
+
+Apply this contract to account eligibility, background quota synchronization,
+settings persistence and the console's quota state.
+
+`settings.quotaProtection` is `{ enabled: boolean, thresholdPercent: integer }`.
+Default to enabled with a ten-percent threshold, including legacy stores.
+Accept thresholds from 1 through 100 and preserve omitted fields on updates.
+`account.quotaProtection` is derived runtime state:
+`{ suspended, reason, remainingPercent, thresholdPercent }`. Its reason is
+`disabled`, `unknown`, `sync-error`, `invalid`, `low` or null. Keep this state in
+stats.json and recompute it after loading or committing account/settings state.
+
+Deduct both used and frozen credits. Suspend when remaining percentage is
+strictly below the threshold. Exactly ten percent is eligible under the default
+policy. Allow only bounded floating-point roundoff in percentage comparisons;
+3 total minus 2.7 used must remain eligible, while 9.9999999999 percent must not.
+Unknown, malformed, mismatched-organization or failed quota reads fail
+closed. Validate original upstream credit fields before normalization so missing
+values cannot become invented zero balances. Explicit zero and numeric strings
+are valid upstream values. Retain a previous snapshot for
+display after errors, but do not use it to authorize routing. A retry marked
+syncing carries previousStatus; only prior ok verification may remain eligible.
+Retain the preceding error/unverified state until a successful read.
+Capture previousStatus separately for each organization sibling. Copying the
+source account's ok state must not re-enable a sibling with rotated credentials.
+
+Keep suspension independent of account.enabled, health and real HTTP cooldown.
+Never change a user's manual enablement to implement protection. Continue quota
+polling while suspended and automatically clear suspension after an authoritative
+snapshot reaches the threshold, including a new quota cycle. A manually disabled
+account stays disabled. The console displays quota suspension distinctly from
+offline/cooling states and explains automatic recovery.
+Apply suspension to new requests and leave admitted requests running. Model
+eligibility and session affinity use the same protection guard. Never synthesize
+upstream HTTP 429 from quota protection. A probe cannot clear quota suspension.
+
+| Condition | Routing protection |
+| --- | --- |
+| Valid 9% remaining with threshold 10 | Suspend |
+| Valid 10% remaining with threshold 10 | Clear quota suspension |
+| New quota period restores balance | Resume after successful sync |
+| Sync error or retry after an error | Suspend until verified success |
+| Unknown, invalid or wrong-organization quota | Suspend |
+| Policy disabled | Do not suspend for quota |
+| User manually disabled account | Never auto-enable |
+| Threshold not an integer in 1..100 | Reject settings update |
+
+Good: a low-quota account keeps polling and resumes on quota reset without a
+browser. Base: existing installations receive the enabled ten-percent policy.
+Bad: set enabled=false on low balance or reuse an old snapshot during a failed
+sync retry, which respectively loses manual intent or permits unverified routing.
+
+`test/panel-quota-protection.test.mjs` must prove routing exclusion and recovery,
+the exact threshold, frozen credits, shared organizations, synchronization errors,
+manual disablement, policy changes, migration and storage partitioning.
+`test/quota.test.mjs` rejects missing/invalid original credit fields. Browser
+tests verify the pause/recovery state and protection settings through real APIs.
+Unrelated inference test fixtures explicitly disable quota protection rather
+than weakening its production default or inventing successful quota snapshots.

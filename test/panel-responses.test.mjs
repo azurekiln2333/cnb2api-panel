@@ -41,6 +41,7 @@ async function fixture(t, handler, { account = true } = {}) {
     adminKey: "responses-test-admin-key", gatewayKey: GATEWAY,
     dataDir: join(directory, "data"), allowLocal: true,
   });
+  app.store.settings({ quotaProtection: { enabled: false } });
   const calls = [];
   const worker = http.createServer(async (req, res) => {
     if (req.url === "/v1/models") {

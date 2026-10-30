@@ -36,6 +36,7 @@ import {
   number,
   compact,
   quotaPercent,
+  quotaProtectionMessage,
   time,
   copy,
   notify,
@@ -73,8 +74,9 @@ const tabs = computed(() => [
   {
     id: 'attention',
     label: '需关注',
-    count: accounts.value.filter((a) => ['pending', 'offline', 'cooling'].includes(accountState(a)))
-      .length,
+    count: accounts.value.filter((a) =>
+      ['pending', 'offline', 'cooling', 'quota'].includes(accountState(a)),
+    ).length,
   },
   { id: 'disabled', label: '已停用', count: accounts.value.filter((a) => !a.enabled).length },
 ])
@@ -90,7 +92,7 @@ const filtered = computed(() =>
         (group.value === 'all' || a.group === group.value) &&
         (tab.value === 'all' ||
           tab.value === state ||
-          (tab.value === 'attention' && ['pending', 'offline', 'cooling'].includes(state)))
+          (tab.value === 'attention' && ['pending', 'offline', 'cooling', 'quota'].includes(state)))
       )
     })
     .sort((a, b) =>
@@ -386,7 +388,10 @@ async function confirm() {
           <tr
             v-for="(account, index) in rows"
             :key="account.id"
-            :class="{ selected: selected.has(account.id), muted: !account.enabled }"
+            :class="{
+              selected: selected.has(account.id),
+              muted: !account.enabled || account.quotaProtection?.suspended,
+            }"
           >
             <td class="checkbox-cell">
               <input
@@ -437,7 +442,12 @@ async function confirm() {
             </td>
             <td :data-testid="`health-${account.id}`">
               <StatusBadge :account="account" />
-              <template v-if="accountState(account) === 'cooling'">
+              <template v-if="accountState(account) === 'quota'">
+                <div class="cell-secondary account-health-detail">
+                  {{ quotaProtectionMessage(account) }}
+                </div>
+              </template>
+              <template v-else-if="accountState(account) === 'cooling'">
                 <div class="cell-secondary account-health-detail account-health-error">
                   {{ account.lastError || '工作区请求失败，暂时停止分配' }}
                 </div>
@@ -502,6 +512,12 @@ async function confirm() {
                   同步额度<ArrowUpRight :size="11" /></button
                 ><small v-else class="cell-secondary">需要组织读取权限</small></template
               >
+              <small
+                v-if="account.enabled && account.quotaProtection?.suspended"
+                class="quota-sync-state error"
+              >
+                {{ quotaProtectionMessage(account) }}
+              </small>
               <small v-if="account.quotaSync?.status === 'syncing'" class="quota-sync-state"
                 >后台同步中…</small
               >

@@ -21,8 +21,18 @@ async function searchLogs(page: Page, query: string, channel = 'requests') {
 }
 async function seed(request: APIRequestContext) {
   await request.post('/api/session', { data: { key: ADMIN } })
+  await request.patch('/api/settings', {
+    data: {
+      strategy: 'weighted',
+      sessionAffinity: true,
+      quotaProtection: { enabled: false, thresholdPercent: 10 },
+    },
+  })
   const data = await (await request.get('/api/accounts')).json()
   for (const account of data.accounts) await request.delete(`/api/accounts/${account.id}`)
+  await request.post('http://127.0.0.1:19221/test/quota', {
+    data: { total: 2000, used: 100, freeze: 25 },
+  })
   const created = []
   for (const [index, name, group, weight, priority, enabled] of [
     [0, 'AzureKiln · 主力', '主力账号', 3, 10, true],
@@ -45,7 +55,6 @@ async function seed(request: APIRequestContext) {
     created.push(account)
     await request.post(`/api/accounts/${account.id}/probe`, { data: {} })
   }
-  await request.patch('/api/settings', { data: { strategy: 'weighted', sessionAffinity: true } })
   return created
 }
 
@@ -1273,6 +1282,130 @@ test('Credits are fetched periodically by the backend and update in the open con
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
   await expect(page.getByTestId('accounts-credits-percent')).toBeVisible()
   await page.screenshot({ path: '../test-results/quota-percentage-mobile.png', fullPage: true })
+})
+
+test('quota protection pauses below ten percent and automatically resumes at the threshold and reset', async ({
+  page,
+  request,
+}) => {
+  const accounts = await seed(request)
+  const primary = accounts[0]
+  const backup = accounts[2]
+  await request.post('http://127.0.0.1:19221/test/quota', {
+    data: { total: 1000, used: 901, freeze: 0 },
+  })
+  await request.patch(`/api/accounts/${backup.id}`, {
+    data: { repo: 'azurekiln-0/backup', enabled: true },
+  })
+  await request.patch(`/api/accounts/${primary.id}`, {
+    data: { pat: 'test-protection-personal-token' },
+  })
+  const account = async (id: string) =>
+    (await (await request.get(`/api/accounts/${id}`)).json()).account
+  await expect.poll(async () => (await account(primary.id)).quota?.credits.used).toBe(901)
+  await request.patch('/api/settings', {
+    data: { quotaProtection: { enabled: true, thresholdPercent: 10 } },
+  })
+  await page.clock.install()
+  await login(page)
+  const health = page.getByTestId(`health-${primary.id}`)
+  const disabledHealth = page.getByTestId(`health-${backup.id}`)
+  const quota = page.getByTestId(`quota-${primary.id}`)
+  await expect(health).toContainText('额度暂停')
+  await expect(health).toContainText('剩余额度低于 10%')
+  await expect(quota.locator('.quota-percentage')).toHaveText('9.9%')
+  expect((await account(primary.id)).enabled).toBe(true)
+  expect((await account(primary.id)).status).toBe('healthy')
+  await page.getByRole('button', { name: '管理备用工作区', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '停用账号' }).click()
+  await expect(disabledHealth).toContainText('已停用')
+  const chat = () =>
+    request.post('/v1/chat/completions', {
+      headers: { Authorization: 'Bearer browser-test-gateway-key' },
+      data: {
+        model: 'deepseek-v4.1-flash',
+        messages: [{ role: 'user', content: 'quota recovery' }],
+      },
+    })
+  expect((await chat()).status()).toBe(503)
+  await page.screenshot({
+    path: '../test-results/quota-protection-paused-desktop.png',
+    fullPage: true,
+  })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.locator('.app-shell')).toHaveCSS('grid-template-columns', '0px 390px')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+  await page.screenshot({
+    path: '../test-results/quota-protection-paused-mobile.png',
+    fullPage: true,
+  })
+  await page.setViewportSize({ width: 1440, height: 1000 })
+
+  await request.post('http://127.0.0.1:19221/test/quota', { data: { used: 900 } })
+  await expect.poll(async () => (await account(primary.id)).quotaProtection.suspended).toBe(false)
+  await page.clock.fastForward(15001)
+  await expect(health.locator('.status-badge')).toHaveText('可用')
+  await expect(quota.locator('.quota-percentage')).toHaveText('10%')
+  expect((await chat()).status()).toBe(200)
+  await expect(disabledHealth).toContainText('已停用')
+  expect((await account(backup.id)).quotaProtection.suspended).toBe(false)
+  expect((await account(backup.id)).enabled).toBe(false)
+
+  await request.post('http://127.0.0.1:19221/test/quota', { data: { used: 1000 } })
+  await expect.poll(async () => (await account(primary.id)).quotaProtection.suspended).toBe(true)
+  await page.clock.fastForward(15001)
+  await expect(health).toContainText('额度暂停')
+  await expect(quota.locator('.quota-percentage')).toHaveText('0%')
+  expect((await chat()).status()).toBe(503)
+  await request.post('http://127.0.0.1:19221/test/quota', { data: { reset: true } })
+  await expect.poll(async () => (await account(primary.id)).quota?.credits.used).toBe(0)
+  await expect.poll(async () => (await account(primary.id)).quotaProtection.suspended).toBe(false)
+  await page.clock.fastForward(15001)
+  await expect(health.locator('.status-badge')).toHaveText('可用')
+  await expect(quota.locator('.quota-percentage')).toHaveText('100%')
+  await expect(disabledHealth).toContainText('已停用')
+  expect((await account(backup.id)).enabled).toBe(false)
+  expect((await chat()).status()).toBe(200)
+})
+
+test('quota protection settings validate and persist the switch and threshold', async ({
+  page,
+  request,
+}) => {
+  await seed(request)
+  await login(page)
+  await page.getByRole('link', { name: '路由策略', exact: true }).click()
+  const settings = page.getByTestId('quota-protection-settings')
+  const enabled = settings.getByRole('checkbox', { name: /自动保护低额度账号/ })
+  const threshold = settings.getByRole('spinbutton', { name: '剩余额度阈值', exact: true })
+  const save = page.getByRole('button', { name: '保存配置', exact: true })
+  await expect(enabled).not.toBeChecked()
+  await expect(threshold).toHaveValue('10')
+  await enabled.check()
+  await threshold.fill('25')
+  await save.click()
+  await expect
+    .poll(async () => (await (await request.get('/api/settings')).json()).settings.quotaProtection)
+    .toEqual({ enabled: true, thresholdPercent: 25 })
+  await expect(save).toBeDisabled()
+  await page.reload()
+  await expect(enabled).toBeChecked()
+  await expect(threshold).toHaveValue('25')
+  await threshold.fill('0')
+  await save.click()
+  await expect(page.getByRole('alert')).toContainText('额度保护阈值须为 1 至 100 的整数')
+  expect(
+    (await (await request.get('/api/settings')).json()).settings.quotaProtection.thresholdPercent,
+  ).toBe(25)
+  await threshold.fill('10')
+  await enabled.uncheck()
+  await save.click()
+  await expect
+    .poll(async () => (await (await request.get('/api/settings')).json()).settings.quotaProtection)
+    .toEqual({ enabled: false, thresholdPercent: 10 })
+  await page.reload()
+  await expect(enabled).not.toBeChecked()
+  await expect(threshold).toHaveValue('10')
 })
 
 test('a stalled refresh times out and the next automatic poll recovers without reloading', async ({

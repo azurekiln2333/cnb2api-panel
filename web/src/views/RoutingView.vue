@@ -44,11 +44,17 @@ function normalized(settings: Settings): Settings {
       requestOverrides: settings.requestOverrides ?? { operations: [] },
       upstreamHeaders: settings.upstreamHeaders ?? {},
       registrationRelay: settings.registrationRelay ?? { enabled: false, servers: [] },
+      quotaProtection: settings.quotaProtection ?? { enabled: true, thresholdPercent: 10 },
     }),
   ) as Settings
 }
 function routingFields(settings: Settings): RoutingFields {
-  const { requestOverrides: _overrides, upstreamHeaders: _headers, ...fields } = settings
+  // Nested draft values must stay independent of the saved settings.
+  const {
+    requestOverrides: _overrides,
+    upstreamHeaders: _headers,
+    ...fields
+  } = normalized(settings)
   return fields
 }
 const saved = ref(normalized(overview.value!.settings))
@@ -176,6 +182,14 @@ const eligible = computed(() =>
 async function save() {
   error.value = ''
   attempted.value = true
+  if (
+    !Number.isInteger(form.quotaProtection.thresholdPercent) ||
+    form.quotaProtection.thresholdPercent < 1 ||
+    form.quotaProtection.thresholdPercent > 100
+  ) {
+    error.value = '额度保护阈值须为 1 至 100 的整数。'
+    return
+  }
   const overrides = overridesValidation.value.value
   const headers = headersValidation.value.value
   const relay = relayValidation.value.value
@@ -345,6 +359,39 @@ async function save() {
         </div>
       </section>
     </div>
+    <section class="section-panel" data-testid="quota-protection-settings">
+      <header class="section-heading">
+        <ShieldCheck :size="20" />
+        <div>
+          <h2>额度保护</h2>
+          <p>低于阈值时暂停新请求，额度恢复后自动启用。</p>
+        </div>
+      </header>
+      <div class="settings-fields">
+        <label class="affinity-toggle">
+          <input v-model="form.quotaProtection.enabled" type="checkbox" />
+          <span
+            ><strong>自动保护低额度账号</strong
+            ><small>暂停期间继续同步额度。手动停用的账号保持停用。</small></span
+          >
+        </label>
+        <label>
+          <span>剩余额度阈值<small>扣除已用和冻结额度。达到阈值后恢复。</small></span>
+          <div class="unit-input">
+            <input
+              v-model.number="form.quotaProtection.thresholdPercent"
+              aria-label="剩余额度阈值"
+              type="number"
+              min="1"
+              max="100"
+              step="1"
+              required
+            /><span>%</span>
+          </div>
+        </label>
+        <p class="subtle">额度未知、无效或同步失败时暂停新请求。验证成功后自动恢复。</p>
+      </div>
+    </section>
     <RegistrationRelaySettings
       v-model="form.registrationRelay"
       :saved-config="saved.registrationRelay"

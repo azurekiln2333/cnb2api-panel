@@ -37,6 +37,14 @@ original `{ ok: true, accountId }` response. Pool records and probes only an
 applied update; peer failures never turn a committed registration into a CNB
 failure.
 
+Repeated ordinary registration of the same normalized URI is a heartbeat.
+Preserve status, failures, failureKind, cooldownUntil and in-flight delivery
+progress. Refresh registration time and repair missing jobs without discarding
+retry deadlines or resetting successful deliveries. Do not probe on every
+heartbeat. A changed URI must commit the new endpoint, replace outgoing jobs
+and trigger an independent probe. A newer incoming relay revision with the same
+URI still advances the receipt without resetting routing health.
+
 Keep relay runtime in stats.json and configuration in panel.json. Store only
 references, endpoint/revision information, bounded safe outcomes and retry
 timestamps in delivery records. Read registration credentials from the existing
@@ -91,6 +99,8 @@ sync. Never retain raw peer bodies, arbitrary fetch errors or request headers.
 | Stalled peer/body | Bounded failure, local acknowledgement already succeeds |
 | A and B target each other | Relayed update stops after one hop |
 | Older/duplicate revision | Idempotent acknowledgement, no endpoint reset |
+| Same-URI ordinary heartbeat | Preserve health, cooldown and delivery progress |
+| Changed random URI | Persist, probe and fan out the new address |
 | Local source UUID or alias targeting self | Safe 400, preserve endpoint/outbox |
 | Re-enable peer or outgoing switch | Immediate current delivery, discard old delay |
 | Process restart | Resume current persisted pending work |

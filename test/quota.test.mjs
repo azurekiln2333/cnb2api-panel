@@ -66,6 +66,40 @@ test('fetchQuota: folds quota+volume into one snapshot', async () => {
   });
 });
 
+test('fetchQuota: accepts explicit zero and numeric credit strings', async () => {
+  await withServer((kind, req, res) => {
+    res.end(JSON.stringify(kind === 'quota'
+      ? { credit_in_milli: { total: '100000' } }
+      : { credit_in_milli: '0', freeze_credit_in_milli: 0 }));
+  }, async (base) => {
+    const s = await fetchQuota({ org: 'acme', token: 't', base });
+    assert.deepEqual(s.credits, { total: 100, used: 0, freeze: 0 });
+  });
+});
+
+test('fetchQuota: rejects missing or invalid credit data instead of fabricating zero', async (t) => {
+  const cases = [
+    ['missing allowance', {}, VOLUME],
+    ['missing usage', QUOTA, { freeze_credit_in_milli: 0 }],
+    ['missing frozen usage', QUOTA, { credit_in_milli: 0 }],
+    ['null allowance', { credit_in_milli: { total: null } }, VOLUME],
+    ['negative allowance', { credit_in_milli: { total: -1 } }, VOLUME],
+    ['blank usage', QUOTA, { ...VOLUME, credit_in_milli: ' ' }],
+    ['boolean usage', QUOTA, { ...VOLUME, credit_in_milli: false }],
+    ['array usage', QUOTA, { ...VOLUME, credit_in_milli: [] }],
+    ['nonfinite usage', QUOTA, { ...VOLUME, credit_in_milli: 'Infinity' }],
+    ['negative frozen usage', QUOTA, { ...VOLUME, freeze_credit_in_milli: -1 }],
+  ];
+  for (const [name, quota, volume] of cases) await t.test(name, async () => {
+    await withServer((kind, req, res) => {
+      res.end(JSON.stringify(kind === 'quota' ? quota : volume));
+    }, async (base) => {
+      await assert.rejects(() => fetchQuota({ org: 'acme', token: 't', base }),
+        /invalid credit quota response/);
+    });
+  });
+});
+
 test('fetchQuota: missing org/token fail fast with a clear message', async () => {
   await assert.rejects(() => fetchQuota({ org: '', token: 't' }), /org slug is required/);
   await assert.rejects(() => fetchQuota({ org: 'acme', token: '' }), /CNB_TOKEN is required/);

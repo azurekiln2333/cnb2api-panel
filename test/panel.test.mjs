@@ -32,6 +32,7 @@ async function fixture(t, { logDirectoryName } = {}) {
     logDir: logDirectoryName ? join(fixtureRoot, logDirectoryName) : undefined,
     allowLocal: true,
   });
+  app.store.settings({ quotaProtection: { enabled: false } });
   const base = await listen(app.server);
   let cookie = '';
   const call = async (

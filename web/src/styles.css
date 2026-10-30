@@ -1255,7 +1255,8 @@ button.button,
   background: currentColor;
   border-radius: 50%;
 }
-.status-badge.cooling {
+.status-badge.cooling,
+.status-badge.quota {
   background: var(--amber-soft);
   color: var(--amber);
 }

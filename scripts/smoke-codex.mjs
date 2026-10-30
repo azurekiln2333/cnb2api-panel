@@ -78,6 +78,7 @@ const app = createPanelServer({
   adminKey: "isolated-codex-admin-key", gatewayKey,
   dataDir: join(directory, "data"), logDir: join(directory, "logs"), allowLocal: true,
 });
+app.store.settings({ quotaProtection: { enabled: false } });
 const listen = async (server) => {
   server.listen(0, "127.0.0.1");
   await once(server, "listening");

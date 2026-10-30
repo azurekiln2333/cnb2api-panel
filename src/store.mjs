@@ -15,6 +15,11 @@ import { resolve, join } from "node:path";
 import { addTokenUsage, emptyTokenUsage } from "./token-usage.mjs";
 import { loadRegistrationRelay, validateRegistrationRelay } from "./registration-relay.mjs";
 import {
+  DEFAULT_QUOTA_PROTECTION,
+  refreshQuotaProtection,
+  validateQuotaProtection,
+} from "./quota-protection.mjs";
+import {
   validateRequestOverrides,
   validateUpstreamHeaders,
 } from "./request-overrides.mjs";
@@ -37,6 +42,7 @@ const RUNTIME_FIELDS = [
   "lastError",
   "quota",
   "quotaSync",
+  "quotaProtection",
   "requests",
   "errors",
   "lastWakeAt",
@@ -82,6 +88,7 @@ export const DEFAULT_SETTINGS = {
   requestOverrides: { operations: [] },
   upstreamHeaders: {},
   registrationRelay: { enabled: false, servers: [] },
+  quotaProtection: DEFAULT_QUOTA_PROTECTION,
 };
 
 export const DEFAULT_SSO = {
@@ -429,6 +436,7 @@ export class Store {
         settings.requestOverrides = validateRequestOverrides(settings.requestOverrides);
         settings.upstreamHeaders = validateUpstreamHeaders(settings.upstreamHeaders);
         settings.registrationRelay = validateRegistrationRelay(settings.registrationRelay, { allowLocal, publicUrl });
+        settings.quotaProtection = validateQuotaProtection(settings.quotaProtection);
       } catch {
         throw new Error("Invalid request override settings; restore the data backup");
       }
@@ -464,6 +472,7 @@ export class Store {
         })),
       };
       this.state.sso = this.loadSso(saved.sso);
+      refreshQuotaProtection(this.state);
       if (legacy) {
         const backup = join(this.directory, "panel.json.v1.bak");
         if (!existsSync(backup))
@@ -636,6 +645,7 @@ export class Store {
   commit(mutate) {
     const next = structuredClone(this.state);
     const result = mutate(next);
+    refreshQuotaProtection(next);
     this.persist(next);
     this.state = next;
     return result;
@@ -782,7 +792,7 @@ export class Store {
       registrationTokenVersion: 0,
     };
     this.commit((s) => s.accounts.push(account));
-    return account;
+    return this.get(account.id);
   }
 
   update(id, input) {
@@ -846,6 +856,8 @@ export class Store {
         next.upstreamHeaders = validateUpstreamHeaders(input.upstreamHeaders);
       if (input.registrationRelay !== undefined)
         next.registrationRelay = validateRegistrationRelay(input.registrationRelay, { allowLocal: this.allowLocal, publicUrl: this.publicUrl });
+      if (input.quotaProtection !== undefined)
+        next.quotaProtection = validateQuotaProtection(input.quotaProtection, next.quotaProtection);
     } catch (error) {
       throw new InputError(error.message);
     }

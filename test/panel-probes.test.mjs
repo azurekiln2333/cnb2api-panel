@@ -24,6 +24,7 @@ const close = async (server) => {
 function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), "panel-probe-"));
   const store = new Store(join(directory, "data"), { allowLocal: true });
+  store.settings({ quotaProtection: { enabled: false, thresholdPercent: 10 } });
   const pool = new Pool(store);
   const account = store.create({ name: "probe", endpoint: "http://127.0.0.1:9001", proxyKey: key });
   t.after(() => {
@@ -255,7 +256,8 @@ test("slow first inference response is not treated as the worker connection time
     rmSync(directory, { recursive: true, force: true });
   });
   const account = app.store.create({ name: "slow", endpoint, proxyKey: key });
-  app.store.settings({ connectTimeoutSeconds: 1, idleTimeoutSeconds: 10 });
+  app.store.settings({ connectTimeoutSeconds: 1, idleTimeoutSeconds: 10,
+    quotaProtection: { enabled: false, thresholdPercent: 10 } });
   await app.pool.probe(account.id);
   const response = await fetch(`${base}/v1/chat/completions`, {
     method: "POST", headers: { Authorization: "Bearer panel-private-gateway-key", "Content-Type": "application/json" },

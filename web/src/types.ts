@@ -45,6 +45,12 @@ export interface Quota {
   ci: { total: number; used: number }
   syncedAt: string
 }
+export interface QuotaProtectionState {
+  suspended: boolean
+  reason: 'disabled' | 'unknown' | 'sync-error' | 'invalid' | 'low' | null
+  remainingPercent: number | null
+  thresholdPercent: number
+}
 export interface Account {
   id: string
   name: string
@@ -66,6 +72,7 @@ export interface Account {
   latencyMs: number | null
   lastError: string
   quota: Quota | null
+  quotaProtection?: QuotaProtectionState
   quotaSync: {
     status: 'syncing' | 'ok' | 'error'
     lastAttemptAt: string
@@ -94,6 +101,7 @@ export interface Settings {
   requestOverrides: { operations: Array<Record<string, unknown>> }
   upstreamHeaders: Record<string, string>
   registrationRelay: RegistrationRelayConfig
+  quotaProtection: { enabled: boolean; thresholdPercent: number }
 }
 export interface RegistrationRelayServer {
   id: string

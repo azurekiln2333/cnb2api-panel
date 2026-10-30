@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { fetchQuota } from "./quota.mjs";
+import { quotaCreditValues } from "./quota-protection.mjs";
 import { InputError, normalizeEndpoint, publicAccount } from "./store.mjs";
 import { emptyTokenUsage, TokenUsageCapture } from "./token-usage.mjs";
 import { WorkerUsageMonitor } from "./worker-usage.mjs";
@@ -13,7 +14,8 @@ import { RegistrationRelay } from "./registration-relay.mjs";
 export const isCooling = (a) =>
   Boolean(a.cooldownUntil && Date.parse(a.cooldownUntil) > Date.now());
 export const isReady = (a) =>
-  a.enabled && a.status === "healthy" && a.endpoint && !isCooling(a);
+  a.enabled && a.status === "healthy" && a.endpoint && !isCooling(a) &&
+  !a.quotaProtection?.suspended;
 const retryable = (status) =>
   [401, 402, 403, 408, 429].includes(status) || status >= 500;
 const sameConnection = (a, b) =>
@@ -26,6 +28,17 @@ const newerRoutingCooldown = (current, source) =>
   (current.cooldownUntil !== source.cooldownUntil || current.failureKind !== source.failureKind);
 const MODEL_RESPONSE_BYTES = 256 * 1024;
 const RESPONSE_CONVERSION_BYTES = 8 * 1024 * 1024;
+
+function retryAfterSeconds(value, now = Date.now()) {
+  if (typeof value !== "string" || value.length > 128) return null;
+  const trimmed = value.trim();
+  const seconds = /^\d+$/.test(trimmed)
+    ? Number(trimmed)
+    : (Date.parse(trimmed) - now) / 1000;
+  return Number.isFinite(seconds) && seconds >= 0
+    ? Math.min(3600, Math.max(1, seconds))
+    : null;
+}
 
 function probeFailure(error, stage) {
   if (error instanceof InputError) return error;
@@ -200,6 +213,7 @@ export class Pool {
     this.scores = new Map();
     this.affinity = new SessionAffinity({ now });
     this.probes = new Map();
+    this.probeBackoffs = new Map();
     this.healthVersions = new Map();
     this.wakes = new Map();
     this.autoWakeAttempts = new Map();
@@ -301,7 +315,31 @@ export class Pool {
     return bind(chosen);
   }
 
-  fail(id, reason, status = 502, source, { routing = false, kind = routing ? "upstream" : "connection" } = {}) {
+  confirmInferenceSuccess(source) {
+    let current;
+    try {
+      current = this.store.get(source.id);
+    } catch {
+      return;
+    }
+    if (!sameConnection(current, source)) return;
+    this.healthVersions.set(source.id, (this.healthVersions.get(source.id) || 0) + 1);
+    // A completed request disproves older connection failures. Requests admitted
+    // before a real provider cooldown must still respect that cooldown.
+    if (isCooling(current) && blocksRecovery(current)) return;
+    if (current.status === "healthy" && !current.failures &&
+        !current.failureKind && !current.cooldownUntil && !current.lastError) return;
+    this.store.patch(source.id, {
+      status: "healthy",
+      failures: 0,
+      failureKind: null,
+      cooldownUntil: null,
+      lastError: "",
+      checkedAt: new Date().toISOString(),
+    });
+  }
+
+  fail(id, reason, status = 502, source, { routing = false, kind = routing ? "upstream" : "connection", retryAfter } = {}) {
     let a;
     try {
       a = this.store.get(id);
@@ -315,8 +353,19 @@ export class Pool {
           source.healthVersion !== (this.healthVersions.get(id) || 0)))
     )
       return;
+    const retrySeconds = status === 429 ? retryAfterSeconds(retryAfter) : null;
+    // Requests already in flight share one provider failure. Do not multiply
+    // their cooldown exponentially; an explicit longer provider deadline wins.
+    if (routing && source && newerRoutingCooldown(a, source)) {
+      if (retrySeconds !== null) {
+        const until = Date.now() + retrySeconds * 1000;
+        if (until > Date.parse(a.cooldownUntil))
+          this.store.patch(id, { cooldownUntil: new Date(until).toISOString() });
+      }
+      return;
+    }
     const failures = a.failures + 1;
-    const seconds = Math.min(
+    const seconds = retrySeconds ?? Math.min(
       3600,
       this.store.state.settings.cooldownSeconds *
         2 ** Math.min(5, failures - 1),
@@ -338,8 +387,11 @@ export class Pool {
     });
   }
 
-  probe(id) {
+  probe(id, { automatic = false } = {}) {
     const account = this.store.get(id);
+    const backoff = this.probeBackoffs.get(id);
+    if (automatic && backoff && sameConnection(backoff, account) && backoff.until > Date.now())
+      return Promise.resolve(publicAccount(account));
     const previous = this.probes.get(id);
     if (previous && sameConnection(previous, account)) return previous.promise;
     const current = { endpoint: account.endpoint, secrets: account.secrets };
@@ -352,6 +404,7 @@ export class Pool {
 
   async check(id) {
     const a = this.store.get(id);
+    const source = { ...a, healthVersion: this.healthVersions.get(id) || 0 };
     if (!a.endpoint) return publicAccount(a);
     const started = Date.now();
     let stage = "headers";
@@ -364,7 +417,26 @@ export class Pool {
         redirect: "error",
       });
       if (!response.ok) {
-        await response.body?.cancel();
+        response.body?.cancel().catch(() => {});
+        if (response.status === 429) {
+          const current = this.store.get(id);
+          if (sameConnection(current, source)) {
+            // A throttled readiness endpoint cannot disprove successful model
+            // traffic. Keep routing health and rate-limit only automatic probes.
+            const seconds = retryAfterSeconds(response.headers.get("retry-after"))
+              ?? this.store.state.settings.cooldownSeconds;
+            this.probeBackoffs.set(id, {
+              endpoint: a.endpoint,
+              secrets: a.secrets,
+              until: Date.now() + seconds * 1000,
+            });
+            if (current.status !== "healthy")
+              this.store.patch(id, { lastError: "工作区探活暂时限流，稍后自动重试" });
+            this.store.record({ kind: "health", accountId: id, accountName: a.name,
+              status: 429, message: "工作区探活暂时限流，保留原有连接状态" });
+          }
+          return publicAccount(current);
+        }
         throw new InputError(
           `工作区鉴权探活返回 HTTP ${response.status}`,
           response.status,
@@ -381,6 +453,7 @@ export class Pool {
       // An automatic check already in flight must not erase a provider cooldown
       // established after that check started. A later explicit probe may retry.
       if (newerRoutingCooldown(current, a)) return publicAccount(current);
+      this.probeBackoffs.delete(id);
       this.healthVersions.set(id, (this.healthVersions.get(id) || 0) + 1);
       this.store.patch(id, {
         status: "healthy",
@@ -412,7 +485,7 @@ export class Pool {
           id,
           failure.message,
           failure.status,
-          undefined,
+          source,
           { kind: stage === "body" && (error instanceof InputError || error instanceof SyntaxError)
             ? "response"
             : failure.status < 500 && failure.status !== 408 ? "upstream" : "connection" },
@@ -424,6 +497,8 @@ export class Pool {
 
   async recover(id) {
     const current = this.store.get(id);
+    const backoff = this.probeBackoffs.get(id);
+    if (backoff && sameConnection(backoff, current) && backoff.until > Date.now()) return;
     if (
       current.enabled && current.autoWake && current.repo && current.secrets.pat &&
       current.status !== "healthy" &&
@@ -445,7 +520,7 @@ export class Pool {
     if (isCooling(current) && blocksRecovery(current)) return;
     // A model request can fail while the authenticated worker remains reachable.
     // Only a failed readiness check can establish that the connection is down.
-    await this.probe(source.id);
+    await this.probe(source.id, { automatic: true });
     await this.recover(source.id).catch(() => {});
   }
 
@@ -453,6 +528,7 @@ export class Pool {
     const a = this.store.get(id);
     const endpoint = normalizeEndpoint(uri, this.store.allowLocal);
     if (!endpoint) throw new InputError("缺少工作区地址");
+    const changed = a.endpoint !== endpoint;
     // Endpoint, receipt and outgoing deliveries share one durable transaction.
     let registration;
     try {
@@ -467,10 +543,10 @@ export class Pool {
       accountId: id,
       accountName: a.name,
       status: 200,
-      message: "工作区地址已更新",
+      message: changed ? "工作区地址已更新" : "工作区注册地址已确认",
     });
     // Registration only needs durable acknowledgement. Verification continues independently.
-    this.probe(id).catch(() => {});
+    if (changed) this.probe(id).catch(() => {});
     this.registrationRelay.kick();
     return registration.result;
   }
@@ -518,7 +594,7 @@ export class Pool {
       this.store.commit((s) => {
         for (const a of s.accounts)
           if (a.repo.split("/")[0] === org && predicate(a))
-            Object.assign(a, fields);
+            Object.assign(a, typeof fields === "function" ? fields(a) : fields);
       });
     await this.acquireQuotaSlot();
     const lastAttemptAt = new Date(this.quotaNow()).toISOString();
@@ -526,14 +602,16 @@ export class Pool {
     try {
       if (!sourceIsCurrent())
         throw new InputError("账号配置已更改，请重新同步额度", 409);
-      patchOrg({
+      patchOrg((account) => ({
         quotaSync: {
           status: "syncing",
+          previousStatus: account.quotaSync?.status === "syncing"
+            ? account.quotaSync.previousStatus : account.quotaSync?.status ?? null,
           lastAttemptAt,
           nextAttemptAt: null,
           error: "",
         },
-      });
+      }));
       const seen = new Set();
       const candidates = [
         source,
@@ -570,7 +648,8 @@ export class Pool {
           throw new InputError("账号配置已更改，请重新同步额度", 409);
         break;
       }
-      if (quota?.org !== org) throw new Error("invalid quota organization");
+      if (quota?.org !== org || !quotaCreditValues(quota))
+        throw new Error("invalid quota response");
       this.quotaPreferred.set(org, currentSource.id);
       const syncedAt = new Date(this.quotaNow()).toISOString();
       patchOrg({
@@ -779,7 +858,7 @@ export class Pool {
               return !isCooling(a) || !blocksRecovery(a);
             })
             .map(async (a) => {
-              await this.probe(a.id);
+              await this.probe(a.id, { automatic: true });
               const current = this.store.get(a.id);
               if (current.status === "healthy")
                 await this.workerUsage.refresh(current.id);
@@ -941,7 +1020,9 @@ export class Pool {
           if (retryable(response.status)) {
             await response.body?.cancel();
             failureMessage = `工作区返回 HTTP ${response.status}，已进入冷却`;
-            this.fail(account.id, failureMessage, response.status, source, { routing: true });
+            this.fail(account.id, failureMessage, response.status, source, {
+              routing: true, retryAfter: response.headers.get("retry-after"),
+            });
             this.affinity.forget(affinityKey, account.id);
             this.store.record({
               kind: "failover",
@@ -1023,6 +1104,7 @@ export class Pool {
             await emit(Buffer.from(JSON.stringify(converted)));
           }
           success = response.ok;
+          if (success && path !== "/v1/messages/count_tokens") this.confirmInferenceSuccess(source);
           usageComplete = true;
           res.end();
           return;

@@ -134,6 +134,27 @@ test("registration relay defaults off and management status/sync require a sessi
   assert.deepEqual(await (await app.call("/api/registration-relay")).json(), { enabled: false, servers: [] });
 });
 
+test("both legacy routes keep health for repeated URIs and probe changed domains", async (t) => {
+  const app = await panel(t);
+  const account = app.account();
+  assert.equal((await app.register()).status, 200);
+  const fields = {
+    status: "healthy", failures: 0, cooldownUntil: null, failureKind: null,
+    lastError: "", discoveredModels: ["fixture-model"],
+  };
+  app.store.patch(account.id, fields);
+  for (const path of ["/ops/register", `/ops/register/${account.id}`]) {
+    const response = await app.register(URI, { path });
+    assert.deepEqual(await response.json(), { ok: true, accountId: account.id });
+    for (const [field, value] of Object.entries(fields)) assert.deepEqual(app.store.get(account.id)[field], value);
+  }
+  assert.deepEqual(app.probes, [account.id]);
+  assert.equal((await app.register(NEXT_URI)).status, 200);
+  assert.equal(app.store.get(account.id).endpoint, NEXT_URI);
+  assert.equal(app.store.get(account.id).status, "pending");
+  assert.deepEqual(app.probes, [account.id, account.id]);
+});
+
 test("one registration reaches all enabled panels with different local account IDs", async (t) => {
   const source = await panel(t);
   const first = await panel(t);

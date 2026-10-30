@@ -51,6 +51,7 @@ async function fixture(t) {
   const directory = join(root, "data");
   const servers = [];
   const app = createPanelServer({ adminKey: ADMIN, gatewayKey: GATEWAY, dataDir: directory, allowLocal: true });
+  app.store.settings({ quotaProtection: { enabled: false } });
   const base = await listen(app.server);
   const login = await fetch(`${base}/api/session`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: ADMIN }),

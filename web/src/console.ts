@@ -182,6 +182,7 @@ async function setEnabled(account: Account, enabled: boolean) {
 
 export function accountState(a: Account) {
   if (!a.enabled) return 'disabled'
+  if (a.quotaProtection?.suspended) return 'quota'
   if (a.cooldownUntil && Date.parse(a.cooldownUntil) > Date.now()) return 'cooling'
   if (a.status === 'healthy' && a.endpoint) return 'healthy'
   if (a.status === 'unhealthy') return 'offline'
@@ -193,6 +194,15 @@ export const stateLabels: Record<string, string> = {
   offline: '离线',
   pending: '待接入',
   disabled: '已停用',
+  quota: '额度暂停',
+}
+export function quotaProtectionMessage(a: Account) {
+  const state = a.quotaProtection
+  if (!state?.suspended) return ''
+  if (state.reason === 'low') return `剩余额度低于 ${state.thresholdPercent}%，恢复后自动启用`
+  if (state.reason === 'sync-error') return '额度同步失败，验证成功后自动恢复'
+  if (state.reason === 'invalid') return '额度数据无效，验证成功后自动恢复'
+  return '等待额度验证，验证成功后自动恢复'
 }
 export const strategyLabels: Record<Settings['strategy'], string> = {
   weighted: '加权轮询',

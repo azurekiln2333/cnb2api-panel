@@ -136,6 +136,71 @@ test("original registration atomically persists its current endpoint and outbox 
   assert.deepEqual(f.store.snapshots, snapshots);
 });
 
+test("same-URI registration preserves verified health, retry progress and successful deliveries", async (t) => {
+  for (const healthy of [true, false]) {
+    const f = fixture(t, { fetchImpl: async (_url, init) => healthy
+      ? acknowledgement(init) : new Response("unavailable", { status: 503 }) });
+    const account = f.account();
+    f.configure();
+    f.relay.register(account.id, URI);
+    await f.relay.run();
+    const fields = {
+      status: healthy ? "healthy" : "cooldown", failures: healthy ? 0 : 3,
+      failureKind: healthy ? null : "connection", lastError: healthy ? "" : "connection failed",
+      cooldownUntil: healthy ? null : new Date(INITIAL_NOW + 60000).toISOString(),
+      discoveredModels: ["fixture-model"],
+    };
+    f.store.patch(account.id, fields);
+    const version = structuredClone(f.store.state.registrationRelay.generations[account.id]);
+    const delivery = structuredClone(f.job(account));
+    f.advance(1000);
+    assert.deepEqual(f.relay.register(account.id, URI), { applied: true, result: { ok: true, accountId: account.id } });
+    const restored = new Store(f.directory, { allowLocal: true });
+    for (const [field, value] of Object.entries(fields)) assert.deepEqual(restored.get(account.id)[field], value);
+    assert.equal(restored.get(account.id).registeredAt, new Date(INITIAL_NOW + 1000).toISOString());
+    assert.deepEqual(f.store.state.registrationRelay.generations[account.id], version);
+    assert.deepEqual(f.job(account), delivery);
+  }
+});
+
+test("same-URI registration repairs missing peer work and a new URI replaces all deliveries", async (t) => {
+  const f = fixture(t);
+  const account = f.account();
+  f.configure();
+  f.relay.register(account.id, URI);
+  await f.relay.run();
+  const delivered = structuredClone(f.job(account));
+  f.configure([peer(), peer(2)]);
+  f.relay.register(account.id, URI);
+  assert.deepEqual(f.job(account), delivered);
+  assert.equal(f.job(account, peer(2)).endpoint, URI);
+  assert.equal(f.job(account, peer(2)).revision, delivered.revision);
+  f.store.patch(account.id, { status: "healthy", discoveredModels: ["fixture-model"] });
+  f.relay.register(account.id, NEXT_URI);
+  assert.equal(f.store.get(account.id).status, "pending");
+  assert.deepEqual(f.store.get(account.id).discoveredModels, []);
+  for (const job of Object.values(f.store.state.registrationRelay.deliveries)) {
+    assert.equal(job.endpoint, NEXT_URI);
+    assert.equal(job.status, "pending");
+    assert.ok(job.revision > delivered.revision);
+  }
+});
+
+test("same-URI relay receipts preserve health and never create another hop", (t) => {
+  const f = fixture(t);
+  const account = f.account();
+  const sourceId = randomUUID();
+  f.configure();
+  f.relay.register(account.id, URI, { sourceId, revision: 1 });
+  f.store.patch(account.id, { status: "healthy", discoveredModels: ["fixture-model"] });
+  f.relay.register(account.id, URI, { sourceId, revision: 2 });
+  f.relay.reconcile();
+  assert.equal(f.store.get(account.id).status, "healthy");
+  assert.deepEqual(f.store.get(account.id).discoveredModels, ["fixture-model"]);
+  assert.equal(f.store.state.registrationRelay.receipts[account.id][sourceId], 2);
+  assert.deepEqual(f.store.state.registrationRelay.deliveries, {});
+});
+
 test("self-origin relay requests cannot replace local registration or remove other peer deliveries", (t) => {
   const f = fixture(t);
   const account = f.account();

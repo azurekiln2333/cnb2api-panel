@@ -30,14 +30,25 @@ Do not classify that entire interval as a TCP connection timeout.
 
 Deduplicate probes only for the same endpoint/key. An obsolete promise must not
 delete newer work. A newer successful probe invalidates old inference transport
-failures. Actual HTTP rate/auth/capacity responses still establish route
-cooldown. An earlier in-flight probe must not erase a newer upstream cooldown.
+failures. Completed successful inference also advances that generation and
+repairs older connection failures for the same endpoint/key. Actual inference
+HTTP rate/auth/capacity responses still establish route cooldown. An earlier
+in-flight probe must not erase a newer upstream cooldown.
 Read at most 256 KiB of models JSON and require `{ object: "list", data: [] }`.
 Persist `failureKind` as runtime state in stats, not account definitions.
 Connection failures remain eligible for periodic recovery during route cooldown.
 Upstream/auth/rate/capacity and invalid-response cooldowns stay effective across
 process restarts. Repeated confirmed connection failures may trigger auto-wake
 at three failures; preserve the existing 30-minute successful-wake throttle.
+
+A 429 from the models probe is inconclusive about inference availability. Keep
+existing routing health, use an independent automatic-probe backoff and never
+wake a workspace because its models endpoint is throttled. Manual probes can
+retry immediately. Honor bounded Retry-After seconds or HTTP dates on probes
+and actual inference 429 responses. Coalesce routing failures already in flight
+when a newer provider cooldown was established; do not exponentially extend one
+concurrent burst into hours. A longer explicit provider deadline may extend it.
+Keep probe backoff in memory and real routing cooldown in persistent runtime.
 
 Responses requests always use upstream `/v1/chat/completions`. Convert before
 Chat request overrides and usage-option merging. Derive session affinity and
@@ -96,6 +107,9 @@ provider bodies or credentials.
 | Probe HTTP auth failure or invalid models | Explicit safe error, no pointless wake |
 | Old endpoint/key or older health generation | Ignore stale mutation |
 | Persisted upstream cooldown | Do not bypass via automatic models check |
+| Models probe returns 429 while inference works | Preserve routing, retry probe automatically |
+| Completed inference precedes an older probe timeout | Ignore stale timeout |
+| Concurrent actual inference 429 responses | One cooldown, respect Retry-After |
 | Unsupported state/hosted tool/content | HTTP 400 before account selection |
 | Malformed or interrupted Chat output | Failure, never false completion |
 | No ready account or exhausted retries | Public service-unavailable HTTP 503 |
@@ -114,6 +128,9 @@ or forward Responses unchanged to an unsupported upstream route.
 `test/panel-probes.test.mjs` proves slow first response, health generation,
 endpoint/key replacement, bounded body/timeout diagnostics, recovery in cooldown,
 failure categories, persisted cooldowns and automatic-wake throttling.
+`test/panel-rate-recovery.test.mjs` separates models-only 429 from actual
+inference 429 and proves automatic retry, stale-probe rejection, completed
+inference recovery, no throttling-driven wake and concurrent cooldown coalescing.
 `test/responses.test.mjs` covers pure mappings, malformed and split SSE, tools,
 usage, limits, refusal and incomplete responses. `test/panel-responses.test.mjs`
 proves authentication/CORS, actual upstream path, overrides, accounting, retries,

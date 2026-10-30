@@ -179,20 +179,30 @@ export class RegistrationRelay {
       return { applied: false, result };
     this.store.commit((state) => {
       const target = state.accounts.find((entry) => entry.id === account.id);
-      Object.assign(target, {
-        endpoint, registeredAt: new Date(this.now()).toISOString(), status: "pending", cooldownUntil: null,
-        failures: 0, failureKind: null, lastError: "", discoveredModels: [],
+      const changed = target.endpoint !== endpoint;
+      Object.assign(target, { endpoint, registeredAt: new Date(this.now()).toISOString() });
+      // Keepalive can register the same URI again without invalidating verified health.
+      if (changed) Object.assign(target, {
+        status: "pending", cooldownUntil: null, failures: 0,
+        failureKind: null, lastError: "", discoveredModels: [],
       });
       const runtime = state.registrationRelay;
-      const version = generation(runtime, target, !relay);
-      for (const [key, delivery] of Object.entries(runtime.deliveries)) if (delivery.accountId === accountId) delete runtime.deliveries[key];
+      let version = runtime.generations[accountId];
+      if (changed || !version || version.endpoint !== endpoint || version.local !== !relay || version.credentialVersion !== credentialVersion(target)) {
+        version = generation(runtime, target, !relay);
+        for (const [key, delivery] of Object.entries(runtime.deliveries)) if (delivery.accountId === accountId) delete runtime.deliveries[key];
+      }
       if (relay) {
         const sources = runtime.receipts[accountId] ??= {};
         if (sources[relay.sourceId] === undefined && Object.keys(sources).length >= 32) fail("注册联动来源数量已达上限");
         sources[relay.sourceId] = relay.revision;
       } else if (state.settings.registrationRelay.enabled) {
-        for (const server of state.settings.registrationRelay.servers)
-          if (server.enabled) enqueue(runtime, target, server, version, this.now());
+        for (const server of state.settings.registrationRelay.servers) {
+          if (!server.enabled) continue;
+          const current = runtime.deliveries[pair(accountId, server.id)];
+          if (!current || current.paused || current.revision !== version.revision || current.origin !== server.origin)
+            enqueue(runtime, target, server, version, this.now());
+        }
       }
     });
     return { applied: true, result };

@@ -43,6 +43,13 @@ export async function fetchQuota({ org, token, timeoutMs = 15_000, base = CNB_AP
     getCharge(base, org, token, 'quota', timeoutMs),
     getCharge(base, org, token, 'volume', timeoutMs),
   ]);
+  const creditNumber = (value) =>
+    (typeof value === 'number' || typeof value === 'string' && value.trim()) &&
+    Number.isFinite(Number(value)) && Number(value) >= 0;
+  if (!creditNumber(quota?.credit_in_milli?.total) ||
+      !creditNumber(volume?.credit_in_milli) ||
+      !creditNumber(volume?.freeze_credit_in_milli))
+    throw new Error('invalid credit quota response');
   return normalize(org, quota, volume);
 }
 

@@ -21,6 +21,7 @@ async function fixture(t) {
     logDir: join(root, "logs"),
     allowLocal: true,
   });
+  app.store.settings({ quotaProtection: { enabled: false } });
   app.server.listen(0, "127.0.0.1");
   await once(app.server, "listening");
   const base = `http://127.0.0.1:${app.server.address().port}`;
