@@ -87,15 +87,17 @@ Default to enabled with a ten-percent threshold, including legacy stores.
 Accept thresholds from 1 through 100 and preserve omitted fields on updates.
 `account.quotaProtection` is derived runtime state:
 `{ suspended, reason, remainingPercent, thresholdPercent }`. Its reason is
-`disabled`, `unknown`, `sync-error`, `invalid`, `low` or null. Keep this state in
+`disabled`, `unknown`, `sync-error`, `invalid`, `low`, `override` or null. Keep this state in
 stats.json and recompute it after loading or committing account/settings state.
 
 Deduct both used and frozen credits. Suspend when remaining percentage is
 strictly below the threshold. Exactly ten percent is eligible under the default
 policy. Allow only bounded floating-point roundoff in percentage comparisons;
 3 total minus 2.7 used must remain eligible, while 9.9999999999 percent must not.
-Unknown, malformed, mismatched-organization or failed quota reads fail
-closed. Validate the total allowance and used Credits before normalization so
+Automatic decisions fail closed for unknown, malformed,
+mismatched-organization or failed quota reads. An explicit administrator resume
+can override quota suspension as specified below. Validate the total allowance
+and used Credits before normalization so
 missing values cannot become invented zero balances. CNB's public Swagger
 `dto.VolumeUsedResp` does not require `freeze_credit_in_milli`. Accept an omitted
 frozen-usage field as zero when the total and used values are valid. Reject an
@@ -126,6 +128,7 @@ upstream HTTP 429 from quota protection. A probe cannot clear quota suspension.
 | Sync error or retry after an error | Suspend until verified success |
 | Unknown, invalid or wrong-organization quota | Suspend |
 | Policy disabled | Do not suspend for quota |
+| Explicit per-account resume override | Do not suspend that account for quota |
 | User manually disabled account | Never auto-enable |
 | Threshold not an integer in 1..100 | Reject settings update |
 
@@ -144,6 +147,27 @@ siblings after a failed sync. Browser
 tests verify the pause/recovery state and protection settings through real APIs.
 Unrelated inference test fixtures explicitly disable quota protection rather
 than weakening its production default or inventing successful quota snapshots.
+
+### Explicit resume from a temporary pause
+
+The user subsequently requested that the existing enable action resume any
+temporarily quota-paused account, whether the cause is low balance or a failed
+read. Store `quotaProtectionOverride` as a boolean in the account definition,
+defaulting to false. Accept it only through authenticated account updates and
+include it in the management DTO. Reject nonboolean values.
+
+An explicit update with `enabled: true` and `quotaProtectionOverride: true`
+removes only that account's quota suspension and returns reason `override`.
+Ordinary enablement does not create an override. Health, actual cooldown, model
+scope and manual disablement retain their normal eligibility checks. Do not
+spread an override across organization siblings.
+
+Continue polling overridden accounts. Retain the override while quota is low,
+unknown or failing, so the next poll does not immediately undo an administrator's
+resume action. Clear it after authoritative matching-organization quota reaches
+the configured threshold, restoring normal protection for later quota changes.
+Manual disablement clears the override immediately. Persist overrides across
+restarts and never change a disabled account to enabled during automatic recovery.
 
 ## 9. Quota synchronization diagnostics
 

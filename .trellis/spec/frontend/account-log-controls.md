@@ -63,3 +63,23 @@ Correct: derive enabled state from actual candidates and dedicated batch state.
 
 Wrong: serialize paginated `rows` for export.
 Correct: download the server's complete filtered collection.
+
+## Account pause and resume
+
+Show every automatic quota pause as `临时暂停`, including low balance, failed
+synchronization and unverified data. Display the specific reason below that
+label. Keep one existing enable/disable action: show `启用账号` when the account
+is manually disabled or quota-paused, and `停用账号` otherwise. Do not add separate
+force-enable or restore-protection buttons.
+
+Enabling a quota-paused account explicitly sends
+`{ enabled: true, quotaProtectionOverride: true }`. This resumes that account's
+quota eligibility while synchronization continues. The override lasts through
+low or failed quota reads and clears after verified quota recovery. Health,
+cooldown and model restrictions still apply. Disabling the account clears the
+override, and later quota recovery never manually enables it.
+
+Resolve an open management dialog against the latest account state after
+background refreshes, so the existing button follows the current pause state.
+Browser tests must cover both low-quota and sync-error pauses, the same resume
+button, repeated off/on actions, continued synchronization and automatic recovery.

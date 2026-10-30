@@ -57,7 +57,8 @@ const group = ref('all')
 const selected = ref(new Set<string>())
 const showEditor = ref(false)
 const editingAccount = ref<Account | null>(null)
-const managing = ref<Account | null>(null)
+const managingId = ref<string | null>(null)
+const managing = computed(() => accounts.value.find((a) => a.id === managingId.value) ?? null)
 const confirming = ref<{ action: 'delete' | 'rotate'; account: Account } | null>(null)
 const confirmingBusy = ref(false)
 const page = ref(1)
@@ -143,7 +144,7 @@ async function rowAction(id: string, operation: 'probe' | 'wake' | 'quota') {
 function edit(account: Account | null = null) {
   editingAccount.value = account
   showEditor.value = true
-  managing.value = null
+  managingId.value = null
 }
 function toggleAll() {
   if (allSelected.value) rows.value.forEach((a) => selected.value.delete(a.id))
@@ -156,18 +157,21 @@ function clearFilters() {
 }
 function manageEnable() {
   if (!managing.value) return
-  void setEnabled(managing.value, !managing.value.enabled)
-  managing.value = null
+  void setEnabled(
+    managing.value,
+    !managing.value.enabled || !!managing.value.quotaProtection?.suspended,
+  )
+  managingId.value = null
 }
 function manageAction(operation: 'quota' | 'wake') {
   if (!managing.value) return
   void action(managing.value.id, operation)
-  managing.value = null
+  managingId.value = null
 }
 function confirmAction(operation: 'rotate' | 'delete') {
   if (!managing.value) return
   confirming.value = { action: operation, account: managing.value }
-  managing.value = null
+  managingId.value = null
 }
 async function probeAll() {
   if (probingAll.value || !probeCandidates.value.length) return
@@ -467,7 +471,7 @@ async function confirm() {
                     ? `${number(account.latencyMs)} ms`
                     : account.enabled
                       ? account.lastError || '等待首次探活'
-                      : '不再分配新请求'
+                      : '已手动停用，请启用账号恢复'
                 }}
               </div>
             </td>
@@ -591,7 +595,7 @@ async function confirm() {
                   class="icon-button"
                   :aria-label="`管理${account.name}`"
                   title="更多操作"
-                  @click="managing = account"
+                  @click="managingId = account.id"
                 >
                   <MoreHorizontal :size="17" />
                 </button>
@@ -668,14 +672,20 @@ async function confirm() {
     v-if="managing"
     :title="managing.name"
     :subtitle="managing.repo"
-    @close="managing = null"
+    @close="managingId = null"
     ><div class="modal-body account-actions-grid">
       <button @click="edit(managing)">
         <Pencil :size="19" /><strong>编辑账号</strong
         ><small>查看密钥与令牌、修改工作区配置</small></button
       ><button :disabled="busy.has(managing.id)" @click="manageEnable">
-        <Power :size="19" /><strong>{{ managing.enabled ? '停用账号' : '启用账号' }}</strong
-        ><small>{{ managing.enabled ? '停止分配新请求' : '重新加入自动路由' }}</small></button
+        <Power :size="19" /><strong>{{
+          !managing.enabled || managing.quotaProtection?.suspended ? '启用账号' : '停用账号'
+        }}</strong
+        ><small>{{
+          !managing.enabled || managing.quotaProtection?.suspended
+            ? '允许账号参与自动路由'
+            : '停止分配新请求'
+        }}</small></button
       ><button
         :disabled="!managing.repo || !managing.hasPat || busy.has(managing.id)"
         @click="manageAction('quota')"

@@ -47,7 +47,7 @@ export interface Quota {
 }
 export interface QuotaProtectionState {
   suspended: boolean
-  reason: 'disabled' | 'unknown' | 'sync-error' | 'invalid' | 'low' | null
+  reason: 'disabled' | 'unknown' | 'sync-error' | 'invalid' | 'low' | 'override' | null
   remainingPercent: number | null
   thresholdPercent: number
 }
@@ -60,6 +60,7 @@ export interface Account {
   weight: number
   priority: number
   enabled: boolean
+  quotaProtectionOverride: boolean
   autoWake: boolean
   branch: string
   models: string[]

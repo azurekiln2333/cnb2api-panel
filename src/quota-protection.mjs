@@ -39,6 +39,8 @@ export function quotaProtectionFor(account, settings) {
     thresholdPercent: policy.thresholdPercent,
   };
   if (!policy.enabled) return { ...result, reason: "disabled" };
+  if (account.quotaProtectionOverride === true)
+    return { ...result, reason: "override" };
   const verification = account.quotaSync?.status === "syncing"
     ? account.quotaSync.previousStatus : account.quotaSync?.status;
   if (verification === "error")
@@ -55,6 +57,15 @@ export function quotaProtectionFor(account, settings) {
 }
 
 export function refreshQuotaProtection(state) {
-  for (const account of state.accounts)
-    account.quotaProtection = quotaProtectionFor(account, state.settings);
+  for (const account of state.accounts) {
+    let protection = quotaProtectionFor(account, state.settings);
+    if (protection.reason === "override" && account.quotaSync?.status === "ok") {
+      const verified = quotaProtectionFor({ ...account, quotaProtectionOverride: false }, state.settings);
+      if (!verified.suspended && verified.reason === null) {
+        account.quotaProtectionOverride = false;
+        protection = verified;
+      }
+    }
+    account.quotaProtection = protection;
+  }
 }

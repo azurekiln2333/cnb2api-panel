@@ -455,6 +455,7 @@ export class Store {
           tokenUsage: { ...emptyTokenUsage(), ...b.tokenUsage },
         })),
         accounts: accounts.accounts.map((a) => ({
+          quotaProtectionOverride: false,
           ...runtimeDefaults(),
           ...a,
           ...(!legacy
@@ -471,6 +472,8 @@ export class Store {
           secrets: this.decrypt(a.secrets),
         })),
       };
+      if (this.state.accounts.some((account) => typeof account.quotaProtectionOverride !== "boolean"))
+        throw new Error("Invalid quota protection override; restore the data backup");
       this.state.sso = this.loadSso(saved.sso);
       refreshQuotaProtection(this.state);
       if (legacy) {
@@ -731,6 +734,11 @@ export class Store {
     const autoWake = input.autoWake ?? previous?.autoWake ?? false;
     if (typeof enabled !== "boolean" || typeof autoWake !== "boolean")
       throw new InputError("启用状态须为布尔值");
+    if (input.quotaProtectionOverride !== undefined && typeof input.quotaProtectionOverride !== "boolean")
+      throw new InputError("强制启用状态须为布尔值");
+    const quotaProtectionOverride = enabled
+      ? input.quotaProtectionOverride ?? previous?.quotaProtectionOverride ?? false
+      : false;
     if (autoWake && !repo)
       throw new InputError("自动唤醒需要填写 CNB 仓库路径");
     if (autoWake && !secrets.pat)
@@ -755,6 +763,7 @@ export class Store {
         "优先级",
       ),
       enabled,
+      quotaProtectionOverride,
       autoWake,
       branch,
       secrets,

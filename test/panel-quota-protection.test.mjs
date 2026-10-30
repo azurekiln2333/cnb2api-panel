@@ -305,3 +305,138 @@ test("zero and overdrawn quotas suspend while invalid or mismatched quota stays 
   assert.equal(quotaProtectionFor(account).reason, "invalid");
   assert.equal(quotaProtectionFor(account).remainingPercent, null);
 });
+
+test("only an explicit account override bypasses quota suspension without affecting organization siblings", async (t) => {
+  for (const reason of ["unknown", "low", "sync-error"]) await t.test(reason, async (t) => {
+    const app = fixture(t, async ({ org }) => {
+      if (reason === "sync-error") throw new Error("synthetic quota failure");
+      return snapshot(org, { used: 95 });
+    });
+    const first = app.account();
+    const sibling = app.account();
+    if (reason !== "unknown") await app.pool.quotaCycle();
+    assert.equal(app.store.get(first.id).quotaProtectionOverride, false);
+    assert.equal(app.store.get(first.id).quotaProtection.reason, reason);
+    app.store.update(first.id, { enabled: true });
+    assert.equal(app.store.get(first.id).quotaProtection.suspended, true);
+    const enabled = app.store.update(first.id, { enabled: true, quotaProtectionOverride: true });
+    assert.equal(enabled.quotaProtectionOverride, true);
+    assert.equal(enabled.quotaProtection.suspended, false);
+    assert.equal(enabled.quotaProtection.reason, "override");
+    assert.equal(enabled.quotaProtection.remainingPercent, reason === "low" ? 5 : null);
+    assert.equal(publicAccount(enabled).quotaProtectionOverride, true);
+    assert.deepEqual(app.pool.eligible().map((account) => account.id), [first.id]);
+    assert.equal(app.store.get(sibling.id).quotaProtectionOverride, false);
+    assert.equal(app.store.get(sibling.id).quotaProtection.reason, reason);
+    app.store.update(first.id, { quotaProtectionOverride: false });
+    assert.equal(app.store.get(first.id).quotaProtection.suspended, true);
+    assert.deepEqual(app.pool.eligible(), []);
+  });
+});
+
+test("account override persists in account definitions and legacy accounts default to automatic protection", (t) => {
+  const app = fixture(t, async ({ org }) => snapshot(org));
+  const account = app.account();
+  app.store.update(account.id, { enabled: true, quotaProtectionOverride: true });
+  const definitions = JSON.parse(readFileSync(join(app.directory, "accounts.json"), "utf8"));
+  const stats = JSON.parse(readFileSync(join(app.directory, "stats.json"), "utf8"));
+  assert.equal(definitions.accounts[0].quotaProtectionOverride, true);
+  assert.equal(stats.accounts[account.id].quotaProtectionOverride, undefined);
+  const restored = new Store(app.directory, { allowLocal: true });
+  assert.equal(restored.get(account.id).quotaProtectionOverride, true);
+  assert.equal(restored.get(account.id).quotaProtection.reason, "override");
+  assert.equal(isReady(restored.get(account.id)), true);
+  delete definitions.accounts[0].quotaProtectionOverride;
+  writeFileSync(join(app.directory, "accounts.json"), JSON.stringify(definitions));
+  const legacy = new Store(app.directory, { allowLocal: true });
+  assert.equal(legacy.get(account.id).quotaProtectionOverride, false);
+  assert.equal(legacy.get(account.id).quotaProtection.suspended, true);
+  definitions.accounts[0].quotaProtectionOverride = "true";
+  writeFileSync(join(app.directory, "accounts.json"), JSON.stringify(definitions));
+  assert.throws(() => new Store(app.directory, { allowLocal: true }), /Invalid quota protection override/);
+});
+
+test("manual enablement survives failed and low quota polls then restores automatic protection after verified recovery", async (t) => {
+  let phase = "failed";
+  let calls = 0;
+  const app = fixture(t, async ({ org }) => {
+    calls++;
+    if (phase === "failed") throw new Error("synthetic quota failure");
+    return snapshot(org, { used: phase === "low" ? 95 : 0 });
+  });
+  const account = app.account();
+  const sibling = app.account();
+  app.store.update(account.id, { enabled: true, quotaProtectionOverride: true });
+  await app.pool.quotaCycle();
+  assert.equal(app.store.get(account.id).quotaSync.status, "error");
+  assert.equal(app.store.get(account.id).quotaProtection.reason, "override");
+  phase = "low";
+  app.advance(60000);
+  await app.pool.quotaCycle();
+  assert.equal(app.store.get(account.id).quotaProtection.reason, "override");
+  assert.equal(app.store.get(account.id).quotaProtection.remainingPercent, 5);
+  assert.equal(app.store.get(sibling.id).quotaProtection.reason, "low");
+  phase = "recovered";
+  app.advance(60000);
+  await app.pool.quotaCycle();
+  assert.equal(app.store.get(account.id).quotaProtectionOverride, false);
+  assert.equal(app.store.get(account.id).quotaProtection.reason, null);
+  assert.equal(app.store.get(sibling.id).quotaProtection.suspended, false);
+  phase = "low";
+  app.advance(60000);
+  await app.pool.quotaCycle();
+  assert.equal(calls, 4);
+  assert.equal(app.store.get(account.id).quotaProtection.reason, "low");
+  assert.equal(app.store.get(account.id).quotaProtectionOverride, false);
+  assert.deepEqual(app.pool.eligible(), []);
+});
+
+test("manual disablement clears an account override and ordinary enablement keeps automatic protection", (t) => {
+  const app = fixture(t, async ({ org }) => snapshot(org));
+  const account = app.account();
+  app.store.update(account.id, { enabled: true, quotaProtectionOverride: true });
+  const disabled = app.store.update(account.id, { enabled: false, quotaProtectionOverride: true });
+  assert.equal(disabled.enabled, false);
+  assert.equal(disabled.quotaProtectionOverride, false);
+  assert.equal(isReady(disabled), false);
+  const enabled = app.store.update(account.id, { enabled: true });
+  assert.equal(enabled.quotaProtectionOverride, false);
+  assert.equal(enabled.quotaProtection.suspended, true);
+  for (const invalid of [null, 0, 1, "true", {}, []])
+    assert.throws(() => app.store.update(account.id, { quotaProtectionOverride: invalid }), /强制启用状态须为布尔值/);
+  assert.equal(app.store.get(account.id).quotaProtectionOverride, false);
+});
+
+test("quota override leaves health, inference cooldowns, model scope and manual state in control", (t) => {
+  const app = fixture(t, async ({ org }) => snapshot(org));
+  const account = app.account({ models: ["allowed-model"] });
+  app.store.update(account.id, { enabled: true, quotaProtectionOverride: true });
+  assert.equal(app.pool.eligible("allowed-model").length, 1);
+  assert.deepEqual(app.pool.eligible("other-model"), []);
+  app.store.patch(account.id, { status: "unhealthy" });
+  assert.equal(isReady(app.store.get(account.id)), false);
+  app.store.patch(account.id, { status: "healthy", cooldownUntil: new Date(Date.now() + 60000).toISOString() });
+  assert.equal(isReady(app.store.get(account.id)), false);
+  assert.deepEqual(app.pool.eligible("allowed-model"), []);
+  app.store.update(account.id, { enabled: false });
+  app.store.patch(account.id, { cooldownUntil: null });
+  assert.equal(isReady(app.store.get(account.id)), false);
+  assert.equal(app.store.get(account.id).quotaProtectionOverride, false);
+});
+
+test("global policy changes preserve a pending account override and verified recovery uses the current threshold", async (t) => {
+  const app = fixture(t, async ({ org }) => snapshot(org, { used: 85 }));
+  const account = app.account();
+  app.store.settings({ quotaProtection: { thresholdPercent: 20 } });
+  app.store.update(account.id, { enabled: true, quotaProtectionOverride: true });
+  app.store.settings({ quotaProtection: { enabled: false } });
+  assert.equal(app.store.get(account.id).quotaProtection.reason, "disabled");
+  assert.equal(app.store.get(account.id).quotaProtectionOverride, true);
+  await app.pool.quota(account.id);
+  assert.equal(app.store.get(account.id).quotaProtectionOverride, true);
+  app.store.settings({ quotaProtection: { enabled: true } });
+  assert.equal(app.store.get(account.id).quotaProtection.reason, "override");
+  app.store.settings({ quotaProtection: { thresholdPercent: 15 } });
+  assert.equal(app.store.get(account.id).quotaProtectionOverride, false);
+  assert.equal(app.store.get(account.id).quotaProtection.reason, null);
+});

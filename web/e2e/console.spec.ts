@@ -1311,14 +1311,18 @@ test('quota protection pauses below ten percent and automatically resumes at the
   const health = page.getByTestId(`health-${primary.id}`)
   const disabledHealth = page.getByTestId(`health-${backup.id}`)
   const quota = page.getByTestId(`quota-${primary.id}`)
-  await expect(health).toContainText('额度暂停')
+  await expect(health).toContainText('临时暂停')
   await expect(health).toContainText('剩余额度低于 10%')
   await expect(quota.locator('.quota-percentage')).toHaveText('9.9%')
   expect((await account(primary.id)).enabled).toBe(true)
   expect((await account(primary.id)).status).toBe('healthy')
   await page.getByRole('button', { name: '管理备用工作区', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '启用账号' }).click()
+  await expect.poll(async () => (await account(backup.id)).quotaProtectionOverride).toBe(true)
+  await page.getByRole('button', { name: '管理备用工作区', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '停用账号' }).click()
   await expect(disabledHealth).toContainText('已停用')
+  expect((await account(backup.id)).quotaProtectionOverride).toBe(false)
   const chat = () =>
     request.post('/v1/chat/completions', {
       headers: { Authorization: 'Bearer browser-test-gateway-key' },
@@ -1354,7 +1358,7 @@ test('quota protection pauses below ten percent and automatically resumes at the
   await request.post('http://127.0.0.1:19221/test/quota', { data: { used: 1000 } })
   await expect.poll(async () => (await account(primary.id)).quotaProtection.suspended).toBe(true)
   await page.clock.fastForward(15001)
-  await expect(health).toContainText('额度暂停')
+  await expect(health).toContainText('临时暂停')
   await expect(quota.locator('.quota-percentage')).toHaveText('0%')
   expect((await chat()).status()).toBe(503)
   await request.post('http://127.0.0.1:19221/test/quota', { data: { reset: true } })
@@ -1366,6 +1370,70 @@ test('quota protection pauses below ten percent and automatically resumes at the
   await expect(disabledHealth).toContainText('已停用')
   expect((await account(backup.id)).enabled).toBe(false)
   expect((await chat()).status()).toBe(200)
+})
+
+test('the existing enable action resumes a temporary quota pause and follows current account state', async ({
+  page,
+  request,
+}) => {
+  const accounts = await seed(request)
+  const primary = accounts[0]
+  for (const account of accounts.slice(1))
+    await request.patch(`/api/accounts/${account.id}`, { data: { enabled: false } })
+  await request.post('http://127.0.0.1:19221/test/quota', {
+    data: { total: 1000, used: 901, freeze: 0 },
+  })
+  await request.patch(`/api/accounts/${primary.id}`, {
+    data: { pat: 'test-enable-quota-personal-token' },
+  })
+  const account = async () =>
+    (await (await request.get(`/api/accounts/${primary.id}`)).json()).account
+  const syncQuota = () => request.post(`/api/accounts/${primary.id}/quota`, { data: {} })
+  await syncQuota()
+  await request.patch('/api/settings', {
+    data: { quotaProtection: { enabled: true, thresholdPercent: 10 } },
+  })
+  await page.clock.install()
+  await login(page)
+  const health = page.getByTestId(`health-${primary.id}`)
+  const dialog = page.getByRole('dialog')
+  const manage = () =>
+    page.getByRole('button', { name: '管理AzureKiln · 主力', exact: true }).click()
+  await expect(health.locator('.status-badge')).toHaveText('临时暂停')
+  await manage()
+  await expect(dialog.getByRole('button', { name: '停用账号' })).toHaveCount(0)
+  await expect(dialog.getByRole('button', { name: '强制启用' })).toHaveCount(0)
+  await expect(dialog.getByRole('button', { name: '恢复额度保护' })).toHaveCount(0)
+  await dialog.getByRole('button', { name: '启用账号' }).click()
+  await expect.poll(async () => (await account()).quotaProtectionOverride).toBe(true)
+  await expect(health.locator('.status-badge')).toHaveText('可用')
+  await expect(page.locator('.toast').last()).toContainText('账号已启用')
+  await syncQuota()
+  expect((await account()).quotaProtectionOverride).toBe(true)
+
+  await manage()
+  await expect(dialog.getByRole('button', { name: '停用账号' })).toBeVisible()
+  await request.patch(`/api/accounts/${primary.id}`, { data: { enabled: false } })
+  await page.clock.fastForward(15001)
+  await expect(dialog.getByRole('button', { name: '启用账号' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '停用账号' })).toHaveCount(0)
+  await dialog.getByRole('button', { name: '启用账号' }).click()
+  await expect.poll(async () => (await account()).quotaProtectionOverride).toBe(true)
+  expect((await account()).enabled).toBe(true)
+
+  await request.post('http://127.0.0.1:19221/test/quota', { data: { used: 900 } })
+  await syncQuota()
+  await expect.poll(async () => (await account()).quotaProtectionOverride).toBe(false)
+  await request.post('http://127.0.0.1:19221/test/quota', { data: { used: 901 } })
+  await syncQuota()
+  await page.clock.fastForward(15001)
+  await expect(health.locator('.status-badge')).toHaveText('临时暂停')
+  await manage()
+  await expect(dialog.getByRole('button', { name: '启用账号' })).toBeVisible()
+  for (const disabled of accounts.slice(1)) {
+    const current = (await (await request.get(`/api/accounts/${disabled.id}`)).json()).account
+    expect(current.enabled).toBe(false)
+  }
 })
 
 test('quota protection settings validate and persist the switch and threshold', async ({

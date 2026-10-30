@@ -166,9 +166,16 @@ async function action(id: string, operation: 'probe' | 'quota' | 'wake') {
 async function setEnabled(account: Account, enabled: boolean) {
   busy.value.add(account.id)
   try {
-    await api(`/accounts/${account.id}`, 'PATCH', { enabled })
+    const result = await api<{ account: Account }>(`/accounts/${account.id}`, 'PATCH', {
+      enabled,
+      ...(enabled ? { quotaProtectionOverride: true } : {}),
+    })
     await refresh()
-    notify(enabled ? '账号已启用' : '账号已暂停分配新请求')
+    const stillPaused = enabled && !!result.account.quotaProtection?.suspended
+    notify(
+      stillPaused ? '账号仍临时暂停，请重试启用' : enabled ? '账号已启用' : '账号已停用',
+      stillPaused,
+    )
   } catch (error) {
     notify(
       error instanceof Error ? error.message : '状态更新失败',
@@ -194,12 +201,12 @@ export const stateLabels: Record<string, string> = {
   offline: '离线',
   pending: '待接入',
   disabled: '已停用',
-  quota: '额度暂停',
+  quota: '临时暂停',
 }
 export function quotaProtectionMessage(a: Account) {
   const state = a.quotaProtection
   if (!state?.suspended) return ''
-  if (state.reason === 'low') return `剩余额度低于 ${state.thresholdPercent}%，恢复后自动启用`
+  if (state.reason === 'low') return `剩余额度低于 ${state.thresholdPercent}%，达标后自动恢复`
   if (state.reason === 'sync-error') return '额度同步失败，验证成功后自动恢复'
   if (state.reason === 'invalid') return '额度数据无效，验证成功后自动恢复'
   return '等待额度验证，验证成功后自动恢复'
