@@ -231,11 +231,20 @@ export class Pool {
     this.quotaPreferred = new Map();
     this.quotaActive = 0;
     this.quotaQueue = [];
+    // Older versions stored a models-only 429 as a routing failure. Revalidate
+    // that exact persisted signature without bypassing real inference cooldowns.
+    const legacyProbeThrottle = (a) => a.failureKind === "upstream" &&
+      a.lastError === "工作区鉴权探活返回 HTTP 429";
     // A previous process's health result cannot prove that a workspace is still alive.
-    if (store.state.accounts.some((a) => a.status === "healthy"))
+    if (store.state.accounts.some((a) => a.status === "healthy" || legacyProbeThrottle(a)))
       store.commit((s) => {
-        for (const account of s.accounts)
-          if (account.status === "healthy") account.status = "pending";
+        for (const account of s.accounts) {
+          if (legacyProbeThrottle(account)) Object.assign(account, {
+            status: "pending", failures: 0, failureKind: null,
+            cooldownUntil: null, lastError: "",
+          });
+          else if (account.status === "healthy") account.status = "pending";
+        }
       });
   }
 

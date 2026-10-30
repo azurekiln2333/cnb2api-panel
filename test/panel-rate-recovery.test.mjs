@@ -211,3 +211,99 @@ test("Retry-After dates are supported and invalid values use the configured cool
   app.pool.fail(app.id, "rate limited", 429, app.store.get(app.id), { routing: true, retryAfter: "bad" });
   assert.equal(Date.parse(app.store.get(app.id).cooldownUntil) - time.now, 60000);
 });
+
+test("restart revalidates a persisted models-only 429 without waiting for its old routing cooldown", async (t) => {
+  const app = poolFixture(t);
+  app.store.patch(app.id, {
+    status: "unhealthy", failures: 6, failureKind: "upstream",
+    lastError: "工作区鉴权探活返回 HTTP 429",
+    cooldownUntil: new Date(Date.now() + 3600000).toISOString(),
+  });
+  const restored = new Store(app.store.directory, { allowLocal: true });
+  const restarted = new Pool(restored);
+  t.after(() => restarted.stop());
+  assert.equal(restored.get(app.id).status, "pending", "migration does not invent successful health");
+  assert.equal(restored.get(app.id).failures, 0);
+  assert.equal(restored.get(app.id).failureKind, null);
+  assert.equal(restored.get(app.id).cooldownUntil, null);
+  assert.equal(restored.get(app.id).lastError, "");
+  const urls = [];
+  t.mock.method(globalThis, "fetch", async (url) => {
+    urls.push(url);
+    return url.endsWith("/v1/models") ? Response.json(modelList()) : new Response(null, { status: 404 });
+  });
+  await restarted.cycle();
+  assert.equal(urls.filter((url) => url.endsWith("/v1/models")).length, 1);
+  assert.equal(restored.get(app.id).status, "healthy");
+  assert.equal(restarted.eligible()[0].id, app.id);
+  const persisted = new Store(app.store.directory, { allowLocal: true });
+  assert.equal(persisted.get(app.id).failureKind, null);
+  assert.equal(persisted.get(app.id).cooldownUntil, null);
+});
+
+test("restart preserves actual inference cooldowns and other probe failures", async (t) => {
+  const app = poolFixture(t);
+  const deadline = new Date(Date.now() + 3600000).toISOString();
+  const failures = [
+    { failureKind: "upstream", lastError: "工作区返回 HTTP 429，已进入冷却" },
+    { failureKind: null, lastError: "工作区返回 HTTP 429，已进入冷却" },
+    { failureKind: "upstream", lastError: "工作区鉴权探活返回 HTTP 401" },
+    { failureKind: "response", lastError: "工作区鉴权探活返回 HTTP 429" },
+  ];
+  const ids = failures.map((fields, index) => {
+    const id = index === 0 ? app.id : app.store.create({
+      name: `preserved-${index}`, endpoint: `http://127.0.0.1:${9001 + index}`, proxyKey,
+    }).id;
+    app.store.patch(id, { status: "unhealthy", failures: 4, cooldownUntil: deadline, ...fields });
+    return id;
+  });
+  const restored = new Store(app.store.directory, { allowLocal: true });
+  const restarted = new Pool(restored);
+  t.after(() => restarted.stop());
+  const remote = t.mock.method(globalThis, "fetch", async () => Response.json(modelList()));
+  await restarted.cycle();
+  assert.equal(remote.mock.callCount(), 0);
+  for (const [index, id] of ids.entries()) {
+    const current = restored.get(id);
+    assert.equal(current.status, "unhealthy");
+    assert.equal(current.cooldownUntil, deadline);
+    assert.equal(current.failures, 4);
+    assert.equal(current.failureKind, failures[index].failureKind);
+    assert.equal(current.lastError, failures[index].lastError);
+  }
+});
+
+test("legacy probe migration preserves manual disablement and independent quota suspension", async (t) => {
+  const app = poolFixture(t);
+  app.store.settings({ quotaProtection: { enabled: true } });
+  app.store.update(app.id, { repo: "org/limited" });
+  const disabled = app.store.create({
+    name: "manually-disabled", enabled: false, repo: "org/disabled",
+    endpoint: "http://127.0.0.1:9002", proxyKey,
+  });
+  for (const id of [app.id, disabled.id]) app.store.patch(id, {
+    status: "unhealthy", failures: 6, failureKind: "upstream",
+    lastError: "工作区鉴权探活返回 HTTP 429",
+    cooldownUntil: new Date(Date.now() + 3600000).toISOString(),
+    quota: { org: "org", credits: { total: 100, used: 95, freeze: 0 }, syncedAt: new Date().toISOString() },
+    quotaSync: { status: "ok" },
+  });
+  const restored = new Store(app.store.directory, { allowLocal: true });
+  const restarted = new Pool(restored);
+  t.after(() => restarted.stop());
+  const urls = [];
+  t.mock.method(globalThis, "fetch", async (url) => {
+    urls.push(url);
+    return url.endsWith("/v1/models") ? Response.json(modelList()) : new Response(null, { status: 404 });
+  });
+  assert.equal(restored.get(disabled.id).enabled, false);
+  assert.equal(restored.get(disabled.id).status, "pending");
+  assert.equal(restored.get(app.id).quotaProtection.reason, "low");
+  await restarted.cycle();
+  assert.equal(urls.filter((url) => url.endsWith("/v1/models")).length, 1);
+  assert.equal(restored.get(app.id).status, "healthy");
+  assert.equal(restored.get(app.id).quotaProtection.reason, "low");
+  assert.equal(restored.get(disabled.id).enabled, false);
+  assert.equal(restored.get(disabled.id).status, "pending");
+  assert.deepEqual(restarted.eligible(), []);
+});

@@ -50,6 +50,14 @@ when a newer provider cooldown was established; do not exponentially extend one
 concurrent burst into hours. A longer explicit provider deadline may extend it.
 Keep probe backoff in memory and real routing cooldown in persistent runtime.
 
+On startup, migrate only the old models-probe rate-limit signature:
+failureKind=upstream with lastError exactly "工作区鉴权探活返回 HTTP 429".
+Reset that mistaken routing cooldown and failure count, set status=pending and
+let normal automatic probes verify it. Never mark it healthy without a probe.
+Preserve manual enablement and quota suspension. Actual inference HTTP 429 and
+other saved provider cooldowns remain intact. This prevents an upgrade from
+requiring a manual probe or waiting out an old one-hour mistaken cooldown.
+
 Responses requests always use upstream `/v1/chat/completions`. Convert before
 Chat request overrides and usage-option merging. Derive session affinity and
 previews from the original semantic messages. Preserve the accepted client
@@ -131,6 +139,8 @@ failure categories, persisted cooldowns and automatic-wake throttling.
 `test/panel-rate-recovery.test.mjs` separates models-only 429 from actual
 inference 429 and proves automatic retry, stale-probe rejection, completed
 inference recovery, no throttling-driven wake and concurrent cooldown coalescing.
+Also cover reload of legacy models-only 429 state: automatic recovery without a
+manual probe, preserved true HTTP cooldowns, manual disablement and quota guards.
 `test/responses.test.mjs` covers pure mappings, malformed and split SSE, tools,
 usage, limits, refusal and incomplete responses. `test/panel-responses.test.mjs`
 proves authentication/CORS, actual upstream path, overrides, accounting, retries,
