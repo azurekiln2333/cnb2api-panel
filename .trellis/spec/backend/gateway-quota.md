@@ -95,9 +95,13 @@ strictly below the threshold. Exactly ten percent is eligible under the default
 policy. Allow only bounded floating-point roundoff in percentage comparisons;
 3 total minus 2.7 used must remain eligible, while 9.9999999999 percent must not.
 Unknown, malformed, mismatched-organization or failed quota reads fail
-closed. Validate original upstream credit fields before normalization so missing
-values cannot become invented zero balances. Explicit zero and numeric strings
-are valid upstream values. Retain a previous snapshot for
+closed. Validate the total allowance and used Credits before normalization so
+missing values cannot become invented zero balances. CNB's public Swagger
+`dto.VolumeUsedResp` does not require `freeze_credit_in_milli`. Accept an omitted
+frozen-usage field as zero when the total and used values are valid. Reject an
+explicit null, negative, nonfinite or otherwise malformed frozen value. Preserve
+nonzero frozen usage in the remaining-balance calculation. Explicit zero and
+numeric strings are valid upstream values. Retain a previous snapshot for
 display after errors, but do not use it to authorize routing. A retry marked
 syncing carries previousStatus; only prior ok verification may remain eligible.
 Retain the preceding error/unverified state until a successful read.
@@ -133,7 +137,30 @@ sync retry, which respectively loses manual intent or permits unverified routing
 `test/panel-quota-protection.test.mjs` must prove routing exclusion and recovery,
 the exact threshold, frozen credits, shared organizations, synchronization errors,
 manual disablement, policy changes, migration and storage partitioning.
-`test/quota.test.mjs` rejects missing/invalid original credit fields. Browser
+`test/quota.test.mjs` rejects missing/invalid required credit fields and verifies
+the omitted-frozen-usage case against CNB's documented response shape. HTTP
+integration tests must prove that this response restores all organization
+siblings after a failed sync. Browser
 tests verify the pause/recovery state and protection settings through real APIs.
 Unrelated inference test fixtures explicitly disable quota protection rather
 than weakening its production default or inventing successful quota snapshots.
+
+## 9. Quota synchronization diagnostics
+
+The management request passes through the panel before it reaches CNB. A 502 on
+`POST /api/accounts/:id/quota` is not evidence that CNB returned HTTP 502 or that
+Cloudflare caused the failure. Upstream HTTP failures, network failures, invalid
+JSON and invalid credit values can all fail the panel operation. A proxy error
+page cannot establish whether the panel finished its upstream query.
+
+Classify failures at the quota-fetch boundary. Preserve the upstream resource
+(`quota` or `volume`) and actual HTTP status for safe diagnostics and the existing
+401/403 sibling-token fallback. Return fixed, credential-free messages for HTTP,
+timeout, transport, JSON and validation failures. Store that same safe message in
+`quotaSync.error` so an administrator can inspect it after a proxy replaces or
+loses the operation response. Never persist raw upstream bodies, arbitrary
+exception messages, tokens or network causes in account state or API errors.
+
+Keep management errors separate from inference health and cooldown. A quota
+read returning HTTP 429 must not become an inference 429 or mark workspaces
+offline. Continue the existing retry and verified-recovery policy.

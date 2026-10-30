@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { fetchQuota, normalize, render, renderLine } from '../src/quota.mjs';
+import { fetchQuota, normalize, render, renderLine, QuotaError, quotaFailure } from '../src/quota.mjs';
 
 // Real CNB shapes (trimmed to the fields the CLI reads).
 const QUOTA = {
@@ -62,6 +62,7 @@ test('fetchQuota: folds quota+volume into one snapshot', async () => {
     const s = await fetchQuota({ org: 'acme', token: 't', base });
     assert.equal(s.credits.total, 1166);
     assert.equal(s.credits.used, 85.71);
+    assert.equal(s.credits.freeze, 2.39);
     assert.equal(s.ci.used, 43480 / 3600);
   });
 });
@@ -77,17 +78,36 @@ test('fetchQuota: accepts explicit zero and numeric credit strings', async () =>
   });
 });
 
+test('fetchQuota: omitted optional frozen credits are zero without discarding real usage', async () => {
+  await withServer((kind, req, res) => {
+    res.end(JSON.stringify(kind === 'quota' ? QUOTA : { credit_in_milli: 85_710 }));
+  }, async (base) => {
+    const s = await fetchQuota({ org: 'acme', token: 't', base });
+    assert.deepEqual(s.credits, { total: 1166, used: 85.71, freeze: 0 });
+  });
+});
+
 test('fetchQuota: rejects missing or invalid credit data instead of fabricating zero', async (t) => {
   const cases = [
     ['missing allowance', {}, VOLUME],
     ['missing usage', QUOTA, { freeze_credit_in_milli: 0 }],
-    ['missing frozen usage', QUOTA, { credit_in_milli: 0 }],
+    ['empty usage', QUOTA, {}],
+    ['null quota', null, VOLUME],
+    ['array quota', [], VOLUME],
+    ['null usage', QUOTA, null],
+    ['array usage object', QUOTA, []],
+    ['scalar usage', QUOTA, 0],
     ['null allowance', { credit_in_milli: { total: null } }, VOLUME],
     ['negative allowance', { credit_in_milli: { total: -1 } }, VOLUME],
     ['blank usage', QUOTA, { ...VOLUME, credit_in_milli: ' ' }],
     ['boolean usage', QUOTA, { ...VOLUME, credit_in_milli: false }],
     ['array usage', QUOTA, { ...VOLUME, credit_in_milli: [] }],
     ['nonfinite usage', QUOTA, { ...VOLUME, credit_in_milli: 'Infinity' }],
+    ['null frozen usage', QUOTA, { ...VOLUME, freeze_credit_in_milli: null }],
+    ['blank frozen usage', QUOTA, { ...VOLUME, freeze_credit_in_milli: '' }],
+    ['boolean frozen usage', QUOTA, { ...VOLUME, freeze_credit_in_milli: false }],
+    ['array frozen usage', QUOTA, { ...VOLUME, freeze_credit_in_milli: [] }],
+    ['nonnumeric frozen usage', QUOTA, { ...VOLUME, freeze_credit_in_milli: 'unknown' }],
     ['negative frozen usage', QUOTA, { ...VOLUME, freeze_credit_in_milli: -1 }],
   ];
   for (const [name, quota, volume] of cases) await t.test(name, async () => {
@@ -98,6 +118,52 @@ test('fetchQuota: rejects missing or invalid credit data instead of fabricating 
         /invalid credit quota response/);
     });
   });
+});
+
+test('quotaFailure: preserves only safe error metadata and never arbitrary exception details', () => {
+  const secret = 'private-token-or-response';
+  for (const status of [401, 403, 404, 429, 502]) {
+    const error = new QuotaError('quota_upstream_http', {
+      resource: 'volume', status, field: secret, cause: new Error(secret),
+    });
+    const detail = quotaFailure(error);
+    assert.equal(error.status, status);
+    assert.equal(detail.status, 502);
+    assert.equal(detail.code, 'quota_upstream_http');
+    assert.match(detail.message, new RegExp(`额度用量.*HTTP ${status}`));
+    assert.ok(!JSON.stringify(error).includes(secret));
+    assert.ok(!JSON.stringify(detail).includes(secret));
+  }
+  const error = new QuotaError('quota_invalid_response', {
+    resource: secret, status: secret, field: secret, cause: secret,
+  });
+  assert.equal(error.resource, undefined);
+  assert.equal(error.status, undefined);
+  assert.equal(error.field, undefined);
+  assert.ok(!JSON.stringify(quotaFailure(error)).includes(secret));
+  const unknown = quotaFailure(Object.assign(new Error(secret), {
+    code: 'quota_upstream_http', status: 403, resource: secret,
+  }));
+  assert.equal(unknown.code, 'quota_sync_failed');
+  assert.equal(unknown.status, 502);
+  assert.ok(!JSON.stringify(unknown).includes(secret));
+});
+
+test('quotaFailure: distinguishes timeout, network, JSON and credit validation failures', () => {
+  const cases = [
+    ['quota_timeout', 504, /超时/],
+    ['quota_network', 502, /无法连接/],
+    ['quota_invalid_json', 502, /非 JSON/],
+    ['quota_invalid_response', 502, /冻结额度.*无效/],
+  ];
+  for (const [code, status, message] of cases) {
+    const detail = quotaFailure(new QuotaError(code, {
+      resource: 'volume', field: 'freeze_credit_in_milli',
+    }));
+    assert.equal(detail.code, code);
+    assert.equal(detail.status, status);
+    assert.match(detail.message, message);
+  }
 });
 
 test('fetchQuota: missing org/token fail fast with a clear message', async () => {

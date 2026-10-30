@@ -8,34 +8,106 @@
 
 const CNB_API = 'https://api.cnb.cool';
 
+const QUOTA_ERROR_CODES = new Set([
+  'quota_upstream_http', 'quota_timeout', 'quota_network',
+  'quota_invalid_json', 'quota_invalid_response',
+]);
+const CREDIT_FIELDS = new Set([
+  'credit_in_milli.total', 'credit_in_milli', 'freeze_credit_in_milli',
+]);
+
+// Keep upstream status and known response fields without retaining response
+// bodies, organization URLs, tokens or arbitrary network exception messages.
+export class QuotaError extends Error {
+  constructor(code, { resource, status, field } = {}) {
+    const safeCode = QUOTA_ERROR_CODES.has(code) ? code : 'quota_invalid_response';
+    const safeResource = resource === 'quota' || resource === 'volume' ? resource : undefined;
+    const safeStatus = Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
+    const safeField = CREDIT_FIELDS.has(field) ? field : undefined;
+    const target = safeResource || 'response';
+    const hint = safeStatus === 401 || safeStatus === 403
+      ? ' (check CNB_TOKEN and organization permissions)'
+      : safeStatus === 404 ? ' (check the org slug)' : '';
+    const messages = {
+      quota_upstream_http: `CNB charge ${target} returned HTTP ${safeStatus || 'error'}${hint}`,
+      quota_timeout: `CNB charge ${target} request timed out`,
+      quota_network: `CNB charge ${target} request failed`,
+      quota_invalid_json: `CNB charge ${target} returned invalid JSON`,
+      quota_invalid_response: `invalid credit quota response${safeField ? `: ${safeField}` : ''}`,
+    };
+    super(messages[safeCode]);
+    this.name = 'QuotaError';
+    this.code = safeCode;
+    if (safeResource) this.resource = safeResource;
+    if (safeStatus) this.status = safeStatus;
+    if (safeField) this.field = safeField;
+  }
+}
+
+// The management API persists this projection even if a reverse proxy replaces
+// its HTTP error response. Never derive public text from arbitrary error text.
+export function quotaFailure(error) {
+  const fallback = {
+    code: 'quota_sync_failed',
+    message: '额度同步失败，请检查令牌权限和面板网络连接',
+    status: 502,
+  };
+  if (!(error instanceof QuotaError) || !QUOTA_ERROR_CODES.has(error.code)) return fallback;
+  const resource = error.resource === 'quota' ? '额度上限' : error.resource === 'volume' ? '额度用量' : '额度';
+  const field = {
+    'credit_in_milli.total': '总额度',
+    credit_in_milli: '已用额度',
+    freeze_credit_in_milli: '冻结额度',
+  }[error.field];
+  let message;
+  switch (error.code) {
+    case 'quota_upstream_http': {
+      const status = Number.isInteger(error.status) && error.status >= 100 && error.status <= 599
+        ? ` HTTP ${error.status}` : '错误状态';
+      const hint = error.status === 401 || error.status === 403
+        ? '，请检查令牌权限' : error.status === 404 ? '，请检查组织路径' : '';
+      message = `额度同步失败：CNB ${resource}接口返回${status}${hint}`;
+      break;
+    }
+    case 'quota_timeout': message = `额度同步失败：请求 CNB ${resource}接口超时`; break;
+    case 'quota_network': message = `额度同步失败：面板无法连接 CNB ${resource}接口`; break;
+    case 'quota_invalid_json': message = `额度同步失败：CNB ${resource}接口返回非 JSON 数据`; break;
+    case 'quota_invalid_response': message = `额度同步失败：CNB ${field || resource}数据缺失或无效`; break;
+  }
+  return { code: error.code, message, status: error.code === 'quota_timeout' ? 504 : 502 };
+}
+
 // ---- fetch --------------------------------------------------------------
 
 // Read one charge sub-resource. Returns parsed JSON or throws a message that is
 // already human-readable (no stack noise) — the CLI prints it verbatim.
 async function getCharge(base, org, token, kind, timeoutMs) {
   const url = `${base}/${org}/-/charge/${kind}`;
+  const signal = AbortSignal.timeout(timeoutMs);
   let r;
   try {
     r = await fetch(url, {
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal,
     });
-  } catch (e) {
-    const why = e.name === 'TimeoutError' ? `timed out after ${timeoutMs}ms` : (e.cause || e).toString();
-    throw new Error(`request to /${org}/-/charge/${kind} failed: ${why}`);
+  } catch {
+    throw new QuotaError(signal.aborted ? 'quota_timeout' : 'quota_network', { resource: kind });
   }
   if (!r.ok) {
-    const body = (await r.text().catch(() => '')).slice(0, 200);
-    const hint = r.status === 401 || r.status === 403
-      ? ' (check CNB_TOKEN and that it can read this org)'
-      : r.status === 404 ? ' (check the org slug)' : '';
-    throw new Error(`/${org}/-/charge/${kind} → HTTP ${r.status}${hint}${body ? `: ${body}` : ''}`);
+    r.body?.cancel().catch(() => {});
+    throw new QuotaError('quota_upstream_http', { resource: kind, status: r.status });
   }
-  return r.json();
+  try {
+    return await r.json();
+  } catch (error) {
+    const code = signal.aborted ? 'quota_timeout'
+      : error instanceof SyntaxError ? 'quota_invalid_json' : 'quota_network';
+    throw new QuotaError(code, { resource: kind });
+  }
 }
 
 // Fetch both endpoints concurrently and fold them into a flat, unit-normalized
-// snapshot. `opts` lets tests inject { base, fetchImpl } without a network.
+// snapshot. Tests can override base to use an isolated local HTTP server.
 export async function fetchQuota({ org, token, timeoutMs = 15_000, base = CNB_API } = {}) {
   if (!org) throw new Error('org slug is required (CNB_REPO_SLUG=org/repo or --org)');
   if (!token) throw new Error('CNB_TOKEN is required to read charge quota');
@@ -46,10 +118,15 @@ export async function fetchQuota({ org, token, timeoutMs = 15_000, base = CNB_AP
   const creditNumber = (value) =>
     (typeof value === 'number' || typeof value === 'string' && value.trim()) &&
     Number.isFinite(Number(value)) && Number(value) >= 0;
-  if (!creditNumber(quota?.credit_in_milli?.total) ||
-      !creditNumber(volume?.credit_in_milli) ||
-      !creditNumber(volume?.freeze_credit_in_milli))
-    throw new Error('invalid credit quota response');
+  const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (!object(quota) || !object(quota.credit_in_milli) || !creditNumber(quota.credit_in_milli.total))
+    throw new QuotaError('quota_invalid_response', { resource: 'quota', field: 'credit_in_milli.total' });
+  if (!object(volume) || !creditNumber(volume.credit_in_milli))
+    throw new QuotaError('quota_invalid_response', { resource: 'volume', field: 'credit_in_milli' });
+  // CNB's VolumeUsedResp permits an omitted frozen-Credits field. Only omission
+  // represents zero: explicit null, negative and malformed values stay invalid.
+  if (Object.hasOwn(volume, 'freeze_credit_in_milli') && !creditNumber(volume.freeze_credit_in_milli))
+    throw new QuotaError('quota_invalid_response', { resource: 'volume', field: 'freeze_credit_in_milli' });
   return normalize(org, quota, volume);
 }
 

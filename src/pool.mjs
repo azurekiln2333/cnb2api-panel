@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { fetchQuota } from "./quota.mjs";
+import { fetchQuota, QuotaError, quotaFailure } from "./quota.mjs";
 import { quotaCreditValues } from "./quota-protection.mjs";
 import { InputError, normalizeEndpoint, publicAccount } from "./store.mjs";
 import { emptyTokenUsage, TokenUsageCapture } from "./token-usage.mjs";
@@ -658,7 +658,7 @@ export class Pool {
         break;
       }
       if (quota?.org !== org || !quotaCreditValues(quota))
-        throw new Error("invalid quota response");
+        throw new QuotaError("quota_invalid_response");
       this.quotaPreferred.set(org, currentSource.id);
       const syncedAt = new Date(this.quotaNow()).toISOString();
       patchOrg({
@@ -673,7 +673,7 @@ export class Pool {
         },
       });
       return quota;
-    } catch {
+    } catch (error) {
       if (!sourceIsCurrent()) {
         patchOrg(
           { quotaSync: null },
@@ -692,18 +692,18 @@ export class Pool {
         15 * 60000,
         Math.max(this.quotaIntervalMs, (previousDelay || 0) * 2),
       );
+      const failure = quotaFailure(error);
       patchOrg({
         quotaSync: {
           status: "error",
           lastAttemptAt,
           nextAttemptAt: new Date(this.quotaNow() + retryDelay).toISOString(),
-          error: "额度同步失败，请检查个人令牌的组织计费读取权限或网络连接",
+          error: failure.message,
         },
       });
-      throw new InputError(
-        "额度同步失败，请检查个人令牌的组织计费读取权限或网络连接",
-        502,
-      );
+      const responseError = new InputError(failure.message, failure.status);
+      responseError.code = failure.code;
+      throw responseError;
     } finally {
       this.releaseQuotaSlot();
     }
