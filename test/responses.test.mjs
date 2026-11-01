@@ -419,8 +419,55 @@ test("emits refusal and incomplete stream events and permits terminal EOF withou
   assert.equal(events.at(-1).response.incomplete_details.reason, "content_filter");
 });
 
+test("finishes a stream whose [DONE] arrives without a finish_reason block", () => {
+  const stream = new ResponsesStream();
+  const frames = stream.push(Buffer.from(frame(chunk({ role: "assistant", content: "early" })) + "data: [DONE]\n\n"));
+  frames.push(...stream.finish());
+  const events = parsed(frames);
+  assert.equal(events.at(-1).type, "response.completed");
+  assert.equal(events.at(-1).response.output[0].content[0].text, "early");
+  assert.equal(events.filter((event) => event.type === "response.completed").length, 1);
+});
+
+test("begin() exposes response.created before any upstream byte arrives", () => {
+  const stream = new ResponsesStream({ requestId: "early-id" });
+  const events = parsed(stream.begin());
+  assert.deepEqual(events.map((event) => event.type), ["response.created", "response.in_progress"]);
+  assert.equal(events[0].response.id, "resp_early-id");
+  assert.deepEqual(parsed(stream.begin()), []);
+  const frames = stream.push(Buffer.from(frame(chunk({ content: "x" }, "stop"))));
+  frames.push(...stream.finish());
+  const all = parsed(frames);
+  assert.deepEqual(all.map((event) => event.sequence_number), all.map((_event, index) => index + 2));
+  assert.equal(all.filter((event) => event.type === "response.created").length, 0);
+});
+
+test("fail() closes a dropped stream with one response.failed event", () => {
+  for (const failEarly of [true, false]) {
+    const stream = new ResponsesStream({ requestId: "failed-id" });
+    const frames = [];
+    if (failEarly) frames.push(...stream.begin());
+    else frames.push(...stream.push(Buffer.from(frame(chunk({ content: "partial" })))));
+    frames.push(...stream.fail("upstream_stream_error", "upstream stream ended"));
+    const events = parsed(frames);
+    const terminal = events.at(-1);
+    assert.equal(terminal.type, "response.failed");
+    assert.equal(terminal.response.status, "failed");
+    assert.equal(terminal.response.error.code, "upstream_stream_error");
+    assert.equal(terminal.response.error.message, "upstream stream ended");
+    assert.equal(terminal.response.object, "response");
+    assert.deepEqual(terminal.response.usage, null);
+    assert.deepEqual(events.map((event) => event.sequence_number), events.map((_event, index) => index));
+    // Terminal events are emitted once, and a failed stream stops consuming input.
+    assert.deepEqual(parsed(stream.fail("upstream_stream_error", "again")), []);
+    assert.deepEqual(parsed(stream.push(Buffer.from(frame(chunk({ content: "late" }, "stop"))))), []);
+    assert.deepEqual(parsed(stream.finish()), []);
+  }
+});
+
 test("rejects truncated/malformed streams, upstream errors and oversized events", () => {
-  for (const source of [frame(chunk({ content: "partial" })), frame(chunk({}, "tool_calls")), frame(chunk({ role: "user" }, "stop")), "data: [DONE]\n\n", "data: {bad}\n\n", frame({ error: { message: "private" } }), frame(chunk({}, "stop")) + "data: {truncated"]) {
+  // An upstream that closes without any text still terminates as an empty answer.
+  for (const source of [frame(chunk({}, "tool_calls")), frame(chunk({ role: "user" }, "stop")), "data: {bad}\n\n", frame({ error: { message: "private" } }), frame(chunk({}, "stop")) + "data: {truncated"]) {
     assert.throws(() => {
       const stream = new ResponsesStream();
       stream.push(Buffer.from(source));

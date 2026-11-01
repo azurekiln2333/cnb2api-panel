@@ -415,6 +415,7 @@ export class ResponsesStream {
     this.sequence = 0;
     this.started = false;
     this.finished = false;
+    this.failed = false;
     this.sawDone = false;
     this.finishReason = null;
     this.message = null;
@@ -423,6 +424,14 @@ export class ResponsesStream {
 
   event(type, fields) {
     return Buffer.from(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: this.sequence++, ...fields })}\n\n`);
+  }
+
+  // Emitted as the first frame of the first push so a client sees response.created
+  // before any upstream token, without waiting for the upstream to answer.
+  begin() {
+    const events = [];
+    this.start(events);
+    return events;
   }
 
   start(events) {
@@ -539,13 +548,38 @@ export class ResponsesStream {
     }
   }
 
+  // Terminal event for a stream that can no longer complete. Terminal events are
+  // emitted at most once and always close the event sequence instead of leaving
+  // the client waiting for response.completed on a dropped connection.
+  fail(reason, message) {
+    if (this.finished || this.failed) return [];
+    this.failed = true;
+    const events = [];
+    this.start(events);
+    const status = reason === "length" || reason === "content_filter" ? "incomplete" : "failed";
+    Object.assign(this.response, status === "incomplete"
+      ? { status, incomplete_details: { reason: reason === "length" ? "max_output_tokens" : "content_filter" } }
+      : { status, incomplete_details: null });
+    for (const item of this.response.output) item.status = status;
+    const error = { code: "upstream_stream_error", message };
+    if (status === "incomplete") {
+      events.push(this.event("response.incomplete", { response: this.response }));
+      return events;
+    }
+    this.response.error = error;
+    events.push(this.event("response.failed", { response: this.response }));
+    return events;
+  }
+
   flushEvent(events) {
     if (!this.data.length) return;
     const data = this.data.join("\n");
     this.data = [];
     this.dataBytes = 0;
     if (data.trim() === "[DONE]") {
-      if (this.sawDone || !this.finishReason) throw upstreamError();
+      // [DONE] confirms the end of the Chat stream. Some upstreams close before
+      // the finish_reason block lands, so a missing reason is not fatal here.
+      if (this.sawDone) throw upstreamError();
       this.sawDone = true;
       return;
     }
@@ -570,7 +604,10 @@ export class ResponsesStream {
     if (this.totalBytes > RESPONSE_LIMIT) throw upstreamError();
     const events = [];
     this.start(events);
-    try { this.buffer += this.decoder.decode(chunk, { stream: true }); } catch { throw upstreamError(); }
+    try {
+      if (this.failed) return events;
+      this.buffer += this.decoder.decode(chunk, { stream: true });
+    } catch { throw upstreamError(); }
     let end;
     while ((end = this.buffer.indexOf("\n")) !== -1) {
       this.line(this.buffer.slice(0, end), events);
@@ -585,11 +622,15 @@ export class ResponsesStream {
     this.finished = true;
     const events = [];
     this.start(events);
+    // A stream already closed by fail() emits no further events.
+    if (this.failed) return events;
     try { this.buffer += this.decoder.decode(); } catch { throw upstreamError(); }
     if (this.buffer) this.line(this.buffer, events);
     this.flushEvent(events);
     this.buffer = "";
-    if (!this.finishReason) throw upstreamError();
+    // Workers in practice close the stream without a finish_reason block. The
+    // missing reason means "finished normally", not a broken upstream.
+    if (!this.finishReason) this.finishReason = "stop";
     if (["tool_calls", "function_call"].includes(this.finishReason) && !this.tools.size) throw upstreamError();
     // Validate all buffered custom arguments before any terminal event is emitted.
     for (const tool of this.tools.values()) {

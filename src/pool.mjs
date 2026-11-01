@@ -982,6 +982,14 @@ export class Pool {
     let usageCapture = null;
     let usageComplete = false;
     let failureMessage = "没有可用账号，请检查工作区状态、模型范围或冷却时间";
+    // Declared outside the attempt loop so the catch handler can still terminate
+    // an Responses stream that already sent headers.
+    let convertStream = false;
+    let converter = null;
+    let responsesTerminated = false;
+    // Assigned inside the attempt loop; the catch handler reuses it to terminate
+    // an already-streaming Responses response.
+    let emit = null;
     try {
       if (Buffer.byteLength(requestBody, "utf8") > MAX_REQUEST_BYTES) {
         finalStatus = 413;
@@ -1070,8 +1078,9 @@ export class Pool {
               upstreamPath,
             );
           const convert = responses && response.ok;
-          const convertStream = convert && payload.stream === true;
-          const converter = convertStream ? new ResponsesStream({ model: payload.model, requestId, toolContext: prepared.toolContext }) : null;
+          convertStream = convert && payload.stream === true;
+          converter = convertStream ? new ResponsesStream({ model: payload.model, requestId, toolContext: prepared.toolContext }) : null;
+          responsesTerminated = false;
           const replyHeaders = {
             "Content-Type":
               convert ? (convertStream ? "text/event-stream" : "application/json") :
@@ -1084,7 +1093,10 @@ export class Pool {
               : {}),
           };
           if (!convert || convertStream) res.writeHead(response.status, replyHeaders);
-          const emit = async (value) => {
+          // Tracks whether the client stream already carries a terminal Responses
+          // event. A converter failure after this point must still terminate the
+          // stream explicitly instead of destroying the socket.
+          emit = async (value) => {
             const writable = res.write(value);
             firstByteMs ??= Date.now() - started;
             responseBytes += Buffer.byteLength(value);
@@ -1123,7 +1135,10 @@ export class Pool {
             return;
           }
           if (converter) {
+            // A worker can drop the stream without a finish_reason block. Emit a
+            // terminal event either way so the client never waits for one.
             for (const frame of converter.finish()) await emit(frame);
+            responsesTerminated = true;
           } else if (convert) {
             const converted = toResponsesResponse(
               JSON.parse(Buffer.concat(chunks, bufferedBytes).toString("utf8")),
@@ -1152,7 +1167,16 @@ export class Pool {
           await this.confirmConnectionFailure(source).catch(() => {});
           this.affinity.forget(affinityKey, account.id);
           if (res.headersSent) {
-            res.destroy();
+            // The relay is already streaming, so a socket reset would look like a
+            // client transport error. Terminate the Responses event sequence with
+            // an explicit failure instead.
+            if (convertStream && !responsesTerminated && converter && emit) {
+              try {
+                for (const frame of converter.fail("error", failureMessage)) await emit(frame);
+                responsesTerminated = true;
+              } catch { /* the client is already gone */ }
+            }
+            if (!res.destroyed) res.end();
             return;
           }
         } finally {

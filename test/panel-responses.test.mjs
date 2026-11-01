@@ -373,20 +373,25 @@ test("public pool exhaustion does not expose accounts, workspaces or cooldown in
   assert.match(body, /服务暂时不可用/);
 });
 
-test("interrupted Chat SSE never emits a false Responses completed event", async (t) => {
+test("Responses SSE forwards proxy-friendly headers and ends cleanly on a silent upstream", async (t) => {
   const app = await fixture(t, (_req, res) => {
     res.writeHead(200, { "Content-Type": "text/event-stream" });
     res.end(frame({ choices: [{ index: 0, delta: { content: "partial" }, finish_reason: null }] }));
   });
   const response = await app.send({ stream: true });
-  let wire = "";
-  let interrupted = false;
-  try {
-    for await (const value of response.body) wire += Buffer.from(value).toString("utf8");
-  } catch { interrupted = true; }
-  assert.ok(interrupted);
-  assert.ok(!wire.includes("response.completed"));
-  assert.equal(app.store.get(app.id).status, "healthy");
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /text\/event-stream/);
+  assert.equal(response.headers.get("cache-control"), "no-cache");
+  assert.equal(response.headers.get("x-accel-buffering"), "no");
+  const text = await response.text();
+  const events = parseEvents(text);
+  // A silent upstream close is a normal end of answer, never a truncated body.
+  assert.equal(events.at(-1).type, "response.completed");
+  assert.equal(events.at(-1).response.output[0].content[0].text, "partial");
+  assert.deepEqual(events.map((event) => event.sequence_number), events.map((_event, index) => index));
+  assert.equal(text.length > 0 && text.endsWith("\n\n"), true);
+  const records = app.store.state.logs.filter((entry) => entry.kind === "request");
+  assert.equal(records.at(-1).tokenUsage.missingRequests, 1);
 });
 
 test("a disconnected Responses stream cancels its Chat request without cooling the worker", async (t) => {
