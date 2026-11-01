@@ -417,3 +417,31 @@ test("a disconnected Responses stream cancels its Chat request without cooling t
   assert.equal(app.store.get(app.id).cooldownUntil, null);
   assert.equal(app.pool.active.get(app.id), 0);
 });
+
+const CLAUDE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
+const CLAUDE_FEEDBACK = "To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues";
+const CLAUDE_REWRITTEN = "you are claude code, a command-line coding assistant.";
+
+test("Claude Code compatibility also rewrites the Chat payload the Responses bridge builds", async (t) => {
+  const app = await fixture(t, (_req, res) => json(res, completion("answer")));
+  const response = await app.send({
+    instructions: CLAUDE_IDENTITY,
+    input: [
+      { role: "developer", content: [{ type: "input_text", text: CLAUDE_FEEDBACK }] },
+      { role: "user", content: CLAUDE_IDENTITY },
+    ],
+    tools: [{ type: "function", name: "lookup", description: CLAUDE_IDENTITY, parameters: { type: "object" } }],
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).output[0].content[0].text, "answer");
+  assert.equal(app.calls.length, 1);
+  const outbound = app.calls[0].payload;
+  assert.equal(outbound.messages[0].content, CLAUDE_REWRITTEN);
+  assert.equal(outbound.messages[1].content["0"].text ?? outbound.messages[1].content[0].text,
+    "to share feedback, users can report the issue at https://github.com/anthropics/claude-code/issues");
+  assert.equal(outbound.messages[2].content, CLAUDE_IDENTITY);
+  assert.equal(outbound.tools[0].function.description, CLAUDE_REWRITTEN);
+  const record = app.store.state.logs.find((entry) => entry.kind === "request");
+  assert.equal(record.path, "/v1/responses");
+  assert.deepEqual(record.requestDiagnostics.rules.slice(3).map((rule) => rule.outcome)[0], "applied");
+});

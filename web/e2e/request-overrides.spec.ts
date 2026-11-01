@@ -6,7 +6,7 @@ async function login(page: Page) {
   await page.goto('/')
   await page.getByLabel('管理密钥', { exact: true }).fill(ADMIN)
   await page.getByRole('button', { name: '进入控制台' }).click()
-  await expect(page.getByRole('link', { name: '路由策略', exact: true })).toBeVisible()
+  await expect(page.getByRole('link', { name: '网关设置', exact: true })).toBeVisible()
 }
 
 test('override drafts validate locally and survive save, refresh and reload', async ({ page }) => {
@@ -41,7 +41,7 @@ test('override drafts validate locally and survive save, refresh and reload', as
   })
 
   await login(page)
-  await page.getByRole('link', { name: '路由策略', exact: true }).click()
+  await page.getByRole('link', { name: '网关设置', exact: true }).click()
   const preset = page.getByRole('checkbox', { name: /CNB \/ DSH 兼容预设/ })
   const overrides = page.getByLabel('参数覆盖', { exact: true })
   const headers = page.getByLabel('请求头覆盖', { exact: true })
@@ -293,7 +293,7 @@ test('override settings round-trip through the management API', async ({ page })
   const rules = { operations: [{ mode: 'set', path: 'temperature', value: 0.4 }] }
   const headers = { 'user-agent': 'browser-test-client' }
   try {
-    await page.getByRole('link', { name: '路由策略', exact: true }).click()
+    await page.getByRole('link', { name: '网关设置', exact: true }).click()
     const preset = page.getByRole('checkbox', { name: /CNB \/ DSH 兼容预设/ })
     const operations = page.getByLabel('参数覆盖', { exact: true })
     const headerInput = page.getByLabel('请求头覆盖', { exact: true })

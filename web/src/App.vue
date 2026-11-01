@@ -98,7 +98,7 @@ const nav = [
   { id: 'overview', label: '运行概览', icon: LayoutDashboard },
   { id: 'accounts', label: '账号管理', icon: UsersRound },
   { id: 'models', label: '模型列表', icon: Layers },
-  { id: 'routing', label: '路由策略', icon: Waypoints },
+  { id: 'routing', label: '网关设置', icon: Waypoints },
   { id: 'activity', label: '请求日志', icon: ScrollText },
   { id: 'audit', label: '审计日志', icon: ShieldCheck },
   { id: 'system', label: '运行事件', icon: Cloud },

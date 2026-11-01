@@ -402,3 +402,105 @@ test("rule diagnostics are bounded and hide arbitrary path parts, names and valu
     name: "invalid_overrides", mode: "invalid", path: "", outcome: "skipped",
   });
 });
+
+const MESSAGES = "/v1/messages";
+const CLAUDE_BILLING = "x-anthropic-billing-header: cc_version=2.1.212.3f4; cc_entrypoint=sdk-cli;";
+const CLAUDE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
+const CLAUDE_FEEDBACK = "To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues";
+const claudeCodeChat = () => ({
+  model: "test-model",
+  messages: [
+    { role: "system", content: `${CLAUDE_BILLING}\n${CLAUDE_IDENTITY}\n${CLAUDE_FEEDBACK}` },
+    { role: "developer", content: [
+      { type: "text", text: CLAUDE_IDENTITY },
+      { type: "input_text", text: CLAUDE_FEEDBACK },
+      { type: "image_url", image_url: { url: `data:image/png;base64,${CLAUDE_IDENTITY}` } },
+    ] },
+    { role: "user", content: `${CLAUDE_IDENTITY} private-user` },
+    { role: "assistant", content: CLAUDE_IDENTITY },
+    { role: "tool", content: CLAUDE_IDENTITY },
+  ],
+  tools: [
+    { type: "function", function: { name: "Read", description: `read ${CLAUDE_IDENTITY}`, parameters: { type: "object" } } },
+    { type: "function", function: { name: "Edit", description: "neutral description", parameters: { type: "object" } } },
+  ],
+});
+
+test("Claude Code compatibility rewrites Chat system and developer text from the New API route", () => {
+  const input = claudeCodeChat();
+  const original = structuredClone(input);
+  const { payload, rules } = rewriteRequest(input, { claudeCodeCompat: true }, CHAT);
+  assert.equal(payload.messages[0].role, "system");
+  assert.equal(
+    payload.messages[0].content,
+    "x-cc-billing-meta: cc_version=2.1.212.3f4; cc_entrypoint=sdk-cli;\n"
+      + "you are claude code, a command-line coding assistant.\n"
+      + "to share feedback, users can report the issue at https://github.com/anthropics/claude-code/issues",
+  );
+  assert.deepEqual(payload.messages[1].content, [
+    { type: "text", text: "you are claude code, a command-line coding assistant." },
+    { type: "input_text", text: "to share feedback, users can report the issue at https://github.com/anthropics/claude-code/issues" },
+    { type: "image_url", image_url: { url: `data:image/png;base64,${CLAUDE_IDENTITY}` } },
+  ]);
+  // User, assistant and tool text keeps its original bytes.
+  assert.deepEqual(payload.messages.slice(2), original.messages.slice(2));
+  assert.equal(payload.tools[0].function.description, "read you are claude code, a command-line coding assistant.");
+  assert.equal(payload.tools[1].function.description, "neutral description");
+  assert.deepEqual(input, original);
+  assert.deepEqual(rules.slice(3).map((rule) => [rule.name, rule.outcome, rule.count]), [
+    ["claude_code_text", "applied", 6],
+    ["claude_code_text", "applied", 6],
+    ["claude_code_fields", "unmatched", 0],
+  ]);
+  assert.equal(rewriteRequest(claudeCodeChat(), { claudeCodeCompat: true }, "/v1/messages/count_tokens")
+    .rules[3].outcome, "skipped");
+});
+
+test("Claude Code compatibility leaves DSH rewrites and their order untouched", () => {
+  const identity = "You are an AI agent powered by DeepSeek Harness.";
+  const input = { messages: [
+    { role: "developer", content: identity },
+    { role: "assistant", content: `Before. ${identity}` },
+    { role: "user", content: CLAUDE_IDENTITY },
+  ] };
+  const both = rewriteRequest(input, { dshCompat: true, claudeCodeCompat: true }, CHAT);
+  const dshOnly = rewriteRequest(input, { dshCompat: true, claudeCodeCompat: false }, CHAT);
+  assert.deepEqual(both.payload, dshOnly.payload);
+  assert.deepEqual(both.payload.messages.map((message) => message.role), ["system", "assistant", "user"]);
+  assert.equal(both.payload.messages[0].content, "You are an AI assistant.");
+  assert.equal(both.payload.messages[1].content, "Before. You are an AI assistant.");
+  assert.equal(both.payload.messages[2].content, CLAUDE_IDENTITY);
+  assert.deepEqual(both.rules.slice(0, 3), dshOnly.rules.slice(0, 3));
+  assert.deepEqual(both.rules.slice(3).map((rule) => rule.outcome), ["unmatched", "unmatched", "unmatched"]);
+});
+
+test("disabling Claude Code compatibility keeps Chat and Messages untouched", () => {
+  const chat = claudeCodeChat();
+  const originalChat = structuredClone(chat);
+  const chatResult = rewriteRequest(chat, { claudeCodeCompat: false }, CHAT);
+  assert.deepEqual(chatResult.payload, originalChat);
+  assert.deepEqual(chatResult.rules.slice(3).map((rule) => rule.outcome), ["skipped", "skipped", "skipped"]);
+  // The preset is off by default when the caller omits the setting.
+  assert.deepEqual(rewriteRequest(claudeCodeChat(), {}, CHAT).payload, originalChat);
+  const messages = { max_tokens: 10, system: CLAUDE_IDENTITY, thinking: { type: "enabled" },
+    messages: [{ role: "user", content: CLAUDE_IDENTITY }] };
+  const messagesResult = rewriteRequest(messages, { claudeCodeCompat: false }, MESSAGES);
+  assert.deepEqual(messagesResult.payload, messages);
+  assert.deepEqual(messagesResult.rules.slice(3).map((rule) => rule.outcome), ["skipped", "skipped", "skipped"]);
+});
+
+test("Claude Code Messages preset keeps its existing behaviour", () => {
+  const input = { max_tokens: 10, system: CLAUDE_IDENTITY, thinking: { type: "enabled" },
+    messages: [
+      { role: "assistant", content: [{ type: "text", text: CLAUDE_IDENTITY }] },
+      { role: "user", content: [{ type: "text", text: CLAUDE_IDENTITY }] },
+    ] };
+  const { payload, rules } = rewriteRequest(input, { claudeCodeCompat: true }, MESSAGES);
+  assert.equal(payload.system, "you are claude code, a command-line coding assistant.");
+  assert.equal(payload.thinking, undefined);
+  assert.equal(payload.messages[0].content[0].text, "you are claude code, a command-line coding assistant.");
+  assert.equal(payload.messages[1].content[0].text, CLAUDE_IDENTITY);
+  assert.deepEqual(rules.slice(3).map((rule) => [rule.outcome, rule.count]), [
+    ["applied", 2], ["applied", 2], ["applied", 1],
+  ]);
+});

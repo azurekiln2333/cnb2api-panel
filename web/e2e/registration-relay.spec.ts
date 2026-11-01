@@ -53,7 +53,7 @@ async function openRouting(page: Page) {
   await page.goto('/')
   await page.getByLabel('管理密钥', { exact: true }).fill(ADMIN)
   await page.getByRole('button', { name: '进入控制台' }).click()
-  await page.getByRole('link', { name: '路由策略', exact: true }).click()
+  await page.getByRole('link', { name: '网关设置', exact: true }).click()
   await expect(page.getByRole('heading', { name: '注册联动', exact: true })).toBeVisible()
 }
 
@@ -234,7 +234,7 @@ test('relay status uses the existing session expiry flow', async ({ page }) => {
   await page.goto('/')
   await page.getByLabel('管理密钥', { exact: true }).fill(ADMIN)
   await page.getByRole('button', { name: '进入控制台' }).click()
-  await page.getByRole('link', { name: '路由策略', exact: true }).click()
+  await page.getByRole('link', { name: '网关设置', exact: true }).click()
   await expect(page.getByRole('button', { name: '进入控制台' })).toBeVisible()
-  await expect(page.getByRole('link', { name: '路由策略', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '网关设置', exact: true })).toHaveCount(0)
 })

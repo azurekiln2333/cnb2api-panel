@@ -1,12 +1,30 @@
-# Claude Code `/v1/messages` channel rejection (business code 11128)
+# Claude Code channel rejection (business code 11128)
 
-Written on November 1, 2026 by worker W-B.
+Written on November 1, 2026 by worker W-B, extended by W-B2 after live logs.
 
 ## Reported symptom
 
 Claude Code receives HTTP 400 with the message
 `Illegal API invocation from an unapproved channel`, business code `11128`.
 The reported upstream request ID is `202610311045215008185658268d9d6ZK8V1gsW`.
+
+## Live request log (November 1, 2026, confirmed)
+
+The deployed panel request log changed the earlier route assumption:
+
+- Claude Code reaches the panel as `POST /v1/chat/completions`. The New API
+  channel is an OpenAI channel and converts native Messages.
+- The log shows `dsh_roles`, `dsh_privileged_text` and `dsh_assistant_identity`
+  as unmatched, and every `claude_code_*` rule as skipped. The first preset
+  version applied only to `/v1/messages`, so the fingerprint stayed in the Chat
+  system message and the workspace rejected it.
+- The rejecting text is the sentence
+  `You are Claude Code, Anthropic's official CLI for Claude.` The same request
+  with `You are Claude Code, a command-line coding assistant.` or with the
+  sentence removed returns 200.
+
+This confirms the content-fingerprint hypothesis and rejects the header
+hypothesis. The fix has to cover the Chat route, not only `/v1/messages`.
 
 ## Confirmed facts
 
@@ -22,7 +40,10 @@ The reported upstream request ID is `202610311045215008185658268d9d6ZK8V1gsW`.
    therefore proves the classification, not the deployed rule.
 4. The workspace converts native Messages to Chat before provider dispatch
    (`../cnb2api-main/src/server.mjs`). Therefore the rejection happens at or
-   after that conversion. It cannot be a New API protocol conversion.
+   after that conversion.
+5. The live log shows New API also converts native Messages before the panel.
+   The request therefore arrives at the panel as Chat and needs the rewrite on
+   the Chat route.
 5. The workspace already rewrites three Claude Code fingerprints before
    dispatch (`../cnb2api-main/src/anthropic.mjs`): the
    `x-anthropic-billing-header` token, the "to give feedback" sentence and the
@@ -38,10 +59,10 @@ The reported upstream request ID is `202610311045215008185658268d9d6ZK8V1gsW`.
 ## Inference
 
 The evidence points at request content, not at an authenticated channel. The
-workspace forwards with its own workspace token, and no client header reaches
-the provider. A channel rule keyed on headers would therefore reject every
-request, including plain OpenAI clients, which the user does not report.
-A rule keyed on Claude Code fingerprints explains why only Claude Code fails.
+rejecting rule runs after the New API Chat conversion, on the Chat system
+message. A rule keyed on Claude Code fingerprints explains why only Claude Code
+fails, and the recorded 200 responses show the identity sentence alone decides
+the outcome.
 
 ## Unverified items
 
@@ -55,35 +76,45 @@ A rule keyed on Claude Code fingerprints explains why only Claude Code fails.
 
 ## Applied change (panel side)
 
-The panel avoids depending on one workspace version. Both panel paths send the
-same Chat payload, so the panel now removes the fingerprints it owns:
+The panel avoids depending on one workspace version. It rewrites its own
+fingerprint table on both client routes:
 
 - New `claudeCodeCompat` setting, enabled by default, independent of
-  `dshCompat`. Apply it only to native `/v1/messages`.
-- Rewrite the three fingerprints in the root `system` text, in system blocks
-  and in tool descriptions. Billing values, URLs and tool schemas survive.
-- Never rewrite user text, tool results or assistant tool input.
-- Delete the root `thinking` toggle in that preset.
+  `dshCompat`.
+- Native `/v1/messages`: rewrite the three fingerprints in the root `system`
+  text, in system blocks and in tool descriptions, and delete the root
+  `thinking` toggle.
+- `/v1/chat/completions`, including the Chat payload the Responses bridge
+  builds: rewrite the same fingerprints in `system` and `developer` message
+  content, both string content and `text`/`input_text` parts, and in
+  `tools[].function.description`.
+- Never rewrite Chat user, assistant or tool message text, and never rewrite
+  Messages tool results or assistant tool input. Billing values, URLs and tool
+  schemas survive.
 - `Pool.forward` deletes every thinking toggle from the final Chat payload for
   all routes and records a `thinking_toggle` diagnostic.
-
-The three DSH preset rules are unchanged.
+- Both text rules report as `claude_code_text`. The DSH preset keeps its three
+  rules, outcomes and order, and runs first.
 
 ## Recovery steps for the operator
 
-1. Upgrade the panel, confirm `claudeCodeCompat` is enabled, then retry Claude
-   Code.
-2. Open `/api/logs/requests/:id` for the failing request. Expect
-   `claude_code_text` and `claude_code_fields` with outcome `applied`.
-   A `skipped` outcome means the request did not take the native Messages route.
+1. Upgrade the panel and confirm `claudeCodeCompat` is enabled.
+2. Open `/api/logs/requests/:id` for the failing request. A Claude Code request
+   that arrives through New API has `path: /v1/chat/completions` and shows
+   `claude_code_text` as `applied`. A `skipped` outcome means the preset is
+   disabled or the request took another route.
 3. If the rejection persists, compare the deployed workspace
-   `src/anthropic.mjs` phrase table with the panel table. Report the request ID
-   to the provider and ask which rule rejected it.
-4. Do not change the New API channel type. The channel label does not
-   establish a protocol conversion.
+   `src/anthropic.mjs` phrase table with the panel table, then report the
+   request ID to the provider and ask which rule rejected it.
+4. Do not change the New API channel type. The recorded log already shows the
+   request arrives as Chat.
 
 ## Validation
 
-`node --test test/request-overrides.test.mjs test/panel-overrides.test.mjs`
-covers the preset, the Chat exclusion, the disable switch, persistence and the
-diagnostic rules. No live request or deployment was performed.
+`test/request-overrides.test.mjs` covers both routes: string and block
+privileged content, `function` tool descriptions, untouched user, assistant and
+tool text, an unchanged DSH-only request, the disable switch and the Messages
+behaviour. `test/panel-overrides.test.mjs` proves the native Messages route over
+HTTP. `test/panel-responses.test.mjs` proves the Chat payload the Responses
+bridge builds also carries the rewrite. `npm test` passes 419 of 419.
+No live request or deployment was performed by this worker.

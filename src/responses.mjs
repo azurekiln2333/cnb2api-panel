@@ -50,6 +50,8 @@ function content(value, field, role) {
 // Chat upstreams cannot run hosted tools. Their indexes are request-local, so
 // dropping them keeps the reported `tools.<index>.type` path aligned with tools.
 const HOSTED_TOOL_TYPES = ["web_search", "web_search_preview"];
+// Reasoning tiers understood by Chat upstreams. Other strings stay client-only.
+const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"];
 
 const toolKey = ({ type, namespace, name }) => JSON.stringify([type, namespace ?? null, name]);
 function toolReference(value, field, type = value.type) {
@@ -240,7 +242,7 @@ export function prepareResponsesRequest(payload) {
     if (!object(payload.stream_options)) invalid("stream_options");
     knownFields(payload.stream_options, ["include_obfuscation", "reasoning_summary_delivery"], "stream_options");
     if (optional(payload.stream_options.include_obfuscation) && typeof payload.stream_options.include_obfuscation !== "boolean") invalid("stream_options.include_obfuscation");
-    if (optional(payload.stream_options.reasoning_summary_delivery) && payload.stream_options.reasoning_summary_delivery !== "sequential_cutoff") invalid("stream_options.reasoning_summary_delivery");
+    if (optional(payload.stream_options.reasoning_summary_delivery) && typeof payload.stream_options.reasoning_summary_delivery !== "string") invalid("stream_options.reasoning_summary_delivery");
   }
   if (payload.max_output_tokens !== undefined && payload.max_output_tokens !== null) {
     if (!Number.isSafeInteger(payload.max_output_tokens) || payload.max_output_tokens < 1) invalid("max_output_tokens");
@@ -262,14 +264,16 @@ export function prepareResponsesRequest(payload) {
   if (payload.reasoning !== undefined && payload.reasoning !== null) {
     if (!object(payload.reasoning)) invalid("reasoning");
     knownFields(payload.reasoning, ["effort", "summary", "context"], "reasoning");
-    if (payload.reasoning.effort !== undefined) {
-      if (!["none", "minimal", "low", "medium", "high", "xhigh"].includes(payload.reasoning.effort)) invalid("reasoning.effort");
-      result.reasoning_effort = payload.reasoning.effort;
+    // Reasoning is an optional projection. Chat cannot consume opaque state, and
+    // clients add new effort tiers before this bridge learns them. Only the type
+    // is enforced; unknown string values are dropped instead of rejected.
+    if (payload.reasoning.effort !== undefined && payload.reasoning.effort !== null) {
+      const effort = string(payload.reasoning.effort, "reasoning.effort");
+      if (REASONING_EFFORTS.includes(effort)) result.reasoning_effort = effort;
     }
     // Summary is an optional projection. Chat cannot provide opaque reasoning state.
-    if (payload.reasoning.summary !== undefined && payload.reasoning.summary !== null &&
-      !["auto", "concise", "detailed"].includes(payload.reasoning.summary)) invalid("reasoning.summary");
-    if (optional(payload.reasoning.context) && !["auto", "current_turn", "all_turns"].includes(payload.reasoning.context)) invalid("reasoning.context");
+    if (optional(payload.reasoning.summary)) string(payload.reasoning.summary, "reasoning.summary");
+    if (optional(payload.reasoning.context)) string(payload.reasoning.context, "reasoning.context");
   }
   if (payload.text !== undefined && payload.text !== null) {
     if (!object(payload.text) || Object.keys(payload.text).some((key) => !["format", "verbosity"].includes(key))) invalid("text");

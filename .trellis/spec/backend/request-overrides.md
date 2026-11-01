@@ -20,14 +20,20 @@ roles to `system`. For identified DSH requests, it neutralizes selected
 system/developer identity text, brand and one reported path sentence pair.
 It replaces two exact DSH identity patterns in assistant history.
 It never changes user or tool text. Role conversion changes instruction priority.
-The separate `claudeCodeCompat` preset applies only to native `/v1/messages`.
-It rewrites three Claude Code fingerprints in the root system text, in system
-blocks and in tool descriptions: the billing header name, the feedback
-sentence and the CLI identity sentence. Billing values and URLs survive. It
-never rewrites user, tool-result or assistant tool-input text. It also drops
-the root `thinking` toggle. `Pool.forward` strips every thinking toggle from
-the final Chat payload for each route and records a `thinking_toggle`
-diagnostic. The DSH preset keeps its three rules unchanged.
+The separate `claudeCodeCompat` preset applies to native `/v1/messages` and to
+`/v1/chat/completions`, including Chat payloads the Responses bridge builds.
+New API converts native Messages into Chat, so the same fingerprints arrive on
+the Chat route. On Messages it rewrites three Claude Code fingerprints in the
+root system text, in system blocks and in tool descriptions. On Chat it rewrites
+the same fingerprints in `system` and `developer` message content, both string
+and `text`/`input_text` parts, and in `tools[].function.description`. Billing
+values and URLs survive. It never rewrites user, assistant or tool message text
+on the Chat route and never rewrites tool-result or assistant tool-input text on
+Messages. It also drops the root `thinking` toggle. `Pool.forward` strips every
+thinking toggle from the final Chat payload for each route and records a
+`thinking_toggle` diagnostic. Both text rules report as `claude_code_text` and
+the field rule as `claude_code_fields`. The DSH preset keeps its three rules,
+outcomes and order unchanged; the Claude Code entries follow them.
 Apply custom rules after both presets; preserve original input for session affinity.
 Support `set`, `copy`, `delete`, `regex_replace`, and bounded `full`, `prefix`,
 or `regex` conditions. A leading `(?i)` maps to case-insensitive matching.
@@ -62,10 +68,13 @@ all assistant/user/tool messages to remove client fingerprints.
 ## Tests Required
 
 Replay synthetic DSH strings and neutral developer roles at multiple indices.
-Replay the three Claude Code fingerprints in system, system blocks, tool
-descriptions and assistant history, and prove user and tool-result text keeps
-its original bytes. Cover regex syntax, order, size bounds, protected headers,
-retries, stream and
+Replay the three Claude Code fingerprints on both routes: Messages root system,
+system blocks and tool descriptions, plus Chat system and developer content with
+string and block content and `function` tool descriptions. Prove that Chat user,
+assistant and tool text and Messages tool results keep their original bytes,
+that a DSH-only request is unchanged with the preset on, and that
+`claudeCodeCompat=false` leaves both routes untouched. Cover regex syntax,
+order, size bounds, protected headers, retries, stream and
 non-stream paths, persistence, management authorization, and privacy. Exercise
 the workspace carrier against a local mock provider and separately verify live
 deployment before claiming end-to-end support.

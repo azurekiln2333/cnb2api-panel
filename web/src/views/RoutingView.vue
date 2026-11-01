@@ -221,8 +221,8 @@ async function save() {
   <div class="page-heading">
     <div>
       <div class="eyebrow"><span class="blue-line" />TRAFFIC CONTROL</div>
-      <h1>路由策略</h1>
-      <p>决定请求怎样进入号池，以及发生故障时如何继续。</p>
+      <h1>网关设置</h1>
+      <p>调整请求分配、兼容改写、上游请求头和注册联动。</p>
     </div>
     <button class="button primary" :disabled="!dirty || saving" @click="save">
       <LoaderCircle v-if="saving" :size="16" class="spin" /><Save v-else :size="16" />{{
@@ -426,9 +426,10 @@ async function save() {
           <span>
             <strong>Claude Code 兼容预设</strong>
             <small>
-              预设只作用于 Messages 请求。面板改写 system、工具说明和助手历史中的 Claude Code
-              特征短语，并去除思考开关。思考开关会让工作区换算力变体，
-              推理耗尽输出预算。用户消息和工具结果保持原样。
+              预设作用于 Messages 和 Chat Completions 两条路由。面板改写 system、 developer
+              消息、工具说明和助手历史中的 Claude Code
+              特征短语，并去除思考开关。思考开关会让工作区换算力变体， 推理耗尽输出预算。Chat 的
+              user、assistant 和 tool 消息保持原样。
             </small>
           </span>
         </label>

@@ -106,8 +106,10 @@ test("returns safe field paths and rejects malformed or unsupported semantic opt
   const cases = [
     [{ client_metadata: { originator: 1 } }, "client_metadata", "invalid_field"],
     [{ access_programs: { cyber: "daybreak_blue" } }, "access_programs.cyber", "unsupported_parameter"],
-    [{ reasoning: { context: "unknown" } }, "reasoning.context", "invalid_field"],
-    [{ stream_options: { reasoning_summary_delivery: "unknown" } }, "stream_options.reasoning_summary_delivery", "invalid_field"],
+    [{ reasoning: { context: 1 } }, "reasoning.context", "invalid_field"],
+    [{ reasoning: { summary: false } }, "reasoning.summary", "invalid_field"],
+    [{ reasoning: { effort: 2 } }, "reasoning.effort", "invalid_field"],
+    [{ stream_options: { reasoning_summary_delivery: 1 } }, "stream_options.reasoning_summary_delivery", "invalid_field"],
     [{ future_option: "private-value" }, "future_option", "unsupported_parameter"],
     [{ "secret/key with spaces": true }, "request", "unsupported_parameter"],
     [{ input: [{ type: "compaction", encrypted_content: "private-value" }] }, "input.0.item_type", "unsupported_parameter"],
@@ -124,6 +126,32 @@ test("returns safe field paths and rejects malformed or unsupported semantic opt
     return true;
   });
   assert.throws(() => toChatRequest({ input: "test", tools: [{ type: "code_interpreter" }] }), /does not support tools\.0\.type/);
+});
+
+test("maps known reasoning tiers and drops unknown projection strings without rejecting", () => {
+  for (const effort of ["none", "minimal", "low", "medium", "high", "xhigh"])
+    assert.equal(toChatRequest({ input: "test", reasoning: { effort } }).reasoning_effort, effort);
+  for (const effort of ["max", "ultra", "MAX", " "]) {
+    const payload = toChatRequest({ input: "test", reasoning: { effort, summary: "auto" } });
+    assert.deepEqual(payload.messages, [{ role: "user", content: "test" }]);
+    assert.equal("reasoning_effort" in payload, false);
+  }
+  // Unknown summary/context values stay accepted and are never forwarded.
+  for (const reasoning of [
+    { effort: "high", summary: "verbose", context: "unknown" },
+    { summary: "experimental" }, { context: "future_turn" },
+  ]) {
+    const payload = toChatRequest({ input: "test", reasoning });
+    assert.equal("reasoning" in payload, false);
+    assert.equal("reasoning_effort" in payload, reasoning.effort === undefined ? false : true);
+  }
+  assert.equal("reasoning_effort" in toChatRequest({ input: "test", reasoning: { effort: null } }), false);
+  const request = toChatRequest({ input: "test", stream_options: { include_obfuscation: false, reasoning_summary_delivery: "future_mode" } });
+  assert.equal("stream_options" in request, false);
+  // Non-string values stay strict.
+  for (const reasoning of [{ effort: 1 }, { effort: {} }, { summary: 1 }, { context: true }])
+    assert.throws(() => toChatRequest({ input: "test", reasoning }), (error) => error.status === 400 && error.code === "invalid_field");
+  assert.throws(() => toChatRequest({ input: "test", stream_options: { reasoning_summary_delivery: null, include_obfuscation: 1 } }), (error) => error.param === "stream_options.include_obfuscation");
 });
 
 test("drops hosted web search tools and keeps function tools executable", () => {

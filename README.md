@@ -576,7 +576,7 @@ VPS 上的旧 Python 注册服务不再是面板依赖。
 从服务器也必须预先添加账号。
 注册联动只更新工作区地址。
 
-在主服务器打开“路由策略”。
+在主服务器填写两项。
 在“注册联动”中添加服务器名称和域名。
 域名填写完整的 HTTPS 地址。
 例如 `https://panel-b.example.com`。
@@ -721,14 +721,14 @@ node scripts/smoke-codex.mjs /path/to/@openai/codex/bin/codex.js
 同优先级恢复不会抢回已切换的会话。
 面板开始发送响应后，不会重放请求。
 
-可在「路由策略」中关闭会话粘性。
+会话粘性可在「网关配置」页关闭。
 关闭后，面板逐次分配请求。
 粘性开启时，权重控制新会话数。
 单个长会话的请求量可能偏向一个账号。
 
 ## 请求覆盖与 DSH 兼容
 
-「路由策略」提供 CNB / DSH 兼容开关和请求覆盖配置。
+「网关配置」页提供 CNB / DSH 兼容开关和请求覆盖规则。
 兼容开关默认启用，也可在页面关闭。
 启用后，面板将所有 `developer` 消息转为 `system`。
 此转换可能改变指令优先级。
@@ -747,11 +747,17 @@ node scripts/smoke-codex.mjs /path/to/@openai/codex/bin/codex.js
 CNB / DSH 预设先运行，再运行自定义规则。
 
 另有独立的「Claude Code 兼容预设」，默认启用。
-该预设只作用于 Messages 请求。
-预设改写 system 文本、system 块和工具说明中的三条特征短语：
+该预设作用于 Messages 和 Chat Completions 两条路由。
+New API 的 OpenAI 渠道会把 Messages 转成 Chat 再到达面板。
+Chat 路由上，预设改写 system 和 developer 消息的内容。
+内容可以是字符串或 text 块。
+预设也改写 `tools[].function.description`。
+Messages 路由上，预设改写根级 system、system 块和工具说明。
+两条路由共用三条特征短语：
 计费头名、反馈说明和 CLI 身份句。
 计费值与 URL 原样保留。
-用户消息、工具结果和助手工具参数保持原样。
+Chat 的 user、assistant 和 tool 消息保持原样。
+Messages 的工具结果和助手工具参数保持原样。
 预设同时去除根级 `thinking` 开关。
 转发前，面板对每条路由都去除思考开关。
 请求详情为此记录 `thinking_toggle` 规则。
@@ -831,7 +837,7 @@ CNB 工作区仍以流式请求上游。
 手动停用的账号保持停用。
 额度未知、无效或同步失败时，账号暂停。
 验证成功后，账号才会恢复。
-可在“路由策略”的“额度保护”中调整配置。
+可在“网关配置”的“额度保护”区调整。
 自动保护需要可读取组织计费的个人令牌。
 
 登录后，可见页面每 15 秒刷新。

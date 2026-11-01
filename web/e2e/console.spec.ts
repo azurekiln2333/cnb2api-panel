@@ -1049,7 +1049,7 @@ test('routing changes persist and access examples match each protocol', async ({
 }) => {
   await seed(request)
   await login(page)
-  await page.getByRole('link', { name: '路由策略', exact: true }).click()
+  await page.getByRole('link', { name: '网关设置', exact: true }).click()
   await expect(page.getByRole('checkbox', { name: /会话粘性/ })).toBeChecked()
   await page.getByRole('checkbox', { name: /会话粘性/ }).uncheck()
   await page.getByRole('radio', { name: /最少连接/ }).click()
@@ -1442,7 +1442,7 @@ test('quota protection settings validate and persist the switch and threshold', 
 }) => {
   await seed(request)
   await login(page)
-  await page.getByRole('link', { name: '路由策略', exact: true }).click()
+  await page.getByRole('link', { name: '网关设置', exact: true }).click()
   const settings = page.getByTestId('quota-protection-settings')
   const enabled = settings.getByRole('checkbox', { name: /自动保护低额度账号/ })
   const threshold = settings.getByRole('spinbutton', { name: '剩余额度阈值', exact: true })

@@ -29,15 +29,22 @@ export function normalizeTokenUsage(usage) {
     usage.usage_estimated === true
   )
     return null;
-  const anthropic =
+  // One usage object can carry both field families: New API enriches a native
+  // payload with zero placeholders. Prefer the family that holds measured
+  // counters instead of letting the mere presence of a name pick the protocol.
+  const anthropicFields =
     "input_tokens" in usage ||
     "output_tokens" in usage ||
     "cache_read_input_tokens" in usage ||
     "cache_creation_input_tokens" in usage;
-  const input = count(anthropic ? usage.input_tokens : usage.prompt_tokens);
-  const output = count(
-    anthropic ? usage.output_tokens : usage.completion_tokens,
-  );
+  const openaiFields = "prompt_tokens" in usage || "completion_tokens" in usage;
+  const anthropic = anthropicFields && !openaiFields;
+  const input = anthropic
+    ? count(usage.input_tokens)
+    : first(usage.prompt_tokens, usage.input_tokens);
+  const output = anthropic
+    ? count(usage.output_tokens)
+    : first(usage.completion_tokens, usage.output_tokens);
   const cacheRead = first(
     usage.cache_read_input_tokens,
     usage.prompt_cache_hit_tokens,
@@ -53,7 +60,8 @@ export function normalizeTokenUsage(usage) {
   );
   if ([input, output, cacheRead, cacheWrite].every((n) => n === null))
     return null;
-  return { input, output, cacheRead, cacheWrite, anthropic };
+  // `anthropic` decides whether cache counters add to the input total.
+  return { input, output, cacheRead, cacheWrite, anthropic: anthropicFields };
 }
 
 // The JSON body and any single SSE event have caps. Huge content events may be
@@ -87,15 +95,24 @@ export class TokenUsageCapture {
 
   accept(value) {
     if (!value || typeof value !== "object") return;
-    const usage = normalizeTokenUsage(value.usage ?? value.message?.usage);
-    if (!usage) return;
-    this.sawUsage = true;
-    this.anthropic ||= usage.anthropic;
-    if (value.type !== "message_start" && usage.input !== null)
-      this.sawInputAfterStart = true;
-    for (const key of ["input", "output", "cacheRead", "cacheWrite"])
-      if (usage[key] !== null)
-        this.usage[key] = Math.max(this.usage[key] ?? 0, usage[key]);
+    // Billing counters can be nested beside the plain usage. Read both so a
+    // measured value inside billing_usage is not silently dropped.
+    for (const source of [
+      value.usage ?? value.message?.usage,
+      value.usage?.billing_usage,
+      value.message?.usage?.billing_usage,
+      value.billing_usage,
+    ]) {
+      const usage = normalizeTokenUsage(source);
+      if (!usage) continue;
+      this.sawUsage = true;
+      this.anthropic ||= usage.anthropic;
+      if (value.type !== "message_start" && usage.input !== null)
+        this.sawInputAfterStart = true;
+      for (const key of ["input", "output", "cacheRead", "cacheWrite"])
+        if (usage[key] !== null)
+          this.usage[key] = Math.max(this.usage[key] ?? 0, usage[key]);
+    }
   }
 
   parse(text) {

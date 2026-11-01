@@ -514,11 +514,13 @@ function neutralizePhrases(text, phrases, counts) {
   return value;
 }
 
-// Claude Code /v1/messages compatibility. The CNB workspace rejects a short,
-// fixed list of Claude Code fingerprints with business code 11128 and routes
-// thinking toggles to a variant that spends max_tokens on reasoning. Rewrite
-// the fingerprints in text the model never needs verbatim and drop those
-// toggles. User and tool values keep their original bytes.
+// Claude Code compatibility for both client routes. New API converts native
+// Messages into Chat, so the same fingerprints also arrive on
+// /v1/chat/completions. The CNB workspace rejects a short, fixed list of them
+// with business code 11128 and routes thinking toggles to a variant that spends
+// max_tokens on reasoning. Rewrite the fingerprints in text the model never
+// needs verbatim and drop those toggles. User, tool and assistant values keep
+// their original bytes.
 function claudeCodePreset(payload, enabled, path) {
   const rules = [
     { name: "claude_code_text", mode: "regex_replace", path: "system" },
@@ -526,30 +528,38 @@ function claudeCodePreset(payload, enabled, path) {
     { name: "claude_code_fields", mode: "delete", path: "thinking" },
   ];
   const skipped = () => rules.map((rule) => ({ ...rule, outcome: "skipped" }));
-  if (!enabled || path !== "/v1/messages") return skipped();
+  if (!enabled) return skipped();
+  const messages = path === "/v1/chat/completions";
+  if (!messages && path !== "/v1/messages") return skipped();
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return skipped();
   const text = [0];
   const phrases = compilePhrases(CLAUDE_CODE_PHRASES);
-  const drop = (key) => {
-    if (!Object.hasOwn(payload, key)) return false;
-    delete payload[key];
-    return true;
-  };
-  const dropped = CLAUDE_CODE_DROP_FIELDS.filter(drop).length;
   const neutralize = (owner, key) => {
     if (typeof owner?.[key] === "string") owner[key] = neutralizePhrases(owner[key], phrases, text);
   };
-  if (typeof payload.system === "string") {
-    neutralize(payload, "system");
-  } else if (Array.isArray(payload.system)) {
-    for (const block of payload.system) {
-      if (block?.type === "text") neutralize(block, "text");
-      else neutralize(block, "content");
+  if (messages) {
+    // Chat messages carry the system prompt inline. Only privileged roles keep
+    // their rewrite; user, assistant and tool content keeps its original bytes.
+    for (const message of Array.isArray(payload.messages) ? payload.messages : []) {
+      if (message?.role !== "system" && message?.role !== "developer") continue;
+      if (typeof message.content === "string") neutralize(message, "content");
+      else if (Array.isArray(message.content))
+        for (const block of message.content)
+          if (block?.type === "text" || block?.type === "input_text") neutralize(block, "text");
     }
-  }
-  if (Array.isArray(payload.tools)) for (const tool of payload.tools) neutralize(tool, "description");
-  if (Array.isArray(payload.messages)) {
-    for (const message of payload.messages) {
+    for (const tool of Array.isArray(payload.tools) ? payload.tools : [])
+      neutralize(tool?.function, "description");
+  } else {
+    if (typeof payload.system === "string") {
+      neutralize(payload, "system");
+    } else if (Array.isArray(payload.system)) {
+      for (const block of payload.system) {
+        if (block?.type === "text") neutralize(block, "text");
+        else neutralize(block, "content");
+      }
+    }
+    for (const tool of Array.isArray(payload.tools) ? payload.tools : []) neutralize(tool, "description");
+    for (const message of Array.isArray(payload.messages) ? payload.messages : []) {
       if (message?.role !== "assistant") continue;
       if (typeof message.content === "string") neutralize(message, "content");
       else if (Array.isArray(message.content))
@@ -557,6 +567,12 @@ function claudeCodePreset(payload, enabled, path) {
           if (block?.type === "text") neutralize(block, "text");
     }
   }
+  const drop = (key) => {
+    if (!Object.hasOwn(payload, key)) return false;
+    delete payload[key];
+    return true;
+  };
+  const dropped = CLAUDE_CODE_DROP_FIELDS.filter(drop).length;
   const rule = (index, count) => ({
     ...rules[index], outcome: count ? "applied" : "unmatched", count, changed: count > 0,
   });

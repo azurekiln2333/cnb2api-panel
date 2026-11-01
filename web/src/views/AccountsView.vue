@@ -651,7 +651,7 @@ async function confirm() {
         <strong>一个入口，自动找到可用账号</strong>
         <p>独立密钥注册动态域名，优先级与权重共同决定请求去向。</p>
         <button class="text-link" @click="emit('navigate', 'routing')">
-          查看路由策略<ArrowRight :size="13" />
+          查看网关设置<ArrowRight :size="13" />
         </button>
       </div>
       <span class="note-decoration">↗</span>

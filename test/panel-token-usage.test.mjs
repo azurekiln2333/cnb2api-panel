@@ -98,6 +98,71 @@ test("SSE handles arbitrary byte boundaries, CRLF and terminal events without do
   });
 });
 
+test("measured OpenAI counters survive an Anthropic zero placeholder in the same usage object", () => {
+  // New API can enrich one usage object with both field families. The zero
+  // placeholders must not shadow the real OpenAI counters.
+  for (const sse of [false, true]) {
+    const usage = {
+      input_tokens: 0,
+      output_tokens: 0,
+      prompt_tokens: 120,
+      completion_tokens: 30,
+    };
+    const body = JSON.stringify({ choices: [], usage });
+    assert.deepEqual(
+      capture(sse ? `data: ${body}\n\n` : body, { sse }),
+      {
+        ...emptyTokenUsage(),
+        input: 120,
+        output: 30,
+        total: 150,
+        reportedRequests: 1,
+      },
+      `sse=${sse}`,
+    );
+  }
+});
+
+test("billing_usage carries measured Anthropic counters when the plain usage is a placeholder", () => {
+  const stream =
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}\n\n' +
+    'event: message_delta\ndata: {"type":"message_delta","usage":{"billing_usage":{"input_tokens":6,"output_tokens":11}}}\n\n' +
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+  assert.deepEqual(capture(stream, { sse: true, path: "/v1/messages" }), {
+    ...emptyTokenUsage(),
+    input: 6,
+    output: 11,
+    total: 17,
+    reportedRequests: 1,
+  });
+});
+
+test("a measured zero output with a measured input is reported without the placeholder mark", () => {
+  // message_start proves the input count, message_delta confirms a real zero
+  // output. That pair is complete, not partial.
+  const stream =
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":0}}}\n\n' +
+    'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":0}}\n\n';
+  assert.deepEqual(capture(stream, { sse: true, path: "/v1/messages" }), {
+    ...emptyTokenUsage(),
+    input: 12,
+    output: 0,
+    total: 12,
+    reportedRequests: 1,
+  });
+});
+
+test("placeholder-only usage stays partial and never becomes a measured zero", () => {
+  const stream =
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}\n\n' +
+    'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":11}}\n\n';
+  const result = capture(stream, { sse: true, path: "/v1/messages" });
+  assert.equal(result.reportedRequests, 1);
+  assert.equal(result.partialRequests, 1);
+  assert.equal(result.output, 11);
+  assert.equal(result.input, 0);
+});
+
 test("Anthropic input includes cache read/write and legacy zero placeholders remain partial", () => {
   const full = [
     'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0,"cache_read_input_tokens":40,"cache_creation_input_tokens":20}}}\n\n',
