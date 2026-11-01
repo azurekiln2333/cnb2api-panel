@@ -20,7 +20,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
 | [Deployment](./deployment.md) | Compose naming, scoped image updates, release packaging | Implemented |
 | [Session Routing](./routing.md) | Session affinity, eligibility and bounded bindings | Implemented |
-| [Gateway Compatibility](./gateway-compatibility.md) | Probe recovery, inference deadlines and Responses-to-Chat bridge | Implemented |
+| [Gateway Compatibility](./gateway-compatibility.md) | Probe recovery, bounded inference deadlines, the three client endpoints and the Responses-to-Chat bridge | Implemented |
 | [Registration Relay](./registration-relay.md) | Durable single-hop workspace registration across panel servers | Implemented |
 | [Model Inventory](./model-inventory.md) | Observed/configured models and current routing eligibility | Implemented |
 | [Gateway Quota](./gateway-quota.md) | New API balance schema and deduplicated native CNB Credits | Implemented |

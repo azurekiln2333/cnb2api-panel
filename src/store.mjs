@@ -85,6 +85,7 @@ export const DEFAULT_SETTINGS = {
   connectTimeoutSeconds: 20,
   idleTimeoutSeconds: 300,
   dshCompat: true,
+  claudeCodeCompat: true,
   requestOverrides: { operations: [] },
   upstreamHeaders: {},
   registrationRelay: { enabled: false, servers: [] },
@@ -432,6 +433,8 @@ export class Store {
       const settings = { ...DEFAULT_SETTINGS, ...saved.settings };
       if (typeof settings.dshCompat !== "boolean")
         throw new Error("Invalid DSH compatibility setting");
+      if (typeof settings.claudeCodeCompat !== "boolean")
+        throw new Error("Invalid Claude Code compatibility setting");
       try {
         settings.requestOverrides = validateRequestOverrides(settings.requestOverrides);
         settings.upstreamHeaders = validateUpstreamHeaders(settings.upstreamHeaders);
@@ -857,6 +860,11 @@ export class Store {
       if (typeof input.dshCompat !== "boolean")
         throw new InputError("DSH 兼容开关必须为布尔值");
       next.dshCompat = input.dshCompat;
+    }
+    if (input.claudeCodeCompat !== undefined) {
+      if (typeof input.claudeCodeCompat !== "boolean")
+        throw new InputError("Claude Code 兼容开关必须为布尔值");
+      next.claudeCodeCompat = input.claudeCodeCompat;
     }
     try {
       if (input.requestOverrides !== undefined)

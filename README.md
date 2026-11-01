@@ -350,9 +350,30 @@ CodeBuddy 客户端的可选模型也不能证明接口支持。
 | 接口 | 用途 |
 |------|------|
 | `GET /v1/models` | OpenAI 格式的模型列表 |
+| `POST /v1/chat/completions` | OpenAI Chat Completions，原样转发 |
+| `POST /v1/responses` | OpenAI Responses，转换为 Chat 后转发 |
+| `POST /v1/messages` | Anthropic Messages，原样转发 |
+| `POST /v1/messages/count_tokens` | Anthropic Token 计数，原样转发 |
 | `GET /v1/quota` | CNB Credits 总额、用量、冻结量及剩余量 |
 | `GET /v1/dashboard/billing/subscription` | New API 查询额度上限 |
 | `GET /v1/dashboard/billing/usage` | New API 查询已用额度 |
+
+三个推理接口都要求网关密钥。
+`Authorization: Bearer` 和 `x-api-key` 都可以携带密钥。
+面板用账号的 `PROXY_KEY` 替换客户端凭据。
+客户端密钥不会转发给工作区。
+Messages 请求的 `anthropic-version` 会一并转发。
+客户端指定的 `anthropic-beta` 不转发。
+Chat 与 Responses 请求都强制 `stream_options.include_usage`。
+客户端无法关闭用量上报。
+`/v1/messages/count_tokens` 使用同一路径转发。
+此路径不计入 Token 消耗。
+
+上游返回的错误按调用方协议回传。
+Messages 的错误体带 `type: "error"` 外层。
+Chat 和 Responses 的错误体是 `{ error }`。
+客户端参数错误不会切换账号，也不会冷却工作区。
+没有可用账号时，三个接口都返回 503 和 `Retry-After`。
 
 两个 billing 接口也接受不带 `/v1` 的路径。
 余额来自已启用组织的额度快照。
@@ -479,8 +500,15 @@ Credits 查询和工作区唤醒需要各自的 CNB 权限。
 
 ### CNB 工作区注册
 
-CNB 端仍使用原 cnb2api 的 `.cnb.yml` 和启动脚本。
-面板不会替你修改 CNB 仓库。
+CNB 工作区需同步更新以下文件：
+
+- `.cnb.yml`
+- `deploy/start.sh`
+- `deploy/register.mjs`
+
+启动脚本先注册，再检查模型列表。
+定时任务每五分钟补注册当前地址。
+`FIXED` 留空时也会补注册。
 把以下变量填入实际导入的 `proxy.yml`。
 示例按本项目的平铺变量文件格式编写。
 
@@ -595,13 +623,20 @@ Chat 上游不检查工具语法。
 面板不保存 Responses 会话。
 客户端应提交完整历史。
 客户端应配置 `store: false`。
-面板拒绝历史响应 ID、后台任务和内置工具。
+面板拒绝历史响应 ID、后台任务和压缩请求。
+面板丢弃内置联网工具 `web_search` 和 `web_search_preview`。
+函数工具、命名空间工具和自定义工具照常转发。
+丢弃内置联网工具后，其余工具顺序保持不变。
+面板不接受由此产生的联网调用。
+Codex 仍建议关闭内置联网，见下节。
 面板不会生成加密推理内容。
 面板忽略历史中的推理投影。
 面板保留历史中的消息和工具结果。
 推理能力仍取决于工作区和模型。
 
 Codex 使用 Chat 上游时，关闭内置联网。
+面板会丢弃内置联网工具，但联网仍不可用。
+关闭后，Codex 不再因内置联网返回错误。
 在 Codex 的 `config.toml` 中配置：
 
 ```toml
@@ -628,6 +663,10 @@ async_compaction = false
 替换面板地址和上游模型名。
 环境变量 `CNB2API_KEY` 使用网关密钥。
 此配置适用于 Codex CLI 0.164.0。
+`web_search = "disabled"` 必须写在文件根位置。
+它必须位于所有 `[表]` 之前。
+改完配置后重启 Codex。
+提供商、模型和鉴权不必改动。
 Codex 通过 HTTP 流式请求面板。
 Codex 在本地压缩历史。
 面板不实现内置联网和服务端压缩。
@@ -643,6 +682,9 @@ node scripts/smoke-codex.mjs /path/to/@openai/codex/bin/codex.js
 此检查不读取现有 Codex 配置。
 此检查验证两轮工具调用和完整历史。
 此检查使用严格的 Chat 测试上游。
+`test/panel-endpoint-matrix.test.mjs` 覆盖三个推理端点。
+矩阵用例包含带 `web_search` 工具的 Codex 请求。
+矩阵用例同时固定各端点的错误体形状。
 
 ## 请求分配与会话缓存
 
@@ -702,7 +744,18 @@ node scripts/smoke-codex.mjs /path/to/@openai/codex/bin/codex.js
 填写 `AND` 时，所有条件都须匹配。
 正则支持开头的 `(?i)` 忽略大小写标记。
 不支持的写法会在保存时拒绝。
-DSH 预设先运行，再运行自定义规则。
+CNB / DSH 预设先运行，再运行自定义规则。
+
+另有独立的「Claude Code 兼容预设」，默认启用。
+该预设只作用于 Messages 请求。
+预设改写 system 文本、system 块和工具说明中的三条特征短语：
+计费头名、反馈说明和 CLI 身份句。
+计费值与 URL 原样保留。
+用户消息、工具结果和助手工具参数保持原样。
+预设同时去除根级 `thinking` 开关。
+转发前，面板对每条路由都去除思考开关。
+请求详情为此记录 `thinking_toggle` 规则。
+关闭 DSH 预设不影响 Claude Code 预设。
 配置前，请删除 New API 中重复的改写规则。
 
 请求头覆盖只接受页面列出的非凭据请求头。
@@ -803,7 +856,7 @@ CNB 工作区仍以流式请求上游。
 持续连接失败时，面板按配置自动唤醒。
 推理返回鉴权、限流或额度错误时，账号进入冷却。
 探活接口限流只延迟下次探活。
-升级时会清除旧探活限流造成的误冷却。
+升级后自动解除旧的探活限流误冷却。
 账号随后自动探活，验证成功后恢复。
 成功请求会使旧探活失败失效。
 并发失败共用一次冷却。
@@ -1061,29 +1114,44 @@ dist/
 发布包不包含 `.env`、`data/`、`logs/` 和前端依赖。
 服务器解压后可选择 Docker 或普通 Node 启动。
 
-### GitHub 与 CNB 自动构建
+### 多平台自动构建
+
+四个平台共用 `scripts/ci-backend.sh` 和 `scripts/ci-console.sh`。
+两个脚本不读平台专用变量。
+各平台工作流只保留 Release 和镜像的适配部分。
+后端测试与控制台构建可并行运行。
 
 GitHub 使用 `.github/workflows/build-and-release.yml`。
 push 和 PR 均触发测试与构建。
-验证包括后端测试、浏览器测试和前端构建。
-验证成功后，工作流上传发布包和 `.sha256` 文件。
+`test` 与 `console` 两个 job 并行。
+验证成功后上传发布包和 `.sha256` 文件。
 从本次运行的 Artifacts 下载构建产物。
 
 CNB 使用根目录的 `.cnb.yml`。
 `main` 的 push 和 PR 运行相同验证。
 `main` 的 push 还会上传构建附件。
 从本次构建的附件下载发布包和 `.sha256` 文件。
+CNB 的 stage 串行，两个共享脚本在同一阶段依次运行。
 这里的 CNB 流水线只负责面板构建。
 工作区代理仍使用 cnb2api 仓库的配置。
 
-标签 `v*` 触发两端的 Release 工作流。
+GitLab 使用根目录的 `.gitlab-ci.yml`。
+标签 `v*` 生成 GitLab Release 并推送镜像。
+Release 资产指向 `console` job 的构建产物。
+镜像推送到项目自带的 Container Registry。
+
+标签 `v*` 触发三端的 Release 工作流。
 标签必须与 `package.json` 的版本一致。
-例如，版本 `1.0.0` 对应标签 `v1.0.0`。
-版本检查和测试通过后，两端发布 Release。
+例如，版本 `1.2.1` 对应标签 `v1.2.1`。
+版本检查和测试通过后，三端发布 Release。
 Release 包含发布包和 `.sha256` 文件。
 只推送 `main` 不会发布 Release。
 
-版本标签还会触发两端的镜像发布。
+三端各自构建，产物字节不同。
+同一版本的 SHA-256 可能互不相同。
+检查时使用随包下载的 `.sha256` 文件。
+
+版本标签还会触发三端的镜像发布。
 正式版镜像同时更新版本标签和 `latest`。
 预发布镜像只更新版本标签。
 CNB 镜像使用以下地址。
@@ -1124,17 +1192,20 @@ git push gitlab main
 同时更新 `web/package-lock.json` 的包版本。
 提交修改。
 再将 `main` 推送到三个远程。
-版本 `1.1.3` 使用以下标签。
+版本 `1.2.1` 使用以下标签。
 
 ```bash
-git tag -a v1.1.3 -m "Release v1.1.3"
-git push origin v1.1.3
-git push cnb v1.1.3
-git push gitlab v1.1.3
+git tag -a v1.2.1 -m "Release v1.2.1"
+git push origin v1.2.1
+git push cnb v1.2.1
+git push gitlab v1.2.1
 ```
 
-GitHub 和 CNB 接收标签后各自构建并发布。
-GitLab 保存相同的代码和版本标签。
+三个远程接收标签后各自构建并发布。
+镜像地址按平台分别确定。
+GitHub 使用 GHCR。
+CNB 使用 `docker.cnb.cool`。
+GitLab 使用项目自带的 Container Registry。
 
 ## 许可证
 

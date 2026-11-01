@@ -47,6 +47,10 @@ function content(value, field, role) {
   });
 }
 
+// Chat upstreams cannot run hosted tools. Their indexes are request-local, so
+// dropping them keeps the reported `tools.<index>.type` path aligned with tools.
+const HOSTED_TOOL_TYPES = ["web_search", "web_search_preview"];
+
 const toolKey = ({ type, namespace, name }) => JSON.stringify([type, namespace ?? null, name]);
 function toolReference(value, field, type = value.type) {
   const reference = { type, name: identifier(value.name, `${field}.name`) };
@@ -59,8 +63,7 @@ function toolDefinitions(tools) {
   const definitions = [];
   const add = (tool, field, namespace, namespaceDescription) => {
     if (!object(tool)) invalid(field);
-    if (["web_search", "web_search_preview"].includes(tool.type))
-      unsupported(`${field}.type`, 'Chat upstreams cannot run hosted web search. Set Codex web_search="disabled" to use this compatibility bridge');
+    if (HOSTED_TOOL_TYPES.includes(tool.type)) return;
     if (!["function", "custom"].includes(tool.type)) unsupported(`${field}.type`);
     knownFields(tool, tool.type === "function"
       ? ["type", "name", "description", "parameters", "strict", "defer_loading"]
@@ -102,6 +105,7 @@ function toolDefinitions(tools) {
     const tool = tools[index];
     const field = `tools.${index}`;
     if (!object(tool)) invalid(field);
+    if (HOSTED_TOOL_TYPES.includes(tool.type)) continue;
     if (tool.type !== "namespace") { add(tool, field); continue; }
     knownFields(tool, ["type", "name", "description", "tools"], field);
     const namespace = identifier(tool.name, `${field}.name`);

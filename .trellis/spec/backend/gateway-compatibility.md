@@ -92,11 +92,16 @@ by a complete `response.output_item.done`, which Codex needs to execute the tool
 
 Ignore echoed opaque reasoning/projection history while preserving visible
 messages and executable tool history. Never decrypt or fabricate reasoning.
-Stateful references, hosted tools, compaction and unsupported content remain
-explicit HTTP 400 errors. Hosted search errors tell Codex users to configure
-`web_search="disabled"`. Codex providers must use HTTP and local compaction
-(`supports_websockets=false`, `capabilities.remote_compaction="unsupported"`).
-Do not forward unsupported hosted tools as if the client could execute them.
+Stateful references, compaction and unsupported content remain explicit HTTP 400
+errors. Drop hosted search tools (`web_search`, `web_search_preview`) from the
+Chat request and keep the remaining function, namespace and custom tools in
+submitted order. Removal never remaps the tool-field indexes quoted in other
+validation errors, and a request without any remaining tool stays valid. A
+client that still needs hosted search must configure `web_search="disabled"` at
+the Codex root, before all TOML tables, and restart Codex. Codex providers must
+use HTTP and local compaction (`supports_websockets=false`,
+`capabilities.remote_compaction="unsupported"`). Never forward an unsupported
+hosted tool as if the client could execute it.
 
 Validation errors expose bounded safe `param` and `code` strings. Do not include
 payload values or unsafe property names. Keep unknown semantic options explicit
@@ -119,8 +124,10 @@ provider bodies or credentials.
 | Completed inference precedes an older probe timeout | Ignore stale timeout |
 | Concurrent actual inference 429 responses | One cooldown, respect Retry-After |
 | Unsupported state/hosted tool/content | HTTP 400 before account selection |
+| Hosted `web_search` / `web_search_preview` tool | Dropped, remaining tools forwarded, no 400 |
 | Malformed or interrupted Chat output | Failure, never false completion |
 | No ready account or exhausted retries | Public service-unavailable HTTP 503 |
+| Client route `/v1/messages` | Native forward, no Chat conversion |
 
 ## Good / Base / Bad Cases
 
@@ -128,8 +135,12 @@ Good: a model returns after the probe timeout but within the inference idle
 budget; the result succeeds and the account remains healthy.
 Base: a full-history Responses request reaches a Chat-only mock worker and
 returns Responses JSON/SSE with original measured usage.
+Base: a Codex turn submits `web_search` next to function tools; the worker sees
+only the function tools and the turn completes.
 Bad: mark a worker offline because generation exceeded the short probe deadline,
 or forward Responses unchanged to an unsupported upstream route.
+Bad: report the gateway as healthy for Codex while a hosted search tool still
+produces HTTP 400 before account selection.
 
 ## Tests Required
 
@@ -145,6 +156,16 @@ manual probe, preserved true HTTP cooldowns, manual disablement and quota guards
 usage, limits, refusal and incomplete responses. `test/panel-responses.test.mjs`
 proves authentication/CORS, actual upstream path, overrides, accounting, retries,
 errors and disconnect behavior over HTTP.
+
+`test/panel-endpoint-matrix.test.mjs` runs one strict mock worker behind all three
+gateway endpoints. It proves the upstream path per client route
+(`/v1/chat/completions` stays native, `/v1/responses` becomes
+`/v1/chat/completions`, `/v1/messages` and `/v1/messages/count_tokens` stay
+native), gateway-key replacement by the worker proxy key, forwarded
+`anthropic-version`, forced `stream_options.include_usage` on Chat and Responses,
+protocol-shaped 400 bodies and the public 503 shape. It also drives a Codex
+request with a hosted `web_search` tool through both JSON and streaming turns and
+asserts the Chat request keeps only function tools.
 
 Codex regression fixtures must use a strict Chat-only worker that rejects
 Responses-only root fields. Cover full-history two-turn namespace/function/custom
@@ -163,3 +184,6 @@ apply the correct connection or upstream cooldown category.
 
 Wrong: count converted Responses input tokens with Anthropic cache semantics.
 Correct: capture the raw upstream Chat usage once before conversion.
+
+Wrong: reject the whole Codex turn because one hosted tool is unsupported.
+Correct: drop the hosted tool, forward the executable tools and say so in docs.

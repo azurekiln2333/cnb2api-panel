@@ -45,6 +45,13 @@ heartbeat. A changed URI must commit the new endpoint, replace outgoing jobs
 and trigger an independent probe. A newer incoming relay revision with the same
 URI still advances the receipt without resetting routing health.
 
+Workspace startup must register before optional models diagnostics. Registration
+uses bounded header/body deadlines, verifies a structured acknowledgement and
+reports retry exhaustion. A diagnostic failure cannot stop registration under
+`set -e`. The five-minute workspace keepalive must re-register independently of
+the optional fixed domain. Prefer the newest valid URI from proxy logs when the
+current worker lookup is unavailable.
+
 Keep relay runtime in stats.json and configuration in panel.json. Store only
 references, endpoint/revision information, bounded safe outcomes and retry
 timestamps in delivery records. Read registration credentials from the existing
@@ -101,6 +108,7 @@ sync. Never retain raw peer bodies, arbitrary fetch errors or request headers.
 | Older/duplicate revision | Idempotent acknowledgement, no endpoint reset |
 | Same-URI ordinary heartbeat | Preserve health, cooldown and delivery progress |
 | Changed random URI | Persist, probe and fan out the new address |
+| Fixed domain unset or models diagnostic fails | Registration still runs |
 | Local source UUID or alias targeting self | Safe 400, preserve endpoint/outbox |
 | Re-enable peer or outgoing switch | Immediate current delivery, discard old delay |
 | Process restart | Resume current persisted pending work |
@@ -114,6 +122,9 @@ and stalled bodies. Cover atomic persistence, old-store defaults, concurrency,
 backoff/restart, stale generation/receipt protection, configuration/account
 changes, authenticated management endpoints, manual-operation audit and token
 exclusion. Avoid tests that only assert a fetch was attempted.
+Worker registration tests must execute startup/keepalive paths against strict
+local mocks, including an empty FIXED, a failed models diagnostic, the newest
+log URI, retry exhaustion, false HTTP 200 acknowledgements and stalled bodies.
 
 ## Good, base and bad cases
 

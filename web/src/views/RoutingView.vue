@@ -41,6 +41,7 @@ function normalized(settings: Settings): Settings {
     JSON.stringify({
       ...settings,
       dshCompat: settings.dshCompat ?? true,
+      claudeCodeCompat: settings.claudeCodeCompat ?? true,
       requestOverrides: settings.requestOverrides ?? { operations: [] },
       upstreamHeaders: settings.upstreamHeaders ?? {},
       registrationRelay: settings.registrationRelay ?? { enabled: false, servers: [] },
@@ -417,6 +418,17 @@ async function save() {
               标识。角色转换会改变消息优先级。检测到 DSH 标识时，预设会改写 system / developer 的
               DSH 身份、名称和路径提示。预设也会替换 assistant 历史中的两种 DSH 身份句。
               模型收到改写后的内容。用户和工具内容不变。
+            </small>
+          </span>
+        </label>
+        <label class="affinity-toggle">
+          <input v-model="form.claudeCodeCompat" type="checkbox" />
+          <span>
+            <strong>Claude Code 兼容预设</strong>
+            <small>
+              预设只作用于 Messages 请求。面板改写 system、工具说明和助手历史中的
+              Claude Code 特征短语，并去除思考开关。思考开关会让工作区换算力变体，
+              推理耗尽输出预算。用户消息和工具结果保持原样。
             </small>
           </span>
         </label>

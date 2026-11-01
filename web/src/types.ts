@@ -99,6 +99,7 @@ export interface Settings {
   connectTimeoutSeconds: number
   idleTimeoutSeconds: number
   dshCompat: boolean
+  claudeCodeCompat: boolean
   requestOverrides: { operations: Array<Record<string, unknown>> }
   upstreamHeaders: Record<string, string>
   registrationRelay: RegistrationRelayConfig

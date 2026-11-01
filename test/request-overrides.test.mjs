@@ -23,7 +23,7 @@ test("neutral developer messages are normalized independently of DSH detection",
   const result = rewriteRequest(input, settings([], true), CHAT);
   assert.deepEqual(result.payload.messages.map((message) => message.role), ["system", "user", "system"]);
   assert.equal(result.payload.messages[0].content, input.messages[0].content);
-  assert.deepEqual(result.rules.map((rule) => rule.outcome), ["applied", "unmatched", "unmatched"]);
+  assert.deepEqual(result.rules.slice(0, 3).map((rule) => rule.outcome), ["applied", "unmatched", "unmatched"]);
   assert.equal(result.rules[0].count, 2);
   assert.deepEqual(input, before);
   assert.deepEqual(rewriteRequest(input, settings([], false), CHAT).payload, input);
@@ -58,8 +58,8 @@ test("DSH identification rewrites only privileged and exact assistant text", () 
   assert.deepEqual(payload.messages[3].tool_calls, input.messages[3].tool_calls);
   assert.deepEqual(payload.messages.slice(4), input.messages.slice(4));
   assert.deepEqual(input, original);
-  assert.deepEqual(rules.map((rule) => rule.outcome), ["applied", "applied", "applied"]);
-  assert.deepEqual(rules.map((rule) => rule.count), [2, 4, 1]);
+  assert.deepEqual(rules.slice(0, 3).map((rule) => rule.outcome), ["applied", "applied", "applied"]);
+  assert.deepEqual(rules.slice(0, 3).map((rule) => rule.count), [2, 4, 1]);
   assert.ok(!JSON.stringify(rules).includes(identity));
 });
 
@@ -143,7 +143,7 @@ test("New API-style operations execute in order with role and numeric conditions
   assert.deepEqual(result.payload, {
     max_tokens: 123, messages: [{ role: "system", content: "coding assistant and coding assistant" }],
   });
-  assert.deepEqual(result.rules.slice(3).map((rule) => rule.outcome), Array(5).fill("applied"));
+  assert.deepEqual(result.rules.slice(6).map((rule) => rule.outcome), Array(5).fill("applied"));
   assert.equal(result.rules.at(-1).count, 2);
   assert.equal(input.messages[0].role, "developer");
 });
@@ -160,7 +160,7 @@ test("long DSH system and assistant messages are rewritten completely", () => {
   assert.equal(result.payload.messages[0].content, `${padding}\nYou are an AI assistant. AI assistant`);
   assert.equal(result.payload.messages[1].content, `${padding}\nYou are an AI assistant. ${padding}`);
   assert.equal(result.payload.messages[2].content, input.messages[2].content);
-  assert.deepEqual(result.rules.map((rule) => rule.outcome), ["applied", "applied", "applied"]);
+  assert.deepEqual(result.rules.slice(0, 3).map((rule) => rule.outcome), ["applied", "applied", "applied"]);
   assert.equal(input.messages[0].role, "developer");
 });
 
@@ -180,8 +180,8 @@ test("deeply nested JSON can be forwarded and copied without structured clone ov
   const copied = rewriteRequest(input, settings([
     { mode: "copy", from: "nested", to: "duplicate" },
   ]), CHAT);
-  assert.equal(copied.rules[3].outcome, "applied");
-  assert.equal(copied.rules[3].changed, false);
+  assert.equal(copied.rules[6].outcome, "applied");
+  assert.equal(copied.rules[6].changed, false);
   assert.equal(JSON.stringify(copied.payload.duplicate), JSON.stringify(nested));
   assert.notEqual(copied.payload.duplicate, copied.payload.nested);
 });
@@ -207,8 +207,8 @@ test("conditions default to OR like New API, while explicit AND requires both", 
   const result = rewriteRequest({ messages: [{ role: "system" }] }, settings(structuredClone(JSON.parse(JSON.stringify(operations)))), CHAT);
   assert.equal(result.payload.temperature, 0.2);
   assert.equal(result.payload.top_p, undefined);
-  assert.equal(result.rules[3].outcome, "applied");
-  assert.equal(result.rules[4].outcome, "unmatched");
+  assert.equal(result.rules[6].outcome, "applied");
+  assert.equal(result.rules[7].outcome, "unmatched");
 });
 
 test("temperature description and optional repeated group are accepted without logging values", () => {
@@ -224,7 +224,7 @@ test("temperature description and optional repeated group are accepted without l
     { dshCompat: false, requestOverrides: normalized }, CHAT);
   assert.equal(result.payload.temperature, 0.6);
   assert.equal(result.payload.messages[0].content, "assistant and assistant");
-  assert.equal(result.rules[4].count, 2);
+  assert.equal(result.rules[7].count, 2);
   assert.ok(!JSON.stringify(result.rules).includes("sensitive-description-marker"));
   assert.throws(() => validateRequestOverrides({ operations: [{ ...operations[0], description: "x".repeat(513) }] }),
     /Invalid override operation/);
@@ -239,7 +239,7 @@ test("regex results distinguish unchanged matches, no match, captures and global
   ];
   const result = rewriteRequest(input, settings(operations), CHAT);
   assert.equal(result.payload.messages[0].content, "<alpha> ALPHA");
-  assert.deepEqual(result.rules.slice(3).map(({ outcome, count, changed }) => ({ outcome, count, changed })), [
+  assert.deepEqual(result.rules.slice(6).map(({ outcome, count, changed }) => ({ outcome, count, changed })), [
     { outcome: "applied", count: 1, changed: false },
     { outcome: "unmatched", count: 0, changed: false },
     { outcome: "applied", count: 1, changed: true },
@@ -264,10 +264,10 @@ test("missing, incompatible and oversized inputs are skipped without partial mut
   ];
   const result = rewriteRequest(input, settings(operations), CHAT);
   assert.deepEqual(result.payload, input);
-  assert.deepEqual(result.rules.slice(3).map((rule) => rule.outcome), Array(8).fill("skipped"));
+  assert.deepEqual(result.rules.slice(6).map((rule) => rule.outcome), Array(8).fill("skipped"));
   for (const payload of [null, false, 12, "not an object", []]) {
     const rewritten = rewriteRequest(payload, settings([{ mode: "set", path: "temperature", value: 1 }]), CHAT);
-    assert.equal(rewritten.rules[3].outcome, "skipped");
+    assert.equal(rewritten.rules[6].outcome, "skipped");
   }
 });
 
@@ -284,7 +284,7 @@ test("copy clones values, set creates paths, array delete shifts, and keep_origi
   assert.deepEqual(result.payload.metadata, { backup: { child: ["one", "two"] }, added: [{ text: "created" }] });
   assert.deepEqual(result.payload.messages, [{ role: "assistant" }]);
   assert.deepEqual(result.payload.source.child, ["changed", "two"]);
-  assert.equal(result.rules[6].outcome, "skipped");
+  assert.equal(result.rules[9].outcome, "skipped");
   assert.deepEqual(input.source.child, ["one", "two"]);
 });
 
@@ -296,7 +296,7 @@ test("untrusted regexes time out and expanding replacements are bounded", () => 
   ];
   const result = rewriteRequest(input, settings(operations), CHAT);
   assert.deepEqual(result.payload, input);
-  assert.deepEqual(result.rules.slice(3).map((rule) => rule.outcome), ["skipped", "skipped"]);
+  assert.deepEqual(result.rules.slice(6).map((rule) => rule.outcome), ["skipped", "skipped"]);
 });
 
 test("copy operations cannot amplify a request beyond the workspace size limit", () => {
@@ -392,8 +392,8 @@ test("rule diagnostics are bounded and hide arbitrary path parts, names and valu
   }));
   const config = validateRequestOverrides({ operations });
   const result = rewriteRequest({}, { dshCompat: true, requestOverrides: config }, CHAT);
-  assert.equal(result.rules.length, 64);
-  assert.equal(result.rules[3].path, "metadata.*");
+  assert.equal(result.rules.length, 67);
+  assert.equal(result.rules[6].path, "metadata.*");
   assert.ok(!/private_path_|private-value|private-description/.test(JSON.stringify(result.rules)));
   assert.throws(() => validateRequestOverrides({ operations: [...operations, {
     mode: "set", path: "extra", value: true,

@@ -30,13 +30,15 @@ test("the supplied complete New API identity regex matches each alternative", ()
       const result = rewriteRequest({ messages: [{ role, content: text }] },
         { dshCompat: false, requestOverrides }, "/v1/chat/completions");
       assert.equal(result.payload.messages[0].content, "You are a helpful coding assistant.");
-      assert.equal(result.rules[3].outcome, "applied");
-      assert.equal(result.rules[3].count, 1);
+      assert.equal(result.rules[6].outcome, "applied");
+      assert.equal(result.rules[6].count, 1);
     }
     const user = rewriteRequest({ messages: [{ role: "user", content: text }] },
       { dshCompat: false, requestOverrides }, "/v1/chat/completions");
     assert.equal(user.payload.messages[0].content, text);
-    assert.equal(user.rules[3].outcome, "unmatched");
+    assert.equal(user.rules[6].outcome, "unmatched");
+    // The Claude Code preset stays inert for Chat Completions.
+    assert.deepEqual(user.rules.slice(3, 6).map((rule) => rule.outcome), ["skipped", "skipped", "skipped"]);
   }
 });
 
@@ -89,6 +91,11 @@ async function fixture(t) {
     method: "POST", headers: { Authorization: `Bearer ${GATEWAY}`, "Content-Type": "application/json", ...headers },
     body: JSON.stringify(payload),
   });
+  const sendMessages = (payload, headers = {}) => fetch(`${base}/v1/messages`, {
+    method: "POST",
+    headers: { "x-api-key": GATEWAY, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...headers },
+    body: JSON.stringify(payload),
+  });
   t.after(async () => {
     app.pool.stop();
     for (const server of [app.server, ...servers]) {
@@ -97,7 +104,7 @@ async function fixture(t) {
     }
     rmSync(root, { recursive: true, force: true });
   });
-  return { ...app, base, directory, call, worker, send };
+  return { ...app, base, directory, call, worker, send, sendMessages };
 }
 
 test("DSH rewrites reach the workspace and diagnostics retain structure, not content", async (t) => {
@@ -312,4 +319,90 @@ test("management rejects malformed overrides and protected headers", async (t) =
   }
   assert.deepEqual(app.store.state.settings.upstreamHeaders, {});
   assert.equal({}.polluted, undefined);
+});
+
+const CLAUDE_BILLING = "x-anthropic-billing-header: cc_version=2.1.212.3f4; cc_entrypoint=sdk-cli;";
+const CLAUDE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
+const CLAUDE_FEEDBACK = "To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues";
+const claudeCodePayload = () => ({
+  model: "test-model",
+  max_tokens: 256,
+  stream: false,
+  thinking: { type: "enabled", budget_tokens: 64 },
+  system: [{ type: "text", text: `${CLAUDE_BILLING}\n${CLAUDE_IDENTITY}\n${CLAUDE_FEEDBACK}` }],
+  messages: [
+    { role: "user", content: [{ type: "text", text: `${CLAUDE_FEEDBACK} private-user-request` }] },
+    { role: "assistant", content: [{ type: "text", text: CLAUDE_IDENTITY }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: CLAUDE_IDENTITY }] },
+  ],
+  tools: [{ name: "Read", description: `${CLAUDE_BILLING} private-tool-description`, input_schema: { type: "object" } }],
+});
+
+test("Claude Code compatibility rewrites Messages fingerprints before forwarding", async (t) => {
+  const app = await fixture(t);
+  const calls = await app.worker((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json", "x-cnb2api-override-support": "1" });
+    res.end(JSON.stringify({ choices: [] }));
+  });
+  const payload = claudeCodePayload();
+  const response = await app.sendMessages(payload);
+  assert.equal(response.status, 200, await response.text());
+  assert.equal(calls.length, 1);
+  const outbound = calls[0].payload;
+  assert.equal(calls[0].headers["anthropic-version"], "2023-06-01");
+  assert.equal(outbound.thinking, undefined);
+  assert.doesNotMatch(outbound.system[0].text, /x-anthropic-billing-header|official cli for claude|to give feedback/i);
+  assert.match(outbound.system[0].text, /cc_version=2\.1\.212\.3f4; cc_entrypoint=sdk-cli;/, "billing values survive");
+  assert.ok(outbound.system[0].text.includes("https://github.com/anthropics/claude-code/issues"), "issue URL survives");
+  assert.doesNotMatch(outbound.tools[0].description, /x-anthropic-billing-header/i);
+  assert.match(outbound.tools[0].description, /private-tool-description/);
+  // Tool results and the user request keep their original bytes.
+  assert.equal(outbound.messages[0].content[0].text, payload.messages[0].content[0].text);
+  assert.equal(outbound.messages[2].content[0].content, CLAUDE_IDENTITY);
+  assert.doesNotMatch(outbound.messages[1].content[0].text, /official cli for claude/i);
+  assert.deepEqual(payload, claudeCodePayload(), "the client payload is not mutated");
+  const log = app.store.state.logs.find((entry) => entry.kind === "request");
+  assert.equal(log.path, "/v1/messages");
+  assert.deepEqual(
+    log.requestDiagnostics.rules.slice(-3).map((rule) => [rule.name, rule.outcome]),
+    [["claude_code_text", "applied"], ["claude_code_text", "applied"], ["claude_code_fields", "applied"]],
+  );
+  // The log never stores request text; only the existing first-user preview is kept.
+  for (const secret of ["private-tool-description", CLAUDE_IDENTITY, GATEWAY])
+    assert.ok(!JSON.stringify(log).includes(secret));
+});
+
+test("Claude Code compatibility is independent of DSH and stays off for Chat and Responses", async (t) => {
+  const app = await fixture(t);
+  const calls = await app.worker((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ choices: [] }));
+  });
+  assert.equal((await app.call("/api/settings", { method: "PATCH", body: { dshCompat: false } })).status, 200);
+  const messages = await app.sendMessages(claudeCodePayload());
+  assert.equal(messages.status, 200);
+  await messages.text();
+  assert.equal(calls.at(-1).payload.thinking, undefined);
+  assert.doesNotMatch(calls.at(-1).payload.system[0].text, /official cli for claude/i);
+
+  const chat = await app.send({ model: "test-model", messages: [{ role: "user", content: CLAUDE_IDENTITY }] });
+  assert.equal(chat.status, 200);
+  await chat.text();
+  assert.equal(calls.at(-1).payload.messages[0].content, CLAUDE_IDENTITY);
+
+  assert.equal((await app.call("/api/settings", { method: "PATCH", body: { claudeCodeCompat: false } })).status, 200);
+  const disabled = await app.sendMessages(claudeCodePayload());
+  assert.equal(disabled.status, 200);
+  await disabled.text();
+  // The forwards-boundary thinking strip and the preset drop are independent.
+  const expected = claudeCodePayload();
+  delete expected.thinking;
+  assert.deepEqual(calls.at(-1).payload, expected);
+  assert.match(calls.at(-1).payload.system[0].text, /x-anthropic-billing-header/);
+  assert.match(calls.at(-1).payload.system[0].text, /official cli for claude/i);
+  assert.equal(app.store.state.settings.claudeCodeCompat, false);
+  const restarted = new Store(app.directory, { allowLocal: true });
+  assert.equal(restarted.state.settings.claudeCodeCompat, false);
+  assert.equal(restarted.state.settings.dshCompat, false);
+  assert.equal((await app.call("/api/settings", { method: "PATCH", body: { claudeCodeCompat: "yes" } })).status, 400);
 });

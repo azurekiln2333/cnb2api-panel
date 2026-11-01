@@ -2,7 +2,8 @@ import { isDeepStrictEqual } from "node:util";
 import { Script } from "node:vm";
 import { performance } from "node:perf_hooks";
 
-// Three preset entries are reserved within the diagnostic budget.
+// Three DSH preset entries are reserved within the diagnostic budget. The
+// separate Claude Code preset adds its own entries only on `/v1/messages`.
 const MAX_OPERATIONS = 64;
 const MAX_CUSTOM_OPERATIONS = MAX_OPERATIONS - 3;
 const MAX_CONDITIONS = 16;
@@ -22,7 +23,7 @@ const DIAGNOSTIC_FIELDS = new Set([
   "stream", "stream_options", "include_usage", "temperature", "top_p",
   "max_tokens", "max_completion_tokens", "tools", "tool_choice", "metadata",
   "reasoning_effort", "store", "response_format", "parallel_tool_calls", "stop",
-  "seed", "n", "user",
+  "seed", "n", "user", "thinking", "billing",
 ]);
 const IDENTITY = "\\bYou are an AI agent powered by DeepSeek Harness\\.?(?![\\w-])";
 const CODING_IDENTITY = "\\bYou are a coding agent powered by the [^\\r\\n]{1,200}? model\\.?(?![\\w-])";
@@ -30,6 +31,18 @@ const ASSISTANT_CODING_IDENTITY = "\\bYou are a coding agent powered by the (?:c
 const BRAND = "DeepSeek Harness";
 const DSH_PATH_FINGERPRINT = "Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root";
 const DSH_PATH_REPLACEMENT = "Treat tokens beginning with @ as paths explicitly referenced by the user. Resolve relative paths from the workspace root";
+
+// Claude Code fingerprints that the CNB channel rule rejects with business code
+// 11128. Each entry keeps the request semantics: the billing values survive the
+// header-name rewrite, and the remaining entries are equivalent wording.
+const CLAUDE_CODE_PHRASES = [
+  [/x-anthropic-billing-header/gi, "x-cc-billing-meta"],
+  [/to give feedback, users should report the issue at (https:\/\/github\.com\/anthropics\/claude-code\/issues)/gi,
+    "to share feedback, users can report the issue at $1"],
+  [/you are claude code, anthropic's official cli for claude(\.)?/gi,
+    "you are claude code, a command-line coding assistant$1"],
+];
+const CLAUDE_CODE_DROP_FIELDS = ["reasoning_effort", "reasoning", "enable_thinking", "thinking"];
 
 const regexTest = new Script("new RegExp(pattern, flags).test(input)");
 const regexReplace = new Script(`
@@ -63,6 +76,8 @@ const regexReplace = new Script(`
     return { value, count, changed: value !== input };
   })()
 `);
+
+class RegexOutputTooLarge extends Error {}
 
 function fail(message) { throw new Error(message); }
 
@@ -480,6 +495,74 @@ function* textFields(message) {
   }
 }
 
+function compilePhrases(entries) {
+  return entries.map(([pattern, replacement]) => ({
+    regex: new RegExp(pattern.source, pattern.flags),
+    replacement: replacement.replace(/\$(\d+)/g, "\u0000$1\u0000"),
+  }));
+}
+
+function neutralizePhrases(text, phrases, counts) {
+  let value = text;
+  for (const { regex, replacement } of phrases) {
+    value = value.replace(regex, (...args) => {
+      counts[0]++;
+      const groups = args.slice(1, -2);
+      return replacement.replace(/\u0000(\d+)\u0000/g, (_, index) => groups[Number(index) - 1] ?? "");
+    });
+  }
+  return value;
+}
+
+// Claude Code /v1/messages compatibility. The CNB workspace rejects a short,
+// fixed list of Claude Code fingerprints with business code 11128 and routes
+// thinking toggles to a variant that spends max_tokens on reasoning. Rewrite
+// the fingerprints in text the model never needs verbatim and drop those
+// toggles. User and tool values keep their original bytes.
+function claudeCodePreset(payload, enabled, path) {
+  const rules = [
+    { name: "claude_code_text", mode: "regex_replace", path: "system" },
+    { name: "claude_code_text", mode: "regex_replace", path: "tools.*.billing" },
+    { name: "claude_code_fields", mode: "delete", path: "thinking" },
+  ];
+  const skipped = () => rules.map((rule) => ({ ...rule, outcome: "skipped" }));
+  if (!enabled || path !== "/v1/messages") return skipped();
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return skipped();
+  const text = [0];
+  const phrases = compilePhrases(CLAUDE_CODE_PHRASES);
+  const drop = (key) => {
+    if (!Object.hasOwn(payload, key)) return false;
+    delete payload[key];
+    return true;
+  };
+  const dropped = CLAUDE_CODE_DROP_FIELDS.filter(drop).length;
+  const neutralize = (owner, key) => {
+    if (typeof owner?.[key] === "string") owner[key] = neutralizePhrases(owner[key], phrases, text);
+  };
+  if (typeof payload.system === "string") {
+    neutralize(payload, "system");
+  } else if (Array.isArray(payload.system)) {
+    for (const block of payload.system) {
+      if (block?.type === "text") neutralize(block, "text");
+      else neutralize(block, "content");
+    }
+  }
+  if (Array.isArray(payload.tools)) for (const tool of payload.tools) neutralize(tool, "description");
+  if (Array.isArray(payload.messages)) {
+    for (const message of payload.messages) {
+      if (message?.role !== "assistant") continue;
+      if (typeof message.content === "string") neutralize(message, "content");
+      else if (Array.isArray(message.content))
+        for (const block of message.content)
+          if (block?.type === "text") neutralize(block, "text");
+    }
+  }
+  const rule = (index, count) => ({
+    ...rules[index], outcome: count ? "applied" : "unmatched", count, changed: count > 0,
+  });
+  return [rule(0, text[0]), rule(1, text[0]), rule(2, dropped)];
+}
+
 function presetRules(payload, enabled, path) {
   const rules = [
     { name: "dsh_roles", mode: "set", path: "messages.*.role" },
@@ -538,7 +621,10 @@ function presetRules(payload, enabled, path) {
 
 export function rewriteRequest(payload, settings, path) {
   const cloned = cloneRequestValue(payload);
-  const rules = presetRules(cloned, settings?.dshCompat === true, path);
+  const rules = [
+    ...presetRules(cloned, settings?.dshCompat === true, path),
+    ...claudeCodePreset(cloned, settings?.claudeCodeCompat === true, path),
+  ];
   if (settings?.requestOverrides === undefined) return { payload: cloned, rules };
   let overrides;
   try { overrides = validateRequestOverrides(settings.requestOverrides); }

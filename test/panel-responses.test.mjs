@@ -174,7 +174,8 @@ test("Codex JSON preserves namespace/custom calls and complete second-turn histo
   assert.equal(body.output[1].input, patch);
   assert.deepEqual(app.calls[0].payload.metadata, { task: "preserved-standard-metadata" });
   assert.deepEqual(app.calls[0].payload.stream_options, { include_usage: true });
-  assert.equal(app.calls[0].payload.reasoning_effort, "high");
+  // claudeCodeCompat deletes reasoning_effort from the final Chat payload.
+  assert.equal(Object.hasOwn(app.calls[0].payload, "reasoning_effort"), false);
   assert.equal(app.calls[0].payload.tools[1].function.parameters.properties.input.type, "string");
 
   const followup = await app.send(codexRequest({
@@ -295,19 +296,37 @@ test("Responses SSE translates split Unicode/text/tool events and captures trail
   assert.equal(record.responseBytes, Buffer.byteLength(text));
 });
 
-test("Responses route requires gateway auth, supports preflight and rejects unsupported state before dispatch", async (t) => {
+test("Responses route requires gateway auth, supports preflight, rejects unsupported state and drops hosted tools", async (t) => {
   const app = await fixture(t, (_req, res) => json(res, completion()));
   const unauthorized = await app.send({}, { headers: { "Content-Type": "application/json" } });
   assert.equal(unauthorized.status, 401);
   const preflight = await fetch(`${app.base}/v1/responses`, { method: "OPTIONS" });
   assert.equal(preflight.status, 204);
   assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
-  for (const input of [{ previous_response_id: "resp_old" }, { tools: [{ type: "web_search" }] }]) {
-    const result = await app.send(input);
-    assert.equal(result.status, 400);
-    assert.match((await result.json()).error.message, /does not support/);
-  }
+  const stateful = await app.send({ previous_response_id: "resp_old" });
+  assert.equal(stateful.status, 400);
+  assert.match((await stateful.json()).error.message, /does not support/);
   assert.equal(app.calls.length, 0);
+  // Hosted search tools are dropped instead of rejecting the whole turn.
+  const hosted = await app.send({
+    stream: false,
+    tools: [
+      { type: "web_search" },
+      { type: "function", name: "lookup", parameters: { type: "object" } },
+      { type: "web_search_preview" },
+    ],
+  });
+  assert.equal(hosted.status, 200);
+  assert.equal((await hosted.json()).status, "completed");
+  assert.equal(app.calls.length, 1);
+  const forwarded = app.calls[0].payload.tools;
+  assert.deepEqual(forwarded.map((tool) => tool.type), ["function"]);
+  assert.deepEqual(forwarded.map((tool) => tool.function.name), ["lookup"]);
+  assert.ok(!JSON.stringify(forwarded).includes("web_search"));
+  // A request with only hosted tools stays valid and forwards no function tools.
+  const onlyHosted = await app.send({ stream: false, tools: [{ type: "web_search" }] });
+  assert.equal(onlyHosted.status, 200);
+  assert.deepEqual(app.calls[1].payload.tools, []);
 });
 
 test("Responses transport preserves non-retryable upstream errors", async (t) => {

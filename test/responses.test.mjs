@@ -111,7 +111,7 @@ test("returns safe field paths and rejects malformed or unsupported semantic opt
     [{ future_option: "private-value" }, "future_option", "unsupported_parameter"],
     [{ "secret/key with spaces": true }, "request", "unsupported_parameter"],
     [{ input: [{ type: "compaction", encrypted_content: "private-value" }] }, "input.0.item_type", "unsupported_parameter"],
-    [{ tools: [{ type: "web_search" }] }, "tools.0.type", "unsupported_parameter"],
+    [{ tools: [{ type: "code_interpreter" }] }, "tools.0.type", "unsupported_parameter"],
     [{ tools: [{ type: "custom", name: "edit", format: { type: "grammar", syntax: "unknown", definition: "private-value" } }] }, "tools.0.format.syntax", "invalid_field"],
     [{ tools: [{ type: "function", name: "same" }, { type: "function", name: "same" }] }, "tools.1.name", "invalid_field"],
   ];
@@ -123,7 +123,51 @@ test("returns safe field paths and rejects malformed or unsupported semantic opt
     assert.equal(error.message.includes("secret/key"), false);
     return true;
   });
-  assert.throws(() => toChatRequest({ input: "test", tools: [{ type: "web_search" }] }), /web_search="disabled"/);
+  assert.throws(() => toChatRequest({ input: "test", tools: [{ type: "code_interpreter" }] }), /does not support tools\.0\.type/);
+});
+
+test("drops hosted web search tools and keeps function tools executable", () => {
+  const parameters = { type: "object", properties: { query: { type: "string" } }, required: ["query"] };
+  const tools = [
+    { type: "web_search" },
+    { type: "function", name: "lookup", parameters },
+    { type: "web_search_preview", search_context_size: "medium" },
+    { type: "namespace", name: "workspace", tools: [
+      { type: "web_search" },
+      { type: "function", name: "read" },
+    ] },
+  ];
+  const { payload, toolContext } = prepareResponsesRequest({ input: "search then read", tools });
+  assert.deepEqual(payload.tools.map((tool) => tool.function.name), ["lookup", "workspace__read__a0257a6a063ebc60b0a2724b"]);
+  assert.deepEqual(payload.tools[0].function.parameters, parameters);
+  assert.equal(tools.length, 4);
+  const call = { type: "function", id: "call_read", function: { name: payload.tools[1].function.name, arguments: "{}" } };
+  const response = toResponsesResponse(chat({ tool_calls: [call] }, "tool_calls"), { toolContext });
+  assert.equal(response.output[0].type, "function_call");
+  assert.equal(response.output[0].name, "read");
+  assert.equal(response.output[0].namespace, "workspace");
+  const stream = new ResponsesStream({ toolContext });
+  const frames = stream.push(Buffer.from(frame(chunk({ tool_calls: [{ ...call, index: 0 }] }, "tool_calls"))));
+  frames.push(...stream.finish());
+  assert.equal(parsed(frames).at(-1).response.output[0].name, "read");
+});
+
+test("keeps hosted tool removal from shifting tool error indexes", () => {
+  // Indexes in reported field paths always address the submitted tools array.
+  for (const tools of [
+    [{ type: "web_search" }, { type: "code_interpreter" }],
+    [{ type: "function", name: "ok" }, { type: "namespace", name: "group", tools: [{ type: "web_search" }, { type: "code_interpreter" }] }],
+  ]) assert.throws(() => prepareResponsesRequest({ input: "test", tools }), (error) => {
+    assert.equal(error.status, 400);
+    assert.equal(error.param, tools[0].type === "web_search" ? "tools.1.type" : "tools.1.tools.1.type");
+    assert.equal(error.code, "unsupported_parameter");
+    return true;
+  });
+  // Hosted-only tool lists leave no Chat tools and still produce a usable request.
+  const { payload } = prepareResponsesRequest({ input: "hello", tools: [{ type: "web_search" }] });
+  assert.deepEqual(payload.tools, []);
+  assert.equal("tool_choice" in payload, false);
+  assert.throws(() => prepareResponsesRequest({ input: "hello", tools: [{ type: "web_search" }], tool_choice: { type: "web_search" } }), (error) => error.param === "tool_choice");
 });
 
 test("rejects malformed custom Chat arguments in JSON and streaming output", () => {
@@ -234,7 +278,7 @@ test("accepts nullable optional function tool metadata used by Responses clients
 test("rejects state, hosted tools, unsupported media and malformed requests before dispatch", () => {
   const bad = [
     { previous_response_id: "resp_old" }, { conversation: "conv_old" }, { background: true }, { store: true },
-    { tools: [{ type: "web_search" }] }, { truncation: "auto" }, { include: ["other"] },
+    { tools: [{ type: "code_interpreter" }] }, { truncation: "auto" }, { include: ["other"] },
     { input: [{ type: "reasoning", encrypted_content: "secret" }] },
     { input: [{ role: "user", content: [{ type: "input_file", file_id: "private" }] }] },
     { input: [{ role: "user", content: [{ type: "input_image", file_id: "private" }] }] },

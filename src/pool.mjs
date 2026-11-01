@@ -28,6 +28,9 @@ const newerRoutingCooldown = (current, source) =>
   (current.cooldownUntil !== source.cooldownUntil || current.failureKind !== source.failureKind);
 const MODEL_RESPONSE_BYTES = 256 * 1024;
 const RESPONSE_CONVERSION_BYTES = 8 * 1024 * 1024;
+// Thinking toggles. A request carrying one routes the worker to a variant that
+// spends max_tokens on reasoning, so the answer can never complete.
+const THINKING_FIELDS = ["reasoning_effort", "reasoning", "enable_thinking", "thinking"];
 
 function retryAfterSeconds(value, now = Date.now()) {
   if (typeof value !== "string" || value.length > 128) return null;
@@ -918,8 +921,8 @@ export class Pool {
     const upstreamPath = responses ? "/v1/chat/completions" : path;
     const prepared = responses ? prepareResponsesRequest(payload) : null;
     const semanticPayload = prepared ? prepared.payload : payload;
-    const { dshCompat, requestOverrides, upstreamHeaders } = this.store.state.settings;
-    const rewritten = rewriteRequest(semanticPayload, { dshCompat, requestOverrides }, upstreamPath);
+    const { dshCompat, claudeCodeCompat, requestOverrides, upstreamHeaders } = this.store.state.settings;
+    const rewritten = rewriteRequest(semanticPayload, { dshCompat, claudeCodeCompat, requestOverrides }, upstreamPath);
     const forwardedPayload = upstreamPath === "/v1/chat/completions"
       ? {
           ...rewritten.payload,
@@ -929,6 +932,11 @@ export class Pool {
     // Codex client metadata describes the client session, not the model request.
     // Strict Chat-only workers reject it even on native Chat requests.
     if (upstreamPath === "/v1/chat/completions") delete forwardedPayload.client_metadata;
+    // The workspace routes requests carrying a thinking toggle to a variant that
+    // spends max_tokens on reasoning. Strip the toggles at the final boundary so
+    // native Messages requests reach the non-thinking variant.
+    const diagnosticsThinking = THINKING_FIELDS.some((field) => field in forwardedPayload);
+    for (const field of THINKING_FIELDS) delete forwardedPayload[field];
     // CNB workers always stream from the model upstream, including when they
     // aggregate a non-streaming response. Request usage in both client modes.
     const requestBody = JSON.stringify(forwardedPayload);
@@ -939,7 +947,19 @@ export class Pool {
     const diagnostics = {
       received: requestShape(payload),
       forwarded: requestShape(forwardedPayload),
-      rules: rewritten.rules,
+      rules: [
+        ...rewritten.rules,
+        // Record the boundary strip so diagnostics show why a thinking toggle
+        // is absent, including requests that carry one at the root only.
+        ...(rewritten.rules.some((rule) => rule.name === "claude_code_fields")
+          ? []
+          : [{
+              name: "thinking_toggle", mode: "delete", path: "thinking",
+              outcome: diagnosticsThinking ? "applied" : "unmatched",
+              count: diagnosticsThinking ? 1 : 0,
+              changed: Boolean(diagnosticsThinking),
+            }]),
+      ],
       headers: { configured: headerNames, supported: null, attempts: [] },
     };
     const affinityKey = this.store.state.settings.sessionAffinity

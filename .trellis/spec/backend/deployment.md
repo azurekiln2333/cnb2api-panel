@@ -31,9 +31,31 @@ filenames. Packages must include both configurations and exclude `.env`, data an
 
 Synchronize `main` and release tags to `origin` (GitHub), `cnb`, and `gitlab`
 (`git@gitlab.com:azurekiln-team/cnb2api-panel.git`, using SSH). Release tags must match
-the root package version. GitHub and CNB tags trigger image and release builds;
-GitLab currently mirrors the source and tags. Preserve existing remote history
-when connecting a new mirror instead of force-pushing over its initial commit.
+the root package version. All three remotes now build and publish: GitHub and CNB
+trigger image and release jobs, and GitLab creates a Release plus a project
+Container Registry image. Preserve existing remote history when connecting a new
+mirror instead of force-pushing over its initial commit.
+
+## Shared CI scripts
+
+`scripts/ci-backend.sh` and `scripts/ci-console.sh` define the build command
+sequence once. Every platform workflow calls them and keeps only its own release
+and image glue. Do not copy the command sequence into a workflow file; the CNB
+and GitHub copies had already drifted in build order before this extraction.
+
+Keep the two scripts separate so a platform can run them in parallel jobs.
+GitHub runs them as parallel `test` and `console` jobs. CNB has no cross-stage
+parallelism and runs both in one `build-and-test` stage; do not merge the scripts
+to model that.
+
+`ci-console.sh` prints `archive=` and `version=` lines parsed from
+`dist/build-manifest.json`. Downstream jobs consume those values instead of
+re-reading the manifest. `.gitattributes` pins `*.sh` to `eol=lf` because CI
+containers are Linux.
+
+Every platform builds independently, so the same version produces different
+archive bytes and SHA-256 per platform. Document that rather than comparing
+checksums across platforms.
 
 The console footer reads the root package version at build time through Vite's
 `__APP_VERSION__` constant. Keep root and console package versions, including the
