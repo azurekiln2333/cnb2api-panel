@@ -426,8 +426,8 @@ async function save() {
           <span>
             <strong>Claude Code 兼容预设</strong>
             <small>
-              预设只作用于 Messages 请求。面板改写 system、工具说明和助手历史中的
-              Claude Code 特征短语，并去除思考开关。思考开关会让工作区换算力变体，
+              预设只作用于 Messages 请求。面板改写 system、工具说明和助手历史中的 Claude Code
+              特征短语，并去除思考开关。思考开关会让工作区换算力变体，
               推理耗尽输出预算。用户消息和工具结果保持原样。
             </small>
           </span>
