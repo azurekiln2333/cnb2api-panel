@@ -45,6 +45,10 @@ async function settingsFixture(page: Page, relay?: RegistrationRelayConfig) {
   return state
 }
 
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+})
+
 async function openRouting(page: Page) {
   await page.goto('/')
   await page.getByLabel('管理密钥', { exact: true }).fill(ADMIN)
