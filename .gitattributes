@@ -7,3 +7,6 @@
 # picking either side (task state lives in task.json, not index.md). See
 # .trellis/spec/cli/backend/directory-structure.md for details.
 .trellis/workspace/*/journal-*.md merge=union
+
+# CI runs these on Linux containers; CRLF would break the shebang and `set -e`.
+*.sh text eol=lf

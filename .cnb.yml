@@ -4,26 +4,15 @@ main:
       docker: &node-runtime
         image: node:26.12.1-bookworm
       stages:
+        # scripts/ci-backend.sh and scripts/ci-console.sh are shared with the
+        # GitHub, GitLab, GitCode and Gitee pipelines. Both run here in one
+        # serial stage because CNB has no cross-stage parallelism.
         - name: build-and-test
           jobs: &validation-jobs
-            - name: check-runtime
-              script: |
-                node --version
-                npm --version
-            - name: install-console-dependencies
-              script: npm ci --prefix web
             - name: test-backend
-              script: npm test
-            - name: check-console-format
-              script: npm --prefix web run format:check
-            - name: build-release-package
-              script: npm run package
-            - name: install-test-browser
-              script: |
-                cd web
-                npx playwright install --with-deps chromium
-            - name: test-console
-              script: npm run test:e2e
+              script: bash scripts/ci-backend.sh
+            - name: build-and-package-console
+              script: bash scripts/ci-console.sh
         - &read-build-manifest
           name: read-build-manifest
           type: cnb:read-file
@@ -84,6 +73,10 @@ main:
               '',
               'The package contains the standalone backend and compiled console.',
               'Existing .env and data files are excluded.',
+              '',
+              'Each publishing platform builds independently, so archives for the',
+              'same version can differ in bytes and SHA-256. Use the checksum that',
+              'ships beside your downloaded archive.',
               '',
             ].join('\n');
             writeFileSync('dist/release-notes.md', description);

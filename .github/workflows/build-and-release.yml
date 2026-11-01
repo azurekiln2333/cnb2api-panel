@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+# The backend and console stages are shared scripts. Keep them in separate jobs
+# so they still run in parallel; scripts/ci-backend.sh and scripts/ci-console.sh
+# are also used by the CNB, GitLab, GitCode and Gitee pipelines.
 jobs:
   test:
     runs-on: ubuntu-24.04
@@ -17,16 +20,13 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
-      - run: npm test
+      - run: bash scripts/ci-backend.sh
 
   console:
     runs-on: ubuntu-24.04
     outputs:
       archive: ${{ steps.package.outputs.archive }}
       version: ${{ steps.package.outputs.version }}
-    defaults:
-      run:
-        working-directory: web
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -34,23 +34,13 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - run: npm ci
-      - run: npm run format:check
-      - run: npm run build
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e
-      - name: Package standalone release
+      - name: Build, test and package console
         id: package
-        working-directory: .
-        env:
-          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: |
-          node scripts/package.mjs
-          node --input-type=module <<'NODE'
-          import { appendFileSync, readFileSync } from 'node:fs';
-          const { archive, version } = JSON.parse(readFileSync('dist/build-manifest.json', 'utf8'));
-          appendFileSync(process.env.GITHUB_OUTPUT, `archive=${archive}\nversion=${version}\n`);
-          NODE
+          set -euo pipefail
+          bash scripts/ci-console.sh | tee /tmp/ci-console.out
+          # Re-publish the script's key=value lines as GitHub step outputs.
+          grep -E '^(archive|version)=' /tmp/ci-console.out >> "$GITHUB_OUTPUT"
       - name: Upload release package
         uses: actions/upload-artifact@v7
         with:
@@ -90,15 +80,21 @@ jobs:
         run: |
           cd dist
           sha256sum --check "$RELEASE_ARCHIVE.sha256"
+          notes=$(printf '%s\n' \
+            'Each publishing platform builds independently, so archives for the same' \
+            'version can differ in bytes and SHA-256. Verify the checksum that ships' \
+            'beside your downloaded archive.')
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "$RELEASE_ARCHIVE" "$RELEASE_ARCHIVE.sha256" --clobber
           else
-            release_flags=()
+            # Notes are passed explicitly because --generate-notes cannot be
+            # combined with --notes; --verify-tag keeps the tag check.
+            release_flags=(--notes "$notes")
             if [[ "$RELEASE_VERSION" == *-* ]]; then
               release_flags+=(--prerelease)
             fi
             gh release create "$RELEASE_TAG" "$RELEASE_ARCHIVE" "$RELEASE_ARCHIVE.sha256" \
-              --verify-tag --title "cnb2api-panel v$RELEASE_VERSION" --generate-notes "${release_flags[@]}"
+              --verify-tag --title "cnb2api-panel v$RELEASE_VERSION" "${release_flags[@]}"
           fi
 
   image:
