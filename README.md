@@ -375,6 +375,23 @@ Chat 和 Responses 的错误体是 `{ error }`。
 客户端参数错误不会切换账号，也不会冷却工作区。
 没有可用账号时，三个接口都返回 503 和 `Retry-After`。
 
+### Responses 流式响应
+
+Responses 流式响应使用标准事件流。
+每帧同时带 `event:` 行和 `data.type`，两者同名。
+`sequence_number` 从 0 开始逐帧加一。
+事件顺序为 created、in_progress、output_item.added、content_part.added、
+增量事件、各类 done 事件，最后是 completed 或 incomplete。
+
+工作区中断或返回无法解析的数据时，面板用 `response.failed` 收尾。
+失败帧带 `response.status: "failed"` 和 `response.error`。
+面板不会直接断开连接，客户端总能读到终止事件。
+终止事件只发一次，此后不再追加事件。
+
+响应头 `Cache-Control: no-cache` 和 `X-Accel-Buffering: no` 便于反向代理即时转发。
+中间代理还需关闭响应缓冲。
+否则首个事件会滞留在代理缓存里。
+
 两个 billing 接口也接受不带 `/v1` 的路径。
 余额来自已启用组织的额度快照。
 同一组织只计算一次。
@@ -805,6 +822,18 @@ CNB 工作区仍以流式请求上游。
 没有请求时，页面仍显示 `0`。
 直接访问工作区的请求不计入本地统计。
 `/v1/messages/count_tokens` 不计入消耗。
+
+Responses 客户端看到的用量有以下规则。
+`input_tokens` 含缓存命中，与 Chat 的 `prompt_tokens` 一致。
+`input_tokens_details.cached_tokens` 单独给出命中部分。
+命中量不会从 `input_tokens` 中扣除，也不会再加一次。
+`total_tokens` 等于 `input_tokens` 加 `output_tokens`。
+上游只给 Anthropic 字段时，面板同样折算为这组字段。
+缓存读取量不会并入输入总量。
+
+工作区可能在多个事件里上报用量。
+面板按字段取最大值，不会让较晚的占位块抹掉已上报数据。
+整个响应都没有用量时，`usage` 为 `null`，页面显示缺报。
 
 ### 工作区用量比较
 

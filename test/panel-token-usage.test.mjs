@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.mjs";
 import { createPanelServer } from "../src/app.mjs";
-import { emptyTokenUsage, TokenUsageCapture } from "../src/token-usage.mjs";
+import { addTokenUsage, emptyTokenUsage, TokenUsageCapture } from "../src/token-usage.mjs";
 
 const ADMIN = "usage-test-admin-key";
 const GATEWAY = "usage-test-gateway-key";
@@ -55,6 +55,7 @@ test("JSON usage counts input/output/cache once and rejects invalid numeric coun
       cacheRead: 70,
       total: 150,
       reportedRequests: 1,
+      cacheReadReported: 1,
     },
   );
   assert.deepEqual(
@@ -95,6 +96,7 @@ test("SSE handles arbitrary byte boundaries, CRLF and terminal events without do
     cacheRead: 60,
     total: 112,
     reportedRequests: 1,
+    cacheReadReported: 1,
   });
 });
 
@@ -163,6 +165,165 @@ test("placeholder-only usage stays partial and never becomes a measured zero", (
   assert.equal(result.input, 0);
 });
 
+test("billing_usage decides the shape only when the primary usage has none", () => {
+  // A billing envelope repeats Anthropic field names. It must not switch the
+  // shape of an OpenAI primary usage, but when the primary object carries no
+  // counter names at all the envelope is the only evidence of the shape.
+  const billing = { input_tokens: 167, output_tokens: 100, cache_read_input_tokens: 3840 };
+  const cases = [
+    { label: "event-root billing only", payload: { billing_usage: billing } },
+    { label: "shapeless primary usage", payload: { usage: { total_tokens: 0, billing_usage: billing } } },
+  ];
+  for (const { label, payload } of cases) {
+    const result = capture(JSON.stringify(payload), { path: "/v1/messages" });
+    // Anthropic reports cache beside input, so the total input includes it.
+    assert.equal(result.input, 4007, label);
+    assert.equal(result.output, 100, label);
+    assert.equal(result.cacheRead, 3840, label);
+    assert.equal(result.cacheReadReported, 1, label);
+  }
+  // An OpenAI primary usage keeps its own shape: cache is already inside
+  // prompt_tokens and must never be added a second time.
+  const openai = capture(JSON.stringify({
+    usage: { prompt_tokens: 4007, completion_tokens: 100, billing_usage: billing },
+  }), { path: "/v1/messages" });
+  assert.equal(openai.input, 4007);
+  assert.equal(openai.cacheRead, 3840);
+  // A message_start placeholder already picks the Anthropic shape.
+  const stream = capture(
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}\n\n' +
+    'event: message_delta\ndata: {"type":"message_delta","usage":{"billing_usage":{"input_tokens":167,"output_tokens":100,"cache_read_input_tokens":3840}}}\n\n',
+    { sse: true, path: "/v1/messages" },
+  );
+  assert.equal(stream.input, 4007);
+  assert.equal(stream.cacheRead, 3840);
+});
+
+test("a cache counter never exceeds a known input total", () => {
+  // The input total already contains the cached part in both wire shapes. An
+  // upstream that reports more cache than input is inconsistent, but showing
+  // "cache read > input" is worse than clamping to the comparable total.
+  const cases = [
+    {
+      label: "mixed families",
+      usage: { prompt_tokens: 10, completion_tokens: 5, input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 },
+      cacheRead: 100,
+    },
+    {
+      label: "mixed creation",
+      usage: { prompt_tokens: 10, completion_tokens: 5, input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 100 },
+      cacheWrite: 100,
+    },
+    {
+      label: "openai cache over prompt",
+      usage: { prompt_tokens: 10, completion_tokens: 5, prompt_cache_hit_tokens: 100 },
+      cacheRead: 100,
+    },
+  ];
+  for (const { label, usage, cacheRead, cacheWrite } of cases) {
+    const body = JSON.stringify({ choices: [], usage });
+    for (const sse of [false, true]) {
+      const result = capture(sse ? `data: ${body}\n\n` : body, { sse });
+      assert.ok(result.cacheRead <= result.input, `${label} sse=${sse} cacheRead`);
+      assert.ok(result.cacheWrite <= result.input, `${label} sse=${sse} cacheWrite`);
+      // The measured cache is still recorded, just bounded by the input total.
+      if (cacheRead !== undefined) assert.equal(result.cacheRead, result.input);
+      if (cacheWrite !== undefined) assert.equal(result.cacheWrite, result.input);
+      assert.equal(result.input, 10);
+    }
+  }
+});
+
+test("an unknown input total leaves the cache counters measured instead of clamped", () => {
+  // No input counter means the total is unknown, not zero. The cache hit stays
+  // visible and the request is marked partial rather than reporting a fake zero.
+  const body = JSON.stringify({ choices: [], usage: { prompt_cache_hit_tokens: 3840 } });
+  for (const sse of [false, true]) {
+    const result = capture(sse ? `data: ${body}\n\n` : body, { sse });
+    assert.equal(result.cacheRead, 3840, `sse=${sse}`);
+    assert.equal(result.input, 0);
+    assert.equal(result.partialRequests, 1);
+    assert.equal(result.cacheReadReported, 1);
+  }
+});
+
+test("a cache hit reported without prompt_tokens keeps its measured cache count", () => {
+  // Some workers report only the cache counters. Clamping the cache read to an
+  // unknown input total must not turn a measured value into zero.
+  for (const usage of [
+    { prompt_cache_hit_tokens: 3840 },
+    { prompt_tokens_details: { cached_tokens: 3840 } },
+  ]) {
+    const body = JSON.stringify({ choices: [], usage });
+    for (const sse of [false, true]) {
+      const result = capture(sse ? `data: ${body}\n\n` : body, { sse });
+      assert.equal(result.cacheRead, 3840, `${JSON.stringify(usage)} sse=${sse}`);
+      assert.equal(result.reportedRequests, 1);
+      // The input total stays unknown, so the request is not fully measured.
+      assert.equal(result.partialRequests, 1);
+    }
+  }
+});
+
+test("a cache hit is counted once even when the same object repeats it in billing_usage", () => {
+  // The input total already includes cache in the OpenAI shape. Merging an extra
+  // source must not add the cache counters a second time.
+  for (const usage of [
+    {
+      prompt_tokens: 4007, completion_tokens: 100,
+      prompt_tokens_details: { cached_tokens: 3840 }, prompt_cache_hit_tokens: 3840,
+      billing_usage: { input_tokens: 4007, output_tokens: 100 },
+    },
+    {
+      prompt_tokens: 4007, completion_tokens: 100, input_tokens: 0, output_tokens: 0,
+      prompt_cache_hit_tokens: 3840, billing_usage: { input_tokens: 4007, output_tokens: 100 },
+    },
+    {
+      prompt_tokens: 4007, completion_tokens: 100,
+      billing_usage: { cache_read_input_tokens: 3840 },
+    },
+  ]) {
+    const result = capture(JSON.stringify({ choices: [], usage }));
+    assert.equal(result.cacheRead, 3840, JSON.stringify(usage));
+    assert.equal(result.input, 4007, JSON.stringify(usage));
+    assert.equal(result.output, 100, JSON.stringify(usage));
+    assert.equal(result.total, 4107, JSON.stringify(usage));
+  }
+});
+
+test("an OpenAI cache hit does not inflate the input total it already belongs to", () => {
+  // prompt_tokens includes cached tokens. Only the Anthropic shape reports them
+  // separately, so only that shape adds cache to the input total.
+  const result = capture(JSON.stringify({
+    choices: [], usage: {
+      prompt_tokens: 4007, completion_tokens: 100,
+      prompt_cache_hit_tokens: 3840, prompt_cache_miss_tokens: 167,
+    },
+  }));
+  assert.equal(result.input, 4007);
+  assert.equal(result.cacheRead, 3840);
+  assert.equal(result.total, 4107);
+});
+
+test("cache reporting is explicit so an unreported cache never looks like a measured zero", () => {
+  const reported = capture(JSON.stringify({
+    choices: [], usage: { prompt_tokens: 4007, completion_tokens: 100, prompt_cache_hit_tokens: 3840 },
+  }));
+  assert.equal(reported.cacheRead, 3840);
+  assert.equal(reported.cacheReadReported, 1);
+  const absent = capture(JSON.stringify({
+    choices: [], usage: { prompt_tokens: 4007, completion_tokens: 100 },
+  }));
+  assert.equal(absent.cacheRead, 0);
+  assert.equal(absent.cacheReadReported, 0);
+  // Accumulating keeps the distinction across requests.
+  const totals = addTokenUsage(emptyTokenUsage(), reported);
+  addTokenUsage(totals, absent);
+  assert.equal(totals.cacheRead, 3840);
+  assert.equal(totals.cacheReadReported, 1);
+  assert.equal(totals.reportedRequests, 2);
+});
+
 test("Anthropic input includes cache read/write and legacy zero placeholders remain partial", () => {
   const full = [
     'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0,"cache_read_input_tokens":40,"cache_creation_input_tokens":20}}}\n\n',
@@ -176,6 +337,8 @@ test("Anthropic input includes cache read/write and legacy zero placeholders rem
     cacheWrite: 20,
     total: 85,
     reportedRequests: 1,
+    cacheReadReported: 1,
+    cacheWriteReported: 1,
   });
   const old =
     'data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}\n\n' +
@@ -386,6 +549,7 @@ test("gateway persists local totals, preserves SSE bytes, and excludes count_tok
     cacheRead: 110,
     total: 225,
     reportedRequests: 2,
+    cacheReadReported: 2,
   };
   assert.deepEqual(overview.stats.tokenUsage.today, expected);
   assert.deepEqual(overview.stats.tokenUsage.total, expected);

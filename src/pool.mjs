@@ -112,6 +112,100 @@ const wakeTimedOut = (error) =>
     "UND_ERR_BODY_TIMEOUT",
   ].includes(error?.cause?.code);
 const WAKE_ERROR_BYTES = 16 * 1024;
+
+// Distinct abort reasons for the inference watchdog. Without them every abort
+// reaches the reader as an indistinguishable socket error, and a deliberate
+// idle stop looks like a provider fault in the request log.
+class IdleTimeoutError extends Error {
+  constructor() {
+    super("上游空闲超时");
+    this.name = "IdleTimeoutError";
+    this.code = "PANEL_IDLE_TIMEOUT";
+  }
+}
+
+class ClientDisconnectError extends Error {
+  constructor() {
+    super("客户端已断开");
+    this.name = "ClientDisconnectError";
+    this.code = "PANEL_CLIENT_DISCONNECT";
+  }
+}
+
+const safeToken = (value) =>
+  typeof value === "string" && /^[\w.:-]{1,80}$/.test(value) ? value : null;
+
+// Keep transport identifiers, never raw exception messages, URLs or bodies.
+function errorDetails(error) {
+  const details = {};
+  const name = safeToken(error?.name);
+  if (name) details.name = name;
+  const code = Number.isSafeInteger(error?.code) ? error.code : safeToken(error?.code);
+  if (code !== null) details.code = code;
+  if (Number.isSafeInteger(error?.errno)) details.errno = error.errno;
+  const syscall = safeToken(error?.syscall);
+  if (syscall) details.syscall = syscall;
+  return details;
+}
+
+function errorCauses(error) {
+  const causes = [];
+  const seen = new Set([error]);
+  let cause = error?.cause;
+  while (cause && typeof cause === "object" && !seen.has(cause) && causes.length < 4) {
+    seen.add(cause);
+    causes.push(errorDetails(cause));
+    cause = cause.cause;
+  }
+  return causes;
+}
+
+// Structured failure record for request logs. Separates a watchdog abort (idle
+// or attempt deadline), a client disconnect and a provider stream that ended
+// early, so a live incident is diagnosable without the raw exception.
+function streamFailureRecord(entry) {
+  const record = { stage: entry.stage, kind: entry.kind, ...errorDetails(entry.error) };
+  const causes = errorCauses(entry.error);
+  if (causes.length) {
+    record.causes = causes;
+    if (causes[0].name) record.causeName = causes[0].name;
+    if (causes[0].code !== undefined) record.causeCode = causes[0].code;
+  }
+  record.bytesRead = entry.bytes;
+  record.elapsedMs = entry.ms;
+  record.attemptElapsedMs = entry.attemptMs;
+  if (Number.isInteger(entry.firstByteMs)) record.firstByteMs = entry.firstByteMs;
+  if (Number.isInteger(entry.status)) record.upstreamStatus = entry.status;
+  record.bodyComplete = entry.bodyComplete === true;
+  record.aborted = entry.signal?.aborted === true;
+  if (record.aborted) {
+    const reason = errorDetails(entry.signal.reason);
+    if (reason.name) record.abortName = reason.name;
+    if (reason.code !== undefined) record.abortCode = reason.code;
+  }
+  if (entry.kind === "idle_timeout") record.idleTimeoutMs = entry.idleTimeoutMs;
+  record.clientDisconnected = entry.clientDisconnected === true;
+  return record;
+}
+
+function streamFailureMessage(record) {
+  const details = [
+    `kind=${record.kind}`,
+    `name=${record.name || "Error"}`,
+    ...(record.code !== undefined ? [`code=${record.code}`] : []),
+    ...(record.causes || []).map((cause) => `cause=${cause.name || "Error"}:${cause.code ?? "unknown"}`),
+    `bytesRead=${record.bytesRead}`,
+    `elapsedMs=${record.elapsedMs}`,
+    `aborted=${record.aborted}`,
+    ...(record.abortName ? [`abort=${record.abortName}:${record.abortCode ?? "unknown"}`] : []),
+  ];
+  return `上游响应中断 (${details.join(", ")})`;
+}
+// Proxies abort a stream that stays silent after headers. A comment frame keeps
+// the connection warm without consuming a sequence number or carrying data.
+// Owned here because Pool.forward is the only writer of these frames.
+export const RESPONSES_KEEPALIVE_MS = 10_000;
+export const RESPONSES_KEEPALIVE_FRAME = Buffer.from(": keep-alive\n\n");
 const WAKE_SECRET_LABEL =
   "(?:authorization|(?:access[-_]?|refresh[-_]?)?token|reg[-_]?token|registration[-_]?token|pat|password|passwd|api[-_]?key|proxy[-_]?key|secret)";
 const WAKE_QUOTED_SECRET = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/.source;
@@ -970,17 +1064,30 @@ export class Pool {
     const excluded = new Set();
     const controller = new AbortController();
     const disconnected = () => {
-      if (!res.writableEnded) controller.abort();
+      if (!res.writableEnded) controller.abort(new ClientDisconnectError());
     };
     res.on("close", disconnected);
     let account = null;
     let finalStatus = 503;
     let attempts = 0;
     let success = false;
+    // Two distinct latencies: the first byte the panel writes to the client
+    // (which the keepalive comment produced almost immediately) and the first
+    // byte the upstream worker actually sent. Only the second measures the
+    // provider; reporting them as one number hides a slow prefill.
     let firstByteMs = null;
+    let upstreamFirstByteMs = null;
     let responseBytes = 0;
     let usageCapture = null;
     let usageComplete = false;
+    // Structured, redacted reason for an interrupted inference request. Logged
+    // with the request record so a live "upstream interrupted" report can be
+    // traced to a watchdog abort, a client disconnect or a provider failure.
+    let streamFailure = null;
+    // EOF describes transport completion. Usage stays partial when reading or
+    // conversion fails, even if a usage block arrived before that failure.
+    let upstreamDone = false;
+    let upstreamBytes = 0;
     let failureMessage = "没有可用账号，请检查工作区状态、模型范围或冷却时间";
     // Declared outside the attempt loop so the catch handler can still terminate
     // an Responses stream that already sent headers.
@@ -990,6 +1097,9 @@ export class Pool {
     // Assigned inside the attempt loop; the catch handler reuses it to terminate
     // an already-streaming Responses response.
     let emit = null;
+    // Responses keepalive timer, created with the SSE headers and cleared on every
+    // exit path so a retry or a finished stream cannot leave it running.
+    let keepAlive = null;
     try {
       if (Buffer.byteLength(requestBody, "utf8") > MAX_REQUEST_BYTES) {
         finalStatus = 413;
@@ -1017,18 +1127,32 @@ export class Pool {
         attempts++;
         excluded.add(account.id);
         this.active.set(account.id, (this.active.get(account.id) || 0) + 1);
+        const attemptStarted = Date.now();
+        const attempt = new AbortController();
+        const signal = AbortSignal.any([controller.signal, attempt.signal]);
+        const idleTimeoutMs = this.store.state.settings.idleTimeoutSeconds * 1000;
+        let upstreamStatus = null;
         let timer;
+        // A buffered Responses conversion may fail before downstream headers.
+        // The next attempt must not inherit that body's bytes, usage or error.
+        upstreamDone = false;
+        upstreamBytes = 0;
+        upstreamFirstByteMs = null;
+        streamFailure = null;
+        usageCapture = null;
+        usageComplete = false;
+        convertStream = false;
+        converter = null;
+        responsesTerminated = false;
         if (headerCarrier) diagnostics.headers.supported = null;
         try {
-          const attempt = new AbortController();
           timer = setTimeout(
-            () => attempt.abort(),
+            () => attempt.abort(new IdleTimeoutError()),
             // Workers may not send headers until generation produces its first
             // token (or finishes a non-streaming response). This is inference
             // idle time, not the authenticated readiness connection deadline.
-            this.store.state.settings.idleTimeoutSeconds * 1000,
+            idleTimeoutMs,
           );
-          const signal = AbortSignal.any([controller.signal, attempt.signal]);
           const response = await fetch(`${account.endpoint}${upstreamPath}`, {
             method: "POST",
             headers: {
@@ -1046,6 +1170,8 @@ export class Pool {
             redirect: "error",
           });
           clearTimeout(timer);
+          upstreamStatus = response.status;
+          signal.throwIfAborted();
           finalStatus = response.status;
           if (headerCarrier) {
             const supported = response.headers.get("x-cnb2api-override-support") === "1"
@@ -1098,6 +1224,8 @@ export class Pool {
           // stream explicitly instead of destroying the socket.
           emit = async (value) => {
             const writable = res.write(value);
+            // Gateway frame latency, not provider latency: the keepalive below
+            // normally sets this. `upstreamFirstByteMs` measures the provider.
             firstByteMs ??= Date.now() - started;
             responseBytes += Buffer.byteLength(value);
             if (!writable) await once(res, "drain", { signal: controller.signal });
@@ -1105,16 +1233,45 @@ export class Pool {
           const chunks = [];
           let bufferedBytes = 0;
           const reader = response.body?.getReader();
+          upstreamDone = !reader;
+          // Keepalive guards the interval before the first upstream token and any
+          // long reasoning gap: proxies abort a silent streaming response. The
+          // frame is an SSE comment, so it never consumes a sequence number.
+          if (converter) {
+            let keepAlivePending = false;
+            keepAlive = setInterval(() => {
+              if (res.destroyed || res.writableEnded || keepAlivePending) return;
+              keepAlivePending = true;
+              void emit(RESPONSES_KEEPALIVE_FRAME).catch(() => {}).finally(() => {
+                keepAlivePending = false;
+              });
+            }, RESPONSES_KEEPALIVE_MS);
+            keepAlive.unref?.();
+            // Written after the upstream headers arrive, because the reply status
+            // (200, a retry, or a JSON body) is unknown until then. From this
+            // point the frame leaves at once and keeps the socket warm while the
+            // worker prefills, so it is still the earliest gateway byte.
+            await emit(RESPONSES_KEEPALIVE_FRAME);
+          }
           if (reader) {
             try {
-              while (!controller.signal.aborted) {
+              while (true) {
+                signal.throwIfAborted();
                 timer = setTimeout(
-                  () => attempt.abort(),
-                  this.store.state.settings.idleTimeoutSeconds * 1000,
+                  () => attempt.abort(new IdleTimeoutError()),
+                  idleTimeoutMs,
                 );
                 const { done, value } = await reader.read();
                 clearTimeout(timer);
-                if (done) break;
+                // An abort can resolve a pending read as EOF. Check the signal
+                // before declaring the body complete or emitting completion.
+                signal.throwIfAborted();
+                if (done) {
+                  upstreamDone = true;
+                  break;
+                }
+                if (value.byteLength) upstreamFirstByteMs ??= Date.now() - started;
+                upstreamBytes += value.byteLength;
                 usageCapture?.push(value);
                 if (converter) {
                   for (const frame of converter.push(value)) await emit(frame);
@@ -1127,16 +1284,18 @@ export class Pool {
               }
             } finally {
               clearTimeout(timer);
+              clearInterval(keepAlive);
+              keepAlive = null;
+              // An aborted body may reject asynchronously after this frame; the
+              // cancel promise must never surface as an unhandled rejection.
               await reader.cancel().catch(() => {});
+              reader.releaseLock();
             }
           }
-          if (controller.signal.aborted) {
-            finalStatus = 499;
-            return;
-          }
+          signal.throwIfAborted();
           if (converter) {
             // A worker can drop the stream without a finish_reason block. Emit a
-            // terminal event either way so the client never waits for one.
+            // terminal event on clean EOF. A rejected read takes the catch path.
             for (const frame of converter.finish()) await emit(frame);
             responsesTerminated = true;
           } else if (convert) {
@@ -1154,17 +1313,47 @@ export class Pool {
           return;
         } catch (error) {
           clearTimeout(timer);
+          clearInterval(keepAlive);
+          keepAlive = null;
+          if (res.destroyed && !controller.signal.aborted) disconnected();
+          const codes = [error, ...errorCauses(error)].map((cause) => cause?.code);
+          const idleAborted = signal.aborted && signal.reason?.code === "PANEL_IDLE_TIMEOUT";
+          const clientDisconnected = controller.signal.aborted;
+          const kind = clientDisconnected ? "client_disconnect"
+            : idleAborted ? "idle_timeout"
+              : codes.includes("UND_ERR_HEADERS_TIMEOUT") ? "headers_timeout"
+                : codes.includes("UND_ERR_BODY_TIMEOUT") ? "body_timeout"
+                  : codes.some((code) => ["UND_ERR_CONNECT_TIMEOUT", "ETIMEDOUT"].includes(code))
+                    ? "connect_timeout" : "upstream_error";
+          streamFailure = streamFailureRecord({
+            stage: clientDisconnected ? "client" : upstreamStatus === null ? "fetch" : "stream",
+            kind, error, signal,
+            bytes: upstreamBytes,
+            ms: Date.now() - started,
+            attemptMs: Date.now() - attemptStarted,
+            firstByteMs: upstreamFirstByteMs,
+            status: upstreamStatus,
+            bodyComplete: upstreamDone,
+            idleTimeoutMs,
+            clientDisconnected,
+          });
+          // Keep earlier attempts for diagnosis without attaching a stale
+          // streamFailure to an eventual successful request.
+          (diagnostics.streamFailures ??= []).push({ attempt: attempts, accountId: account.id, ...streamFailure });
           if (controller.signal.aborted || res.destroyed) {
+            // A client disconnect is a normal ending, not a server fault. Rethrowing
+            // here reached the global handler in app.mjs, which logged a 500 for an
+            // event the request log already records as 499.
             finalStatus = 499;
+            if (!res.writableEnded) res.end();
             return;
           }
           finalStatus = 502;
           failureMessage = res.headersSent
-            ? "上游响应中断"
-            : wakeTimedOut(error) || error?.name === "AbortError"
+            ? streamFailureMessage(streamFailure)
+            : idleAborted || kind.endsWith("_timeout")
               ? "推理响应等待超时，正在检查工作区连接"
               : "推理请求连接失败，正在检查工作区连接";
-          await this.confirmConnectionFailure(source).catch(() => {});
           this.affinity.forget(affinityKey, account.id);
           if (res.headersSent) {
             // The relay is already streaming, so a socket reset would look like a
@@ -1177,9 +1366,20 @@ export class Pool {
               } catch { /* the client is already gone */ }
             }
             if (!res.destroyed) res.end();
+            // Finish request accounting now. Connection confirmation keeps its
+            // existing bounded probe and health-generation checks in background.
+            void this.confirmConnectionFailure(source).catch(() => {});
             return;
           }
+          // A diagnostic models probe can take the full connection budget. Send
+          // the terminal failure first so that probe cannot prolong a dead stream.
+          await this.confirmConnectionFailure(source).catch(() => {});
         } finally {
+          clearTimeout(timer);
+          clearInterval(keepAlive);
+          keepAlive = null;
+          // Also covers failures before the reader's own cleanup starts.
+          if (!upstreamDone) attempt.abort();
           this.active.set(
             account.id,
             Math.max(0, (this.active.get(account.id) || 1) - 1),
@@ -1218,8 +1418,11 @@ export class Pool {
         requestBytes: Buffer.byteLength(requestBody, "utf8"),
         responseBytes,
         firstByteMs,
+        upstreamFirstByteMs,
         upstreamEndpoint: account?.endpoint || "",
         requestDiagnostics: diagnostics,
+        upstreamBytes,
+        ...(streamFailure ? { streamFailure } : {}),
         ...(initialMessage ? { initialMessage } : {}),
         attempts,
         durationMs: Date.now() - started,

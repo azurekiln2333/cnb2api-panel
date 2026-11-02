@@ -1,5 +1,7 @@
 // Capture only numeric usage while the original response bytes pass through.
 // Neither request prompts nor generated content are retained in the store.
+// `cacheReadReported`/`cacheWriteReported` count requests that actually carried
+// a cache counter. Zero with no reporter means "unknown", not "measured zero".
 export const emptyTokenUsage = () => ({
   input: 0,
   output: 0,
@@ -9,6 +11,8 @@ export const emptyTokenUsage = () => ({
   reportedRequests: 0,
   missingRequests: 0,
   partialRequests: 0,
+  cacheReadReported: 0,
+  cacheWriteReported: 0,
 });
 
 export function addTokenUsage(target, value) {
@@ -60,8 +64,10 @@ export function normalizeTokenUsage(usage) {
   );
   if ([input, output, cacheRead, cacheWrite].every((n) => n === null))
     return null;
-  // `anthropic` decides whether cache counters add to the input total.
-  return { input, output, cacheRead, cacheWrite, anthropic: anthropicFields };
+  // Only a pure Anthropic shape reports cache beside the input total. A mixed
+  // object already carries an inclusive prompt total, so cache must not be added
+  // to it again.
+  return { input, output, cacheRead, cacheWrite, anthropic };
 }
 
 // The JSON body and any single SSE event have caps. Huge content events may be
@@ -96,17 +102,28 @@ export class TokenUsageCapture {
   accept(value) {
     if (!value || typeof value !== "object") return;
     // Billing counters can be nested beside the plain usage. Read both so a
-    // measured value inside billing_usage is not silently dropped.
-    for (const source of [
+    // measured value inside billing_usage is not silently dropped. Each source
+    // is normalized on its own, so a repeated counter merges by maximum instead
+    // of being added twice.
+    const sources = [
       value.usage ?? value.message?.usage,
       value.usage?.billing_usage,
       value.message?.usage?.billing_usage,
       value.billing_usage,
-    ]) {
+    ];
+    // A billing envelope repeats Anthropic field names even for an OpenAI
+    // payload, so the primary usage object keeps the final say. Only when the
+    // primary object names no counter at all does the envelope become the sole
+    // evidence of the shape.
+    let shapeDecided = false;
+    for (const source of sources) {
       const usage = normalizeTokenUsage(source);
       if (!usage) continue;
       this.sawUsage = true;
-      this.anthropic ||= usage.anthropic;
+      if (!shapeDecided) {
+        this.anthropic ||= usage.anthropic;
+        if (source === sources[0] || this.anthropic) shapeDecided = true;
+      }
       if (value.type !== "message_start" && usage.input !== null)
         this.sawInputAfterStart = true;
       for (const key of ["input", "output", "cacheRead", "cacheWrite"])
@@ -198,17 +215,23 @@ export class TokenUsageCapture {
       return result;
     }
     const { input, output, cacheRead, cacheWrite } = this.usage;
+    // Only the Anthropic shape reports cache counters beside the input total.
+    // OpenAI prompt_tokens already includes them, so adding them again would
+    // inflate the input. This must not depend on which source merged last.
     result.input =
       (input ?? 0) +
       (this.anthropic ? (cacheRead ?? 0) + (cacheWrite ?? 0) : 0);
     result.output = output ?? 0;
-    result.cacheRead = Math.min(result.input, cacheRead ?? 0);
-    result.cacheWrite = Math.min(
-      Math.max(0, result.input - result.cacheRead),
-      cacheWrite ?? 0,
-    );
+    // A cache counter is a measured value on its own. Clamping it to an unknown
+    // input total would report a real hit as zero, so only a known total bounds
+    // it. An upstream that reports more cache than input is inconsistent, and
+    // showing "cache read > input" is worse than clamping to the input total.
+    result.cacheRead = input === null ? (cacheRead ?? 0) : Math.min(result.input, cacheRead ?? 0);
+    result.cacheWrite = input === null ? (cacheWrite ?? 0) : Math.min(result.input, cacheWrite ?? 0);
     result.total = result.input + result.output;
     result.reportedRequests = 1;
+    result.cacheReadReported = Number(cacheRead !== null);
+    result.cacheWriteReported = Number(cacheWrite !== null);
     // Older CNB Anthropic adapters emit a zero placeholder at message_start and
     // only output_tokens at message_delta. That zero cannot prove true input.
     result.partialRequests = Number(

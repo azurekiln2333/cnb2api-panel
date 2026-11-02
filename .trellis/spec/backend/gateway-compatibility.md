@@ -64,13 +64,43 @@ previews from the original semantic messages. Preserve the accepted client
 route in logs. Capture raw Chat usage before response conversion to avoid
 Anthropic input/cache accounting rules on Responses usage.
 
+Responses usage maps one measured counter family onto the Responses shape.
+`prompt_tokens` (or `input_tokens` when only that family is present) becomes
+`input_tokens`, and `completion_tokens` (or `output_tokens`) becomes
+`output_tokens`. Cache hits resolve from `prompt_tokens_details.cached_tokens`
+first, then `prompt_cache_hit_tokens`, then `cache_read_input_tokens`; that is
+the same precedence and the same "later alias wins" rule as
+`normalizeTokenUsage`. Chat keeps cache hits inside `prompt_tokens`, so
+`cached_tokens` is reported beside an unchanged `input_tokens`, never added and
+never subtracted. `total_tokens` is always `input_tokens + output_tokens` and
+ignores any upstream `total_tokens`. Clamp `cached_tokens` to `input_tokens` and
+`reasoning_tokens` to `output_tokens`. Reject non-integer counters and
+`usage_estimated` by reporting `usage: null` instead of a fabricated zero.
+
+Streaming usage may arrive in several blocks, before or after the terminal
+choice. Merge blocks per counter with `max` so a later placeholder block cannot
+erase a measured one, and report `usage: null` only when no block carried usage.
+
 Support stateless text/history, image URLs, function calls and results, tools,
 JSON formats, refusal and incomplete generation. JSON output and SSE use stable
 response/item/call IDs. SSE supports fragmented UTF-8, separate tool indices,
-increasing sequence numbers and trailing usage. Emit completion only after a
-valid terminal Chat choice. Bound response state to 8 MiB and one event to 1 MiB.
+increasing sequence numbers and trailing usage. Bound response state to 8 MiB
+and one event to 1 MiB.
 Keep retries before response headers only, abort on client disconnect, and await
 downstream drain. Existing Chat and Messages continue through their normal paths.
+
+Every SSE frame carries both an `event:` line and a matching `data.type`, and
+`sequence_number` stays contiguous from 0. `response.created` and
+`response.in_progress` are owed to the client as its first frames rather than
+only after the first upstream token, because a reverse proxy aborts a
+header-sent response that stays silent. A stream always ends with exactly one
+terminal event: `response.completed`, `response.incomplete`, or
+`response.failed`. A missing Chat `finish_reason` on a clean upstream close (with
+or without `[DONE]`) means normal completion, not corruption. Terminal events
+never repeat and stop further consumption. When the terminal event cannot be
+reached, emit `response.failed` with `response.status: "failed"` and
+`response.error` and close the response instead of destroying the socket, so the
+client never sees `stream closed before response.completed`.
 
 Codex client metadata is a transport field. Validate its string-map shape on
 Responses input and omit it from Chat payloads. Strip `client_metadata` at the
@@ -125,7 +155,9 @@ provider bodies or credentials.
 | Concurrent actual inference 429 responses | One cooldown, respect Retry-After |
 | Unsupported state/hosted tool/content | HTTP 400 before account selection |
 | Hosted `web_search` / `web_search_preview` tool | Dropped, remaining tools forwarded, no 400 |
-| Malformed or interrupted Chat output | Failure, never false completion |
+| Malformed or interrupted Chat output | Terminal failure event, never false completion |
+| Upstream closes without `finish_reason` or `[DONE]` | `response.completed`, never a dropped socket |
+| Usage blocks split across events | Per-counter `max` merge, `usage: null` only when absent |
 | No ready account or exhausted retries | Public service-unavailable HTTP 503 |
 | Client route `/v1/messages` | Native forward, no Chat conversion |
 
@@ -153,9 +185,11 @@ inference recovery, no throttling-driven wake and concurrent cooldown coalescing
 Also cover reload of legacy models-only 429 state: automatic recovery without a
 manual probe, preserved true HTTP cooldowns, manual disablement and quota guards.
 `test/responses.test.mjs` covers pure mappings, malformed and split SSE, tools,
-usage, limits, refusal and incomplete responses. `test/panel-responses.test.mjs`
+usage, limits, refusal and incomplete responses. It pins cache-alias precedence,
+the no-double-count input rule, per-counter streaming merge, one terminal event
+and the empty-usage `null` case. `test/panel-responses.test.mjs`
 proves authentication/CORS, actual upstream path, overrides, accounting, retries,
-errors and disconnect behavior over HTTP.
+stream response headers and terminal events over HTTP.
 
 `test/panel-endpoint-matrix.test.mjs` runs one strict mock worker behind all three
 gateway endpoints. It proves the upstream path per client route
@@ -184,6 +218,16 @@ apply the correct connection or upstream cooldown category.
 
 Wrong: count converted Responses input tokens with Anthropic cache semantics.
 Correct: capture the raw upstream Chat usage once before conversion.
+
+Wrong: add `cached_tokens` to `input_tokens` for a Responses client.
+Correct: report cache hits beside an unchanged `input_tokens`, exactly as Chat
+reports `prompt_tokens` with `prompt_tokens_details.cached_tokens`.
+
+Wrong: keep the last usage block seen in a stream.
+Correct: merge per counter with `max` so a later placeholder cannot erase data.
+
+Wrong: `res.destroy()` when the Chat stream ends unexpectedly after headers.
+Correct: emit one `response.failed` event and end the response body.
 
 Wrong: reject the whole Codex turn because one hosted tool is unsupported.
 Correct: drop the hosted tool, forward the executable tools and say so in docs.

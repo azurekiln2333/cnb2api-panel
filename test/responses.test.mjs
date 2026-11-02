@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { prepareResponsesRequest, toChatRequest, toResponsesResponse, ResponsesStream } from "../src/responses.mjs";
+import { RESPONSES_KEEPALIVE_FRAME, RESPONSES_KEEPALIVE_MS } from "../src/pool.mjs";
 
 const chunk = (delta, finish_reason = null) => ({ choices: [{ index: 0, delta, finish_reason }] });
 const frame = (value) => `data: ${JSON.stringify(value)}\n\n`;
@@ -320,6 +321,47 @@ test("rejects state, hosted tools, unsupported media and malformed requests befo
   for (const value of [null, [], "text", {}, { input: [] }]) assert.throws(() => toChatRequest(value), (error) => error.status === 400);
 });
 
+test("keeps the strongest usage counters across several stream blocks", () => {
+  const report = (usage) => frame({ choices: [], usage });
+  // A later placeholder or partial block must not erase a measured block.
+  for (const values of [
+    [report({ prompt_tokens: 10, completion_tokens: 4, prompt_cache_hit_tokens: 6 }), report({ prompt_tokens: 10, completion_tokens: 1 })],
+    [report({ prompt_tokens: 10, completion_tokens: 4, prompt_cache_hit_tokens: 6 }), report({ prompt_tokens: 10, completion_tokens: 4, prompt_cache_hit_tokens: 0 })],
+    [report({ prompt_tokens: 10, completion_tokens: 4, prompt_cache_hit_tokens: 6 }), report({ prompt_tokens: 10, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 6 } })],
+  ]) {
+    const stream = new ResponsesStream();
+    const frames = [
+      ...stream.push(Buffer.from(frame(chunk({ content: "hi" })))),
+      ...values.flatMap((value) => stream.push(Buffer.from(value))),
+      ...stream.push(Buffer.from(frame(chunk({}, "stop")))),
+    ];
+    frames.push(...stream.finish());
+    const usage = parsed(frames).at(-1).response.usage;
+    assert.deepEqual(usage, {
+      input_tokens: 10, input_tokens_details: { cached_tokens: 6 },
+      output_tokens: 4, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 14,
+    });
+  }
+  // Usage before the finish block and usage before [DONE] both survive.
+  for (const values of [
+    [report({ prompt_tokens: 10, completion_tokens: 4, prompt_cache_hit_tokens: 6 }), frame(chunk({}, "stop"))],
+    [report({ prompt_tokens: 10, completion_tokens: 4, prompt_cache_hit_tokens: 6 }), "data: [DONE]\n\n"],
+  ]) {
+    const stream = new ResponsesStream();
+    const frames = [...stream.push(Buffer.from(frame(chunk({ content: "hi" })))), ...values.flatMap((value) => stream.push(Buffer.from(value)))];
+    frames.push(...stream.finish());
+    const terminal = parsed(frames).at(-1);
+    assert.equal(terminal.type, "response.completed");
+    assert.equal(terminal.response.usage.input_tokens_details.cached_tokens, 6);
+    assert.equal(terminal.response.usage.total_tokens, 14);
+  }
+  // No usage block at all still reports null instead of a fake zero.
+  const stream = new ResponsesStream();
+  const frames = stream.push(Buffer.from(frame(chunk({ content: "hi" }, "stop")) + "data: [DONE]\n\n"));
+  frames.push(...stream.finish());
+  assert.equal(parsed(frames).at(-1).response.usage, null);
+});
+
 test("converts Chat JSON text, refusal, tools and real usage into Responses output", () => {
   const result = toResponsesResponse(chat({
     role: "assistant", content: "answer", refusal: "cannot do that",
@@ -358,6 +400,39 @@ test("preserves worker cache-hit aliases in both JSON and streaming Responses us
     frame({ choices: [], usage: report })));
   frames.push(...stream.finish());
   assert.deepEqual(parsed(frames).at(-1).response.usage, response.usage);
+});
+
+test("reports cached tokens without double counting cache hits in input", () => {
+  // Chat keeps cache hits inside prompt_tokens, so input and total stay unchanged.
+  for (const report of [
+    { prompt_tokens: 12, completion_tokens: 3, prompt_cache_hit_tokens: 8 },
+    { prompt_tokens: 12, completion_tokens: 3, prompt_tokens_details: { cached_tokens: 8 } },
+    { prompt_tokens: 12, completion_tokens: 3, prompt_cache_hit_tokens: 8, prompt_tokens_details: { cached_tokens: 8 } },
+  ]) {
+    const result = toResponsesResponse(chat({ content: "x" }, "stop", { usage: report })).usage;
+    assert.deepEqual(result, {
+      input_tokens: 12, input_tokens_details: { cached_tokens: 8 },
+      output_tokens: 3, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 15,
+    });
+  }
+  // A zero placeholder never wins over the measured alias.
+  const enriched = toResponsesResponse(chat({ content: "x" }, "stop", { usage: {
+    prompt_tokens: 12, completion_tokens: 3, prompt_cache_hit_tokens: 8,
+    input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0,
+  } })).usage;
+  assert.equal(enriched.input_tokens_details.cached_tokens, 8);
+  assert.equal(enriched.output_tokens, 3);
+  // Anthropic usage reports cache beside input_tokens; total stays input + output.
+  const anthropic = toResponsesResponse(chat({ content: "x" }, "stop", { usage: {
+    input_tokens: 20, output_tokens: 4, cache_read_input_tokens: 9,
+  } })).usage;
+  assert.equal(anthropic.input_tokens_details.cached_tokens, 9);
+  assert.equal(anthropic.output_tokens, 4);
+  assert.equal(anthropic.total_tokens, anthropic.input_tokens + 4);
+  // Cache can never exceed the input it belongs to.
+  assert.equal(toResponsesResponse(chat({ content: "x" }, "stop", { usage: {
+    prompt_tokens: 12, completion_tokens: 3, prompt_cache_hit_tokens: 40,
+  } })).usage.input_tokens_details.cached_tokens, 12);
 });
 
 test("rejects malformed successful Chat JSON rather than reporting false completion", () => {
@@ -429,25 +504,12 @@ test("finishes a stream whose [DONE] arrives without a finish_reason block", () 
   assert.equal(events.filter((event) => event.type === "response.completed").length, 1);
 });
 
-test("begin() exposes response.created before any upstream byte arrives", () => {
-  const stream = new ResponsesStream({ requestId: "early-id" });
-  const events = parsed(stream.begin());
-  assert.deepEqual(events.map((event) => event.type), ["response.created", "response.in_progress"]);
-  assert.equal(events[0].response.id, "resp_early-id");
-  assert.deepEqual(parsed(stream.begin()), []);
-  const frames = stream.push(Buffer.from(frame(chunk({ content: "x" }, "stop"))));
-  frames.push(...stream.finish());
-  const all = parsed(frames);
-  assert.deepEqual(all.map((event) => event.sequence_number), all.map((_event, index) => index + 2));
-  assert.equal(all.filter((event) => event.type === "response.created").length, 0);
-});
-
 test("fail() closes a dropped stream with one response.failed event", () => {
   for (const failEarly of [true, false]) {
     const stream = new ResponsesStream({ requestId: "failed-id" });
     const frames = [];
-    if (failEarly) frames.push(...stream.begin());
-    else frames.push(...stream.push(Buffer.from(frame(chunk({ content: "partial" })))));
+    // An early failure has no upstream bytes yet; a late one already streamed text.
+    if (!failEarly) frames.push(...stream.push(Buffer.from(frame(chunk({ content: "partial" })))));
     frames.push(...stream.fail("upstream_stream_error", "upstream stream ended"));
     const events = parsed(frames);
     const terminal = events.at(-1);
@@ -463,6 +525,25 @@ test("fail() closes a dropped stream with one response.failed event", () => {
     assert.deepEqual(parsed(stream.push(Buffer.from(frame(chunk({ content: "late" }, "stop"))))), []);
     assert.deepEqual(parsed(stream.finish()), []);
   }
+});
+
+test("keepalive frames are SSE comments that never touch the event sequence", () => {
+  assert.equal(RESPONSES_KEEPALIVE_FRAME.toString(), ": keep-alive\n\n");
+  assert.equal(RESPONSES_KEEPALIVE_MS, 10_000);
+  const stream = new ResponsesStream({ requestId: "keepalive-id" });
+  const frames = [];
+  // A proxy observing silence gets a comment frame instead of an abort.
+  frames.push(RESPONSES_KEEPALIVE_FRAME);
+  frames.push(...stream.push(Buffer.from(frame(chunk({ content: "hi" }, "stop")) + "data: [DONE]\n\n")));
+  frames.push(...stream.finish());
+  const wire = Buffer.concat(frames).toString();
+  assert.equal(wire.split(RESPONSES_KEEPALIVE_FRAME.toString()).length - 1, 1);
+  // Comment blocks carry no data line, so a client parser skips them untouched.
+  const events = wire.split("\n\n").filter((block) => block.trim() && !block.trimStart().startsWith(":"))
+    .map((block) => JSON.parse(block.split("\ndata: ")[1]));
+  assert.deepEqual(events.map((event) => event.sequence_number), events.map((_event, index) => index));
+  assert.equal(events.at(-1).type, "response.completed");
+  assert.equal(events.some((event) => event.type.includes("keep")), false);
 });
 
 test("rejects truncated/malformed streams, upstream errors and oversized events", () => {

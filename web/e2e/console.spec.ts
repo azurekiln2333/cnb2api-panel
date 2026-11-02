@@ -1,7 +1,10 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
 import { readFileSync } from 'node:fs'
+import { abbreviateCount } from '../src/format.ts'
 
 const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
+
+const shortCount = (value: number) => abbreviateCount(value)
 
 const ADMIN = 'browser-test-admin-key'
 async function login(page: Page) {
@@ -518,6 +521,68 @@ test('overview summary cards remain visible when token and credit data is absent
   await expect(credits).toContainText('尚未配置额度同步')
 })
 
+test('overview annotates large token counts with K, M and B abbreviations', async ({
+  page,
+  request,
+}) => {
+  await seed(request)
+  const overview = await (await request.get('/api/overview')).json()
+  const usage = {
+    input: 23_019_762,
+    output: 999,
+    cacheRead: 1_234_567,
+    cacheWrite: 0,
+    total: 2_500_000_000,
+    reportedRequests: 3,
+    missingRequests: 0,
+    partialRequests: 0,
+  }
+  await page.route('**/api/overview', (route) =>
+    route.fulfill({
+      json: {
+        ...overview,
+        stats: {
+          ...overview.stats,
+          tokenUsage: { ...overview.stats.tokenUsage, today: usage, total: usage },
+        },
+      },
+    }),
+  )
+  await login(page)
+  await page.getByRole('link', { name: '运行概览', exact: true }).click()
+  const summary = page.getByTestId('overview-token-summary')
+  const exactLabel = (label: string) =>
+    summary.locator('dl > div').filter({ has: page.getByText(label, { exact: true }) })
+  await expect(page.getByTestId('summary-token-total')).toHaveText('2,500,000,000')
+  await expect(page.getByTestId('summary-token-total-short')).toHaveText('约 2.5B')
+  await expect(exactLabel('输入').locator('dd')).toHaveText('23,019,762')
+  await expect(exactLabel('输入').locator('small')).toHaveText('约 23.02M')
+  // Counts below 1000 keep their plain form and carry no abbreviation.
+  await expect(exactLabel('输出').locator('dd')).toHaveText('999')
+  await expect(exactLabel('输出').locator('small')).toHaveCount(0)
+  await expect(exactLabel('缓存读取').locator('small')).toHaveText('约 1.23M')
+  await expect(exactLabel('缓存写入').locator('dd')).toHaveText('0')
+  await expect(exactLabel('缓存写入').locator('small')).toHaveCount(0)
+  const tokenPanel = page.getByRole('region', { name: 'Token 用量', exact: true })
+  const expected: Record<string, string | null> = {
+    input: '约 23.02M',
+    output: null,
+    cacheRead: '约 1.23M',
+    cacheWrite: null,
+    total: '约 2.5B',
+  }
+  for (const [key, short] of Object.entries(expected)) {
+    const metric = tokenPanel.getByTestId(`token-${key}`)
+    const shortLabel = metric.locator('em.usage-short')
+    if (short) await expect(shortLabel).toHaveText(short)
+    else await expect(shortLabel).toHaveCount(0)
+  }
+  await tokenPanel.getByRole('button', { name: '累计', exact: true }).click()
+  await expect(tokenPanel.getByTestId('token-input').locator('em.usage-short')).toHaveText(
+    '约 23.02M',
+  )
+})
+
 test('overview distinguishes missing token usage from measured zero in totals and comparison', async ({
   page,
   request,
@@ -622,14 +687,19 @@ test('overview shows measured token usage and compares aligned worker usage on d
     ['缓存读取', after.stats.tokenUsage.today.cacheRead],
     ['缓存写入', after.stats.tokenUsage.today.cacheWrite],
   ] as const) {
-    await expect(
-      page
-        .getByTestId('overview-token-summary')
-        .locator('dl > div')
-        .filter({ has: page.getByText(label, { exact: true }) })
-        .locator('dd'),
-    ).toHaveText(Number(value).toLocaleString('zh-CN'))
+    const breakdown = page
+      .getByTestId('overview-token-summary')
+      .locator('dl > div')
+      .filter({ has: page.getByText(label, { exact: true }) })
+    const dd = breakdown.locator('dd')
+    await expect(dd).toHaveText(Number(value).toLocaleString('zh-CN'))
+    // Short magnitudes appear only above 1000, so small fields stay unannotated.
+    if (Number(value) < 1000) await expect(breakdown.locator('small')).toHaveCount(0)
+    else await expect(breakdown.locator('small')).toHaveText(`约 ${shortCount(Number(value))}`)
   }
+  await expect(page.getByTestId('summary-token-total-short')).toHaveText(
+    `约 ${shortCount(after.stats.tokenUsage.today.total)}`,
+  )
   await expect(page.getByTestId('overview-credits-summary')).toContainText('已使用')
   await expect(page.getByTestId('overview-credits-summary')).toContainText('总额度')
   await page.screenshot({ path: '../test-results/overview-summary-desktop.png' })
@@ -641,6 +711,9 @@ test('overview shows measured token usage and compares aligned worker usage on d
       await expect(tokenPanel.getByTestId(`token-${key}`).locator('strong')).toHaveText(
         Number(value).toLocaleString('zh-CN'),
       )
+      const shortLabel = tokenPanel.getByTestId(`token-${key}`).locator('em.usage-short')
+      if (Number(value) < 1000) await expect(shortLabel).toHaveCount(0)
+      else await expect(shortLabel).toHaveText(`约 ${shortCount(Number(value))}`)
     }
   }
   await tokenPanel.getByRole('button', { name: '累计', exact: true }).click()

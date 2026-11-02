@@ -863,8 +863,16 @@ export function createPanelServer(options) {
       );
     }
   });
+  // requestTimeout bounds only receiving the request, not sending the
+  // response: a slow upload must not hold a connection forever. Inference
+  // streams are already covered by the per-attempt idle watchdog in
+  // Pool.forward, so the response phase needs no extra deadline here.
   server.requestTimeout = 30000;
+  // headersTimeout must exceed requestTimeout; keep it as the inbound guard.
   server.headersTimeout = 15000;
+  // A streamed response can sit quiet between tokens. Node's 5s default would
+  // close an idle keep-alive connection before the next request arrives.
+  server.keepAliveTimeout = 65000;
   server.on("close", () => pool.stop());
   return { server, store, pool };
 }

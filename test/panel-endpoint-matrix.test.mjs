@@ -28,7 +28,8 @@ const frame = (value) => `data: ${JSON.stringify(value)}\n\n`;
 const parseEvents = (text) =>
   text
     .split("\n\n")
-    .filter(Boolean)
+    // SSE comment blocks (keepalives) carry no data and are not model events.
+    .filter((block) => block.trim() && !block.trimStart().startsWith(":"))
     .map((block) => JSON.parse(block.split("\ndata: ")[1]));
 
 const chatFields = new Set([

@@ -305,18 +305,57 @@ export function toChatRequest(payload) {
 }
 
 const count = (value) => Number.isSafeInteger(value) && value >= 0;
+const integer = (value) => count(value) ? value : undefined;
+// Workers report the same counter under several names. Later sources of one
+// block win so a measured value replaces a zero placeholder, and equal counters
+// from mixed families stay equal instead of adding cache to a fresh input total.
+const counter = (...values) => values.map(integer).find((value) => value !== undefined);
+const maximum = (values) => values.reduce((left, right) => left === undefined
+  ? right
+  : right === undefined ? left : Math.max(left, right), undefined);
 function usage(value) {
-  if (!object(value) || value.usage_estimated === true || !count(value.prompt_tokens) || !count(value.completion_tokens)) return null;
-  const total = value.prompt_tokens + value.completion_tokens;
+  if (!object(value) || value.usage_estimated === true) return null;
+  const anthropicFirst = counter(value.input_tokens);
+  const anthropicAll = [anthropicFirst, counter(value.output_tokens), counter(value.cache_read_input_tokens)].filter((n) => n !== undefined);
+  const measured = anthropicAll.some((n) => n !== 0);
+  // Chat usage keeps cache hits inside prompt_tokens. Anthropic usage reports
+  // them beside input_tokens, so the cached part is added back to match Chat.
+  const cacheOnly = !measured && anthropicAll.length > 0;
+  const prompt = counter(value.prompt_tokens) ?? anthropicFirst;
+  const completion = counter(value.completion_tokens) ?? counter(value.output_tokens);
+  if (!count(prompt) || !count(completion)) return null;
+  const cached = counter(
+    value.prompt_tokens_details?.cached_tokens,
+    value.prompt_cache_hit_tokens,
+    cacheOnly ? undefined : value.cache_read_input_tokens,
+  );
+  const input = prompt + (cacheOnly ? cached ?? 0 : 0);
+  const total = input + completion;
   if (!count(total)) return null;
-  const cached = [value.cache_read_input_tokens, value.prompt_cache_hit_tokens,
-    value.prompt_tokens_details?.cached_tokens].find(count);
   return {
-    input_tokens: value.prompt_tokens,
-    input_tokens_details: { cached_tokens: cached === undefined ? 0 : Math.min(value.prompt_tokens, cached) },
-    output_tokens: value.completion_tokens,
-    output_tokens_details: { reasoning_tokens: count(value.completion_tokens_details?.reasoning_tokens) ? Math.min(value.completion_tokens, value.completion_tokens_details.reasoning_tokens) : 0 },
+    input_tokens: input,
+    input_tokens_details: { cached_tokens: cached === undefined ? 0 : Math.min(input, cached) },
+    output_tokens: completion,
+    output_tokens_details: { reasoning_tokens: count(value.completion_tokens_details?.reasoning_tokens) ? Math.min(completion, value.completion_tokens_details.reasoning_tokens) : 0 },
     total_tokens: total,
+  };
+}
+
+// Streaming usage can arrive in more than one block. Keep the strongest measured
+// value per counter and report null only when no block carried usage at all.
+function mergeUsage(current, reported) {
+  if (!reported) return current;
+  if (!current) return reported;
+  const cached = maximum([current.input_tokens_details?.cached_tokens, reported.input_tokens_details?.cached_tokens]) ?? 0;
+  const reasoning = maximum([current.output_tokens_details?.reasoning_tokens, reported.output_tokens_details?.reasoning_tokens]) ?? 0;
+  const input = Math.max(current.input_tokens, reported.input_tokens);
+  const output = Math.max(current.output_tokens, reported.output_tokens);
+  return {
+    input_tokens: input,
+    input_tokens_details: { cached_tokens: Math.min(input, cached) },
+    output_tokens: output,
+    output_tokens_details: { reasoning_tokens: Math.min(output, reasoning) },
+    total_tokens: input + output,
   };
 }
 
@@ -411,6 +450,7 @@ export class ResponsesStream {
     this.buffer = "";
     this.data = [];
     this.dataBytes = 0;
+    this.errorEvent = false;
     this.totalBytes = 0;
     this.sequence = 0;
     this.started = false;
@@ -424,14 +464,6 @@ export class ResponsesStream {
 
   event(type, fields) {
     return Buffer.from(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: this.sequence++, ...fields })}\n\n`);
-  }
-
-  // Emitted as the first frame of the first push so a client sees response.created
-  // before any upstream token, without waiting for the upstream to answer.
-  begin() {
-    const events = [];
-    this.start(events);
-    return events;
   }
 
   start(events) {
@@ -495,11 +527,12 @@ export class ResponsesStream {
     }));
   }
 
-  accept(value, events) {
-    if (!object(value) || value.error || this.sawDone) throw upstreamError();
-    if (typeof value.model === "string") this.response.model = value.model;
+  accept(value, events, errorEvent = false) {
+    if (!object(value) || this.sawDone) throw upstreamError();
     const reported = usage(value.usage);
-    if (reported) this.response.usage = reported;
+    if (reported) this.response.usage = mergeUsage(this.response.usage, reported);
+    if (errorEvent || value.error || value.type === "error") throw upstreamError();
+    if (typeof value.model === "string") this.response.model = value.model;
     if (!Array.isArray(value.choices)) throw upstreamError();
     for (const choice of value.choices) {
       if (!object(choice) || (choice.index !== undefined && choice.index !== 0) || this.finishReason) throw upstreamError();
@@ -572,25 +605,34 @@ export class ResponsesStream {
   }
 
   flushEvent(events) {
-    if (!this.data.length) return;
+    const errorEvent = this.errorEvent;
+    this.errorEvent = false;
+    if (!this.data.length) {
+      if (errorEvent) throw upstreamError();
+      return;
+    }
     const data = this.data.join("\n");
     this.data = [];
     this.dataBytes = 0;
     if (data.trim() === "[DONE]") {
       // [DONE] confirms the end of the Chat stream. Some upstreams close before
       // the finish_reason block lands, so a missing reason is not fatal here.
-      if (this.sawDone) throw upstreamError();
+      if (errorEvent || this.sawDone) throw upstreamError();
       this.sawDone = true;
       return;
     }
     let value;
     try { value = JSON.parse(data); } catch { throw upstreamError(); }
-    this.accept(value, events);
+    this.accept(value, events, errorEvent);
   }
 
   line(line, events) {
     if (line.endsWith("\r")) line = line.slice(0, -1);
     if (!line) return this.flushEvent(events);
+    if (line === "event" || line.startsWith("event:")) {
+      this.errorEvent = line.slice(6).trim().toLowerCase() === "error";
+      return;
+    }
     if (!line.startsWith("data:")) return;
     const value = line.slice(5).replace(/^ /, "");
     this.dataBytes += Buffer.byteLength(value);
@@ -599,74 +641,89 @@ export class ResponsesStream {
   }
 
   push(chunk) {
-    if (this.finished) throw upstreamError();
+    if (this.finished || this.failed) return [];
     this.totalBytes += chunk.byteLength;
     if (this.totalBytes > RESPONSE_LIMIT) throw upstreamError();
     const events = [];
+    const sequence = this.sequence;
+    const started = this.started;
     this.start(events);
     try {
-      if (this.failed) return events;
       this.buffer += this.decoder.decode(chunk, { stream: true });
-    } catch { throw upstreamError(); }
-    let end;
-    while ((end = this.buffer.indexOf("\n")) !== -1) {
-      this.line(this.buffer.slice(0, end), events);
-      this.buffer = this.buffer.slice(end + 1);
+      let end;
+      while ((end = this.buffer.indexOf("\n")) !== -1) {
+        this.line(this.buffer.slice(0, end), events);
+        this.buffer = this.buffer.slice(end + 1);
+      }
+      if (Buffer.byteLength(this.buffer) > EVENT_LIMIT) throw upstreamError();
+      return events;
+    } catch {
+      // No frame from this call reached the writer. Preserve parsed output and
+      // usage for fail(), but let it reuse the undelivered lifecycle/sequence.
+      this.sequence = sequence;
+      this.started = started;
+      throw upstreamError();
     }
-    if (Buffer.byteLength(this.buffer) > EVENT_LIMIT) throw upstreamError();
-    return events;
   }
 
   finish() {
-    if (this.finished) throw upstreamError();
-    this.finished = true;
+    if (this.finished || this.failed) return [];
     const events = [];
+    const sequence = this.sequence;
+    const started = this.started;
     this.start(events);
-    // A stream already closed by fail() emits no further events.
-    if (this.failed) return events;
-    try { this.buffer += this.decoder.decode(); } catch { throw upstreamError(); }
-    if (this.buffer) this.line(this.buffer, events);
-    this.flushEvent(events);
-    this.buffer = "";
-    // Workers in practice close the stream without a finish_reason block. The
-    // missing reason means "finished normally", not a broken upstream.
-    if (!this.finishReason) this.finishReason = "stop";
-    if (["tool_calls", "function_call"].includes(this.finishReason) && !this.tools.size) throw upstreamError();
-    // Validate all buffered custom arguments before any terminal event is emitted.
-    for (const tool of this.tools.values()) {
-      this.openTool(tool, events);
-      if (tool.item.type === "custom_tool_call") tool.item.input = customInput(tool.arguments);
-      else this.toolArguments(tool, events);
-    }
-    Object.assign(this.response, completionStatus(this.finishReason));
-    if (!this.response.output.length) {
-      this.addItem({ id: `msg_${randomUUID()}`, type: "message", status: "in_progress", role: "assistant", content: [] }, events);
-    }
-    for (let outputIndex = 0; outputIndex < this.response.output.length; outputIndex++) {
-      const item = this.response.output[outputIndex];
-      item.status = this.response.status;
-      if (item.type === "message") {
-        for (let contentIndex = 0; contentIndex < item.content.length; contentIndex++) {
-          const part = item.content[contentIndex];
-          const fields = { item_id: item.id, output_index: outputIndex, content_index: contentIndex };
-          events.push(this.event(part.type === "output_text" ? "response.output_text.done" : "response.refusal.done", {
-            ...fields, ...(part.type === "output_text" ? { text: part.text, logprobs: [] } : { refusal: part.refusal }),
+    try {
+      this.buffer += this.decoder.decode();
+      if (this.buffer) this.line(this.buffer, events);
+      this.flushEvent(events);
+      this.buffer = "";
+      // Workers in practice close the stream without a finish_reason block. The
+      // missing reason means "finished normally", not a broken upstream.
+      if (!this.finishReason) this.finishReason = "stop";
+      if (["tool_calls", "function_call"].includes(this.finishReason) && !this.tools.size) throw upstreamError();
+      // Validate all buffered custom arguments before any terminal event is emitted.
+      for (const tool of this.tools.values()) {
+        this.openTool(tool, events);
+        if (tool.item.type === "custom_tool_call") tool.item.input = customInput(tool.arguments);
+        else this.toolArguments(tool, events);
+      }
+      Object.assign(this.response, completionStatus(this.finishReason));
+      if (!this.response.output.length) {
+        this.addItem({ id: `msg_${randomUUID()}`, type: "message", status: "in_progress", role: "assistant", content: [] }, events);
+      }
+      for (let outputIndex = 0; outputIndex < this.response.output.length; outputIndex++) {
+        const item = this.response.output[outputIndex];
+        item.status = this.response.status;
+        if (item.type === "message") {
+          for (let contentIndex = 0; contentIndex < item.content.length; contentIndex++) {
+            const part = item.content[contentIndex];
+            const fields = { item_id: item.id, output_index: outputIndex, content_index: contentIndex };
+            events.push(this.event(part.type === "output_text" ? "response.output_text.done" : "response.refusal.done", {
+              ...fields, ...(part.type === "output_text" ? { text: part.text, logprobs: [] } : { refusal: part.refusal }),
+            }));
+            events.push(this.event("response.content_part.done", { ...fields, part }));
+          }
+        } else if (item.type === "custom_tool_call") {
+          if (item.input) events.push(this.event("response.custom_tool_call_input.delta", {
+            item_id: item.id, output_index: outputIndex, delta: item.input,
           }));
-          events.push(this.event("response.content_part.done", { ...fields, part }));
-        }
-      } else if (item.type === "custom_tool_call") {
-        if (item.input) events.push(this.event("response.custom_tool_call_input.delta", {
-          item_id: item.id, output_index: outputIndex, delta: item.input,
+          events.push(this.event("response.custom_tool_call_input.done", {
+            item_id: item.id, output_index: outputIndex, input: item.input,
+          }));
+        } else events.push(this.event("response.function_call_arguments.done", {
+          item_id: item.id, output_index: outputIndex, name: item.name, arguments: item.arguments,
         }));
-        events.push(this.event("response.custom_tool_call_input.done", {
-          item_id: item.id, output_index: outputIndex, input: item.input,
-        }));
-      } else events.push(this.event("response.function_call_arguments.done", {
-        item_id: item.id, output_index: outputIndex, name: item.name, arguments: item.arguments,
-      }));
-      events.push(this.event("response.output_item.done", { output_index: outputIndex, item }));
+        events.push(this.event("response.output_item.done", { output_index: outputIndex, item }));
+      }
+      events.push(this.event(this.response.status === "completed" ? "response.completed" : "response.incomplete", { response: this.response }));
+      // Only a successfully built terminal event closes the adapter. If decoding
+      // or validation failed above, the transport still owes the client fail().
+      this.finished = true;
+      return events;
+    } catch {
+      this.sequence = sequence;
+      this.started = started;
+      throw upstreamError();
     }
-    events.push(this.event(this.response.status === "completed" ? "response.completed" : "response.incomplete", { response: this.response }));
-    return events;
   }
 }

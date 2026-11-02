@@ -13,6 +13,7 @@ import {
   Wallet,
 } from '@lucide/vue'
 import { number, compact, useConsole, accountState, time } from '../console'
+import { abbreviateCount } from '../format'
 import { api } from '../api'
 import type { Page, TokenTotals, UsageComparison } from '../types'
 import { formatRemainingQuotaPercent, summarizeQuota } from '../quota'
@@ -28,6 +29,9 @@ const unreported = (usage: TokenTotals | null | undefined) =>
   !!usage && !usage.reportedRequests && usage.missingRequests > 0
 const tokenNumber = (usage: TokenTotals | null | undefined, key: keyof TokenTotals) =>
   unreported(usage) ? '—' : number(usage?.[key])
+// Short magnitude beside the exact count, e.g. 23,019,762 → 23.02M.
+const tokenShort = (usage: TokenTotals | null | undefined, key: keyof TokenTotals) =>
+  unreported(usage) ? '' : abbreviateCount(usage?.[key])
 const tokenSummaryStatus = computed(() => {
   const usage = todayTokens.value
   if (!usage) return '暂无用量数据，等待请求上报。'
@@ -157,23 +161,38 @@ const states = computed(() => [
       <div class="overview-summary-value">
         <strong data-testid="summary-token-total">{{ tokenNumber(todayTokens, 'total') }}</strong
         ><span>Tokens</span>
+        <small v-if="tokenShort(todayTokens, 'total')" data-testid="summary-token-total-short"
+          >约 {{ tokenShort(todayTokens, 'total') }}</small
+        >
       </div>
       <dl class="overview-summary-breakdown">
         <div>
           <dt>输入</dt>
           <dd>{{ tokenNumber(todayTokens, 'input') }}</dd>
+          <small v-if="tokenShort(todayTokens, 'input')" class="usage-short"
+            >约 {{ tokenShort(todayTokens, 'input') }}</small
+          >
         </div>
         <div>
           <dt>输出</dt>
           <dd>{{ tokenNumber(todayTokens, 'output') }}</dd>
+          <small v-if="tokenShort(todayTokens, 'output')" class="usage-short"
+            >约 {{ tokenShort(todayTokens, 'output') }}</small
+          >
         </div>
         <div>
           <dt>缓存读取</dt>
           <dd>{{ tokenNumber(todayTokens, 'cacheRead') }}</dd>
+          <small v-if="tokenShort(todayTokens, 'cacheRead')" class="usage-short"
+            >约 {{ tokenShort(todayTokens, 'cacheRead') }}</small
+          >
         </div>
         <div>
           <dt>缓存写入</dt>
           <dd>{{ tokenNumber(todayTokens, 'cacheWrite') }}</dd>
+          <small v-if="tokenShort(todayTokens, 'cacheWrite')" class="usage-short"
+            >约 {{ tokenShort(todayTokens, 'cacheWrite') }}</small
+          >
         </div>
       </dl>
       <p class="overview-summary-state">{{ tokenSummaryStatus }}</p>
@@ -293,6 +312,9 @@ const states = computed(() => [
       >
         <span>{{ item.label }}</span>
         <strong>{{ tokenNumber(tokens, item.key) }}</strong>
+        <em v-if="tokenShort(tokens, item.key)" class="usage-short"
+          >约 {{ tokenShort(tokens, item.key) }}</em
+        >
         <small>{{ item.hint }}</small>
       </div>
     </div>
@@ -656,6 +678,17 @@ const states = computed(() => [
   font-weight: 550;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
+}
+/* Short magnitude next to an exact count, e.g. 23,019,762 → 约 23.02M. */
+.usage-short,
+.overview-summary-value > small {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--secondary);
+  font-variant-numeric: tabular-nums;
+}
+.token-metric > em.usage-short {
+  font-style: normal;
 }
 .overview-summary-state {
   margin: 0;

@@ -18,6 +18,8 @@ const local = (input, output, cacheRead = 0) => ({
   reportedRequests: 1,
   missingRequests: 0,
   partialRequests: 0,
+  cacheReadReported: 0,
+  cacheWriteReported: 0,
 });
 const snapshot = (prompt, completion, cacheHit = 0, boot = "first-boot") => ({
   boot_id: boot,

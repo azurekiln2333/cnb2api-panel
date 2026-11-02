@@ -27,7 +27,9 @@ const completion = (content = "hello", extra = {}) => ({
   usage: { prompt_tokens: 12, completion_tokens: 3, prompt_tokens_details: { cached_tokens: 5 } }, ...extra,
 });
 const frame = (value) => `data: ${JSON.stringify(value)}\n\n`;
-const parseEvents = (text) => text.split("\n\n").filter(Boolean).map((block) => JSON.parse(block.split("\ndata: ")[1]));
+// SSE comment blocks (keepalives) carry no data and are not model events.
+const parseEvents = (text) => text.split("\n\n").filter((block) => block.trim() && !block.trimStart().startsWith(":"))
+  .map((block) => JSON.parse(block.split("\ndata: ")[1]));
 const CHAT_FIELDS = new Set([
   "model", "messages", "stream", "stream_options", "tools", "tool_choice", "parallel_tool_calls",
   "max_tokens", "max_completion_tokens", "temperature", "top_p", "response_format", "reasoning_effort",
@@ -327,6 +329,50 @@ test("Responses route requires gateway auth, supports preflight, rejects unsuppo
   const onlyHosted = await app.send({ stream: false, tools: [{ type: "web_search" }] });
   assert.equal(onlyHosted.status, 200);
   assert.deepEqual(app.calls[1].payload.tools, []);
+});
+
+test("a slow upstream first token still reaches the client behind a keepalive comment", async (t) => {
+  // A reverse proxy aborts a response that stays silent after the headers. The
+  // panel must send a comment frame long before the first generated token.
+  const app = await fixture(t, async (_req, res) => {
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    res.write(frame({ choices: [{ index: 0, delta: { content: "late" }, finish_reason: null }] }));
+    res.write(frame({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }));
+    res.end("data: [DONE]\n\n");
+  });
+  const response = await app.send({ stream: true });
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /text\/event-stream/);
+  assert.equal(response.headers.get("x-accel-buffering"), "no");
+  // The first bytes the client sees are the comment frame, before any model event.
+  const reader = response.body.getReader();
+  let raw = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    raw += Buffer.from(value).toString();
+    if (raw.includes("event: response.created")) break;
+  }
+  assert.equal(raw.startsWith(": keep-alive\n\n"), true);
+  assert.ok(raw.indexOf(": keep-alive\n\n") < raw.indexOf("event: response.created"));
+  let rest = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    rest += Buffer.from(value).toString();
+  }
+  const text = raw + rest;
+  assert.equal(text.split(": keep-alive").length - 1 >= 1, true);
+  const events = parseEvents(text);
+  assert.deepEqual(events.map((event) => event.sequence_number), events.map((_event, index) => index));
+  assert.equal(events.at(-1).type, "response.completed");
+  assert.equal(events.at(-1).response.output[0].content[0].text, "late");
+  // Token accounting must not count the comment frames as response bytes.
+  const record = app.store.state.logs.find((entry) => entry.kind === "request");
+  const eventBytes = text.split("\n\n").filter((block) => block.trim() && !block.trimStart().startsWith(":"))
+    .reduce((total, block) => total + Buffer.byteLength(`${block}\n\n`), 0);
+  assert.ok(record.responseBytes >= eventBytes);
 });
 
 test("Responses transport preserves non-retryable upstream errors", async (t) => {
