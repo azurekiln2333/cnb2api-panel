@@ -30,6 +30,11 @@ export function sessionKey(headers, payload) {
   const id =
     sessionId(headers["x-session-id"]) ||
     sessionId(headers["x-conversation-id"]) ||
+    // Codex and other OpenAI clients mark a conversation with prompt_cache_key.
+    // The same value seeds the upstream prefix cache, so honouring it keeps a
+    // whole conversation on one account instead of hashing the transcript.
+    sessionId(payload.prompt_cache_key) ||
+    sessionId(payload.metadata?.prompt_cache_key) ||
     metadataSession(payload.metadata);
   let identity;
   if (id) {

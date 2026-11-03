@@ -37,6 +37,19 @@ export interface UsageComparison {
     cacheWrite: number | null
     total: number
   } | null
+  upstream: UpstreamUsage | null
+  supportsCredit: boolean
+}
+// Real upstream counters reported by the workspace /usage endpoint, already
+// diffed against the same baseline as the token comparison.
+export interface UpstreamUsage {
+  prompt: number
+  completion: number
+  requests: number
+  errors: number
+  credit: number
+  cacheHit: number
+  cacheMiss: number
 }
 export interface Quota {
   org: string

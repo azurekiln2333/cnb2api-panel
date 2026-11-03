@@ -750,6 +750,180 @@ test('overview shows measured token usage and compares aligned worker usage on d
   await page.screenshot({ path: '../test-results/overview-tokens-mobile.png', fullPage: true })
 })
 
+test('upstream reconciliation exposes credit, cache hit rate and credit density per account', async ({
+  page,
+  request,
+}) => {
+  const seeded = await seed(request)
+  const overview = await (await request.get('/api/overview')).json()
+  // Two accounts: one with a healthy prefix cache, one with a cold cache that
+  // burns far more credit for the same prompt tokens.
+  const warm = {
+    accountId: seeded[0].id,
+    accountName: 'warm-workspace',
+    status: 'ok',
+    message: '已同步',
+    syncedAt: '2026-10-24T01:00:00.000Z',
+    bootedAt: '2026-10-24T00:00:00.000Z',
+    bootId: 'boot-warm',
+    startedAt: '2026-10-24T00:30:00.000Z',
+    workspaceTotals: {
+      input: 8_000,
+      output: 200,
+      cacheRead: 3_840,
+      cacheWrite: null,
+      total: 8_200,
+      reportedRequests: 5,
+      missingRequests: 0,
+      partialRequests: 0,
+    },
+    local: {
+      input: 8_000,
+      output: 200,
+      cacheRead: 3_840,
+      cacheWrite: 0,
+      total: 8_200,
+      reportedRequests: 5,
+      missingRequests: 0,
+      partialRequests: 0,
+    },
+    workspace: {
+      input: 8_000,
+      output: 200,
+      cacheRead: 3_840,
+      cacheWrite: null,
+      total: 8_200,
+      reportedRequests: 0,
+      missingRequests: 0,
+      partialRequests: 0,
+    },
+    difference: { input: 0, output: 0, cacheRead: 0, cacheWrite: null, total: 0 },
+    upstream: {
+      prompt: 8_000,
+      completion: 200,
+      requests: 5,
+      errors: 0,
+      credit: 2,
+      cacheHit: 3_840,
+      cacheMiss: 4_160,
+    },
+    supportsCredit: true,
+  }
+  const cold = {
+    ...warm,
+    accountId: seeded[1].id,
+    accountName: 'cold-workspace',
+    bootId: 'boot-cold',
+    local: { ...warm.local, cacheRead: 0 },
+    workspace: { ...warm.workspace, cacheRead: 0 },
+    upstream: {
+      prompt: 8_000,
+      completion: 200,
+      requests: 5,
+      errors: 0,
+      credit: 18,
+      cacheHit: 0,
+      cacheMiss: 8_000,
+    },
+  }
+  await page.route('**/api/usage/comparison', (route) =>
+    route.fulfill({ json: { accounts: [warm, cold] } }),
+  )
+  await page.route('**/api/overview', (route) =>
+    route.fulfill({
+      json: {
+        ...overview,
+        stats: {
+          ...overview.stats,
+          tokenUsage: {
+            ...overview.stats.tokenUsage,
+            today: { ...overview.stats.tokenUsage.today, total: 23_019_762 },
+          },
+        },
+      },
+    }),
+  )
+  await login(page)
+  await page.getByRole('link', { name: '运行概览', exact: true }).click()
+  const panel = page.getByRole('region', { name: '上游真实用量对账', exact: true })
+  await expect(panel).toBeVisible()
+
+  // Pool-wide totals: 3,840 hits against 12,160 misses is a 24% hit rate.
+  await expect(panel.getByTestId('reconcile-hit-rate')).toHaveText('24%')
+  // 20 credit over 16,400 tokens is 1.2195 credit per thousand tokens.
+  await expect(panel.getByTestId('reconcile-credit-ratio')).toHaveText('1.22')
+  await expect(panel.getByTestId('reconcile-upstream-total')).toHaveText('16.4K')
+  await expect(panel.getByTestId('reconcile-local-total')).toHaveText('16.4K')
+
+  // The comparison table pairs each local counter with the workspace counter.
+  const row = (key: string) => panel.getByTestId(`reconcile-row-${key}`)
+  await expect(row('prompt').getByTestId('cell-local')).toContainText('16,000')
+  await expect(row('prompt').getByTestId('cell-upstream')).toContainText('16,000')
+  await expect(row('prompt').getByTestId('cell-difference')).toHaveText('0')
+  await expect(row('cacheHit').getByTestId('cell-upstream')).toContainText('3,840')
+  // Local cache writes exist but the workspace reports none.
+  await expect(row('cacheWrite').getByTestId('cell-upstream')).toHaveText('—')
+  await expect(row('cacheWrite').getByTestId('cell-difference')).toHaveText('—')
+  await expect(row('credit').getByTestId('cell-local')).toHaveText('—')
+  await expect(row('credit').getByTestId('cell-upstream')).toContainText('20')
+  // Large counters also carry the shared K/M/B abbreviation.
+  await expect(row('total').getByTestId('cell-local')).toContainText('16.4K')
+
+  // Per-account density separates a warm cache from a cold one.
+  const warmRow = panel.getByTestId(`reconcile-account-${seeded[0].id}`)
+  const coldRow = panel.getByTestId(`reconcile-account-${seeded[1].id}`)
+  await expect(warmRow.getByTestId('account-hit-rate')).toHaveText('48%')
+  await expect(coldRow.getByTestId('account-hit-rate')).toHaveText('0%')
+  await expect(warmRow.getByTestId('account-credit-ratio')).toHaveText('0.244')
+  await expect(coldRow.getByTestId('account-credit-ratio')).toHaveText('2.2')
+  await expect(warmRow.getByTestId('account-credit')).toHaveText('2')
+  await expect(coldRow.getByTestId('account-credit')).toHaveText('18')
+  await expect(coldRow.getByTestId('account-local-miss')).toHaveText('8,000')
+  await expect(panel).toContainText('本区块只读，不参与路由、额度保护或计费计算')
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+  await expect(panel.getByTestId('reconcile-hit-rate')).toBeVisible()
+  await expect(panel.getByTestId('reconcile-table')).toBeVisible()
+})
+
+test('upstream reconciliation stays empty until a workspace snapshot is available', async ({
+  page,
+  request,
+}) => {
+  await seed(request)
+  await page.route('**/api/usage/comparison', (route) =>
+    route.fulfill({
+      json: {
+        accounts: [
+          {
+            accountId: 'pending-account',
+            accountName: 'pending-workspace',
+            status: 'pending',
+            message: '尚未读取工作区用量',
+            syncedAt: null,
+            bootedAt: null,
+            bootId: null,
+            startedAt: null,
+            workspaceTotals: null,
+            local: null,
+            workspace: null,
+            difference: null,
+            upstream: null,
+            supportsCredit: false,
+          },
+        ],
+      },
+    }),
+  )
+  await login(page)
+  await page.getByRole('link', { name: '运行概览', exact: true }).click()
+  const panel = page.getByRole('region', { name: '上游真实用量对账', exact: true })
+  await expect(panel.getByTestId('reconcile-empty')).toBeVisible()
+  await expect(panel).toContainText('同步工作区用量后，这里显示真实扣费与缓存命中')
+  await expect(panel.getByTestId('reconcile-table')).toHaveCount(0)
+})
+
 test('request details show the first user message, usage and routing metadata on desktop and phone', async ({
   page,
   request,

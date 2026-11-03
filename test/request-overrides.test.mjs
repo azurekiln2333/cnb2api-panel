@@ -433,7 +433,7 @@ test("Claude Code compatibility rewrites Chat system and developer text from the
   assert.equal(payload.messages[0].role, "system");
   assert.equal(
     payload.messages[0].content,
-    "x-cc-billing-meta: cc_version=2.1.212.3f4; cc_entrypoint=sdk-cli;\n"
+    "x-cc-billing-meta: cch=0\n"
       + "you are claude code, a command-line coding assistant.\n"
       + "to share feedback, users can report the issue at https://github.com/anthropics/claude-code/issues",
   );
@@ -503,4 +503,80 @@ test("Claude Code Messages preset keeps its existing behaviour", () => {
   assert.deepEqual(rules.slice(3).map((rule) => [rule.outcome, rule.count]), [
     ["applied", 2], ["applied", 2], ["applied", 1],
   ]);
+});
+
+// --- Prefix cache stability -------------------------------------------------
+// The upstream prefix cache matches on exact bytes. Any per-request volatile
+// value inside the cached prefix turns every turn into a miss, and a miss costs
+// far more credit than a hit. These tests pin the prefix to a constant.
+
+const CLAUDE_BILLING_SYSTEM = (value) =>
+  `\nx-anthropic-billing-header: ${value};\nYou are Claude Code, Anthropic's official CLI tool for Claude.\nYou help with coding.`;
+
+test("the Claude Code billing header value does not vary between requests", () => {
+  const chat = (value) => ({
+    model: "deepseek-v4.1",
+    messages: [
+      { role: "system", content: CLAUDE_BILLING_SYSTEM(value) },
+      { role: "user", content: "fix the failing test" },
+    ],
+  });
+  const first = rewriteRequest(chat("cch=a1b2c3d4e5f60718"), { claudeCodeCompat: true }, CHAT).payload;
+  const second = rewriteRequest(chat("cch=99887766554433ff"), { claudeCodeCompat: true }, CHAT).payload;
+  // The whole prefix is byte-identical, so the upstream cache can match it.
+  assert.equal(first.messages[0].content, second.messages[0].content);
+  assert.equal(
+    first.messages[0].content,
+    "\nx-cc-billing-meta: cch=0\n"
+      + "you are claude code, a command-line coding assistant.\n"
+      + "You help with coding.",
+  );
+});
+
+test("the Messages route normalizes the billing header value too", () => {
+  const messages = (value) => ({
+    max_tokens: 16,
+    system: [{ type: "text", text: CLAUDE_BILLING_SYSTEM(value) }],
+    messages: [{ role: "user", content: "hello" }],
+  });
+  const first = rewriteRequest(messages("cch=aaaaaaaaaaaa"), { claudeCodeCompat: true }, MESSAGES).payload;
+  const second = rewriteRequest(messages("cch=bbbbbbbbbbbb"), { claudeCodeCompat: true }, MESSAGES).payload;
+  assert.equal(first.system[0].text, second.system[0].text);
+  assert.match(first.system[0].text, /^\nx-cc-billing-meta: cch=0\n/);
+});
+
+test("a billing header without a value still normalizes the name only", () => {
+  // A header that carries no key=value segment has no volatile part, so only the
+  // name is rewritten and the rest of the line keeps its bytes.
+  const bare = { messages: [{ role: "system", content: "x-anthropic-billing-header:\nhello" }] };
+  const { payload } = rewriteRequest(bare, { claudeCodeCompat: true }, CHAT);
+  assert.equal(payload.messages[0].content, "x-cc-billing-meta:\nhello");
+});
+
+test("the billing header rewrite never touches user or assistant text", () => {
+  const input = {
+    model: "deepseek-v4.1",
+    messages: [
+      { role: "system", content: CLAUDE_BILLING_SYSTEM("cch=1111") },
+      { role: "user", content: "cch=9999 in user text stays" },
+      { role: "assistant", content: "cch=8888 in assistant text stays" },
+    ],
+  };
+  const { payload } = rewriteRequest(input, { claudeCodeCompat: true }, CHAT);
+  assert.match(payload.messages[0].content, /^\nx-cc-billing-meta: cch=0\n/);
+  assert.equal(payload.messages[1].content, "cch=9999 in user text stays");
+  assert.equal(payload.messages[2].content, "cch=8888 in assistant text stays");
+});
+
+test("both Claude Code identity wordings collapse to one prefix", () => {
+  const prefix = (sentence) => rewriteRequest(
+    { messages: [{ role: "system", content: `header: cch=1\n${sentence}` }] },
+    { claudeCodeCompat: true },
+    CHAT,
+  ).payload.messages[0].content;
+  // Claude Code has shipped both wordings; both must normalize identically.
+  const withTool = prefix("You are Claude Code, Anthropic's official CLI tool for Claude.");
+  const withoutTool = prefix("You are Claude Code, Anthropic's official CLI for Claude.");
+  assert.equal(withTool, withoutTool);
+  assert.equal(withTool, "header: cch=1\nyou are claude code, a command-line coding assistant.");
 });

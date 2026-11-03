@@ -14,6 +14,14 @@ import {
 } from '@lucide/vue'
 import { number, compact, useConsole, accountState, time } from '../console'
 import { abbreviateCount } from '../format'
+import {
+  formatCredit,
+  formatCreditPerThousand,
+  formatHitRate,
+  localCacheMiss,
+  sumReconcile,
+  syncedSources,
+} from '../reconcile'
 import { api } from '../api'
 import type { Page, TokenTotals, UsageComparison } from '../types'
 import { formatRemainingQuotaPercent, summarizeQuota } from '../quota'
@@ -86,6 +94,69 @@ async function loadComparison(refresh = false) {
 }
 onMounted(() => loadComparison())
 watch(overview, () => loadComparison())
+// Read-only reconciliation of panel counters against the workspace's own /usage
+// numbers. Credit and prefix-cache counters explain a quota that drains faster
+// than the token count suggests.
+const reconciled = computed(() => syncedSources(comparisons.value))
+const reconcileTotals = computed(() => sumReconcile(comparisons.value))
+const reconcileRows = computed(() => {
+  const totals = reconcileTotals.value
+  const local = totals.local
+  const upstream = totals.upstream
+  return [
+    {
+      key: 'prompt',
+      label: '输入 / 提示 Tokens',
+      local: local.input,
+      upstream: upstream.prompt,
+      difference: upstream.prompt - local.input,
+    },
+    {
+      key: 'completion',
+      label: '输出 / 补全 Tokens',
+      local: local.output,
+      upstream: upstream.completion,
+      difference: upstream.completion - local.output,
+    },
+    {
+      key: 'cacheHit',
+      label: '缓存命中 Tokens',
+      local: local.cacheRead,
+      upstream: upstream.cacheHit,
+      difference: upstream.cacheHit - local.cacheRead,
+    },
+    {
+      key: 'cacheMiss',
+      label: '缓存未命中 Tokens',
+      local: local.cacheMiss,
+      upstream: upstream.cacheMiss,
+      difference: upstream.cacheMiss - local.cacheMiss,
+    },
+    {
+      key: 'cacheWrite',
+      label: '缓存写入 Tokens',
+      local: local.cacheWrite,
+      upstream: null,
+      difference: null,
+    },
+    {
+      key: 'total',
+      label: 'Tokens 合计',
+      local: local.total,
+      upstream: upstream.total,
+      difference: upstream.total - local.total,
+    },
+    {
+      key: 'credit',
+      label: 'Credit（工作区扣费）',
+      local: null,
+      upstream: upstream.credit,
+      difference: null,
+    },
+  ]
+})
+const signedShort = (value: number | null) =>
+  value == null ? '—' : `${value > 0 ? '+' : ''}${abbreviateCount(value) || number(value)}`
 const today = computed(() => {
   const now = lastUpdated.value?.getTime() ?? Date.now()
   return Math.floor((now + 8 * 3600000) / 86400000) * 86400000 - 8 * 3600000
@@ -589,6 +660,129 @@ const states = computed(() => [
       <span>比对结果独立显示，不计入本地统计。同步时仍在进行的请求和缺失用量可能产生差异。</span>
     </div>
   </section>
+  <section class="section-panel reconcile-panel" aria-labelledby="reconcile-heading">
+    <header class="chart-heading">
+      <div>
+        <h2 id="reconcile-heading">上游真实用量对账</h2>
+        <p>工作区 /usage 的真实扣费与前缀缓存计数，与面板本地统计并排</p>
+      </div>
+      <span class="subtle">{{ reconciled.length }} 个已同步工作区</span>
+    </header>
+    <div v-if="!reconciled.length" class="compact-empty" data-testid="reconcile-empty">
+      {{ comparing ? '正在读取工作区用量…' : '同步工作区用量后，这里显示真实扣费与缓存命中。' }}
+    </div>
+    <template v-else>
+      <div class="reconcile-summary" data-testid="reconcile-summary">
+        <div>
+          <span>缓存命中率</span>
+          <strong data-testid="reconcile-hit-rate">{{
+            formatHitRate(reconcileTotals.upstream.cacheHit, reconcileTotals.upstream.cacheMiss)
+          }}</strong>
+          <small
+            >命中 {{ abbreviateCount(reconcileTotals.upstream.cacheHit) || '0' }} / 未命中
+            {{ abbreviateCount(reconcileTotals.upstream.cacheMiss) || '0' }}</small
+          >
+        </div>
+        <div>
+          <span>Credit / 千 Tokens</span>
+          <strong data-testid="reconcile-credit-ratio">{{
+            formatCreditPerThousand(reconcileTotals.upstream.credit, reconcileTotals.upstream.total)
+          }}</strong>
+          <small>共扣 {{ formatCredit(reconcileTotals.upstream.credit) }} Credit</small>
+        </div>
+        <div>
+          <span>工作区 Tokens 合计</span>
+          <strong data-testid="reconcile-upstream-total">{{
+            abbreviateCount(reconcileTotals.upstream.total) || '0'
+          }}</strong>
+          <small>{{ number(reconcileTotals.upstream.total) }} Tokens</small>
+        </div>
+        <div>
+          <span>面板本地 Tokens 合计</span>
+          <strong data-testid="reconcile-local-total">{{
+            abbreviateCount(reconcileTotals.local.total) || '0'
+          }}</strong>
+          <small>{{ number(reconcileTotals.local.total) }} Tokens</small>
+        </div>
+      </div>
+      <table class="reconcile-table" data-testid="reconcile-table">
+        <thead>
+          <tr>
+            <th>指标</th>
+            <th>面板本地</th>
+            <th>工作区 /usage</th>
+            <th>差值（工作区 − 本地）</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in reconcileRows" :key="row.key" :data-testid="`reconcile-row-${row.key}`">
+            <th>{{ row.label }}</th>
+            <td data-testid="cell-local">
+              {{ row.local == null ? '—' : number(row.local) }}
+              <small v-if="row.local != null && abbreviateCount(row.local)" class="usage-short">{{
+                abbreviateCount(row.local)
+              }}</small>
+            </td>
+            <td data-testid="cell-upstream">
+              {{ row.upstream == null ? '—' : number(row.upstream) }}
+              <small
+                v-if="row.upstream != null && abbreviateCount(row.upstream)"
+                class="usage-short"
+                >{{ abbreviateCount(row.upstream) }}</small
+              >
+            </td>
+            <td data-testid="cell-difference">{{ signedShort(row.difference) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="reconcile-accounts">
+        <article
+          v-for="row in reconciled"
+          :key="row.accountId"
+          class="reconcile-account"
+          :data-testid="`reconcile-account-${row.accountId}`"
+        >
+          <strong>{{ row.accountName }}</strong>
+          <span class="reconcile-account-metrics">
+            <span
+              >命中率
+              <b data-testid="account-hit-rate">{{
+                formatHitRate(row.upstream?.cacheHit, row.upstream?.cacheMiss)
+              }}</b></span
+            >
+            <span
+              >Credit/千 Tokens
+              <b data-testid="account-credit-ratio">{{
+                formatCreditPerThousand(
+                  row.upstream?.credit,
+                  (row.upstream?.prompt ?? 0) + (row.upstream?.completion ?? 0),
+                )
+              }}</b></span
+            >
+            <span
+              >扣费
+              <b data-testid="account-credit">{{ formatCredit(row.upstream?.credit) }}</b></span
+            >
+            <span
+              >本地未命中
+              <b data-testid="account-local-miss">{{ number(localCacheMiss(row.local)) }}</b></span
+            >
+          </span>
+        </article>
+      </div>
+    </template>
+    <div class="token-accounting-note">
+      <span
+        >本地未命中 = 输入 − 缓存读取；工作区未命中直接取自 /usage 的
+        cache_miss。两者不一致说明面板记录的缓存读取与上游实际命中不同。</span
+      >
+      <span
+        >Credit / 千 Tokens 是同一段增量内的扣费密度。缓存未命中单价高于命中，该值升高表示同样的
+        token 数消耗了更多配额。</span
+      >
+      <span>本区块只读，不参与路由、额度保护或计费计算。</span>
+    </div>
+  </section>
   <section class="section-panel">
     <header class="chart-heading">
       <div>
@@ -853,6 +1047,75 @@ const states = computed(() => [
 }
 .comparison-timestamps {
   margin-top: 8px;
+}
+.reconcile-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 4px 16px 12px;
+}
+.reconcile-summary > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.reconcile-summary span {
+  font-size: 12px;
+  color: var(--secondary);
+}
+.reconcile-summary strong {
+  font-size: 20px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.reconcile-summary small {
+  font-size: 11px;
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+.reconcile-table {
+  margin: 0 16px 12px;
+  width: calc(100% - 32px);
+}
+.reconcile-table th,
+.reconcile-table td {
+  font-variant-numeric: tabular-nums;
+}
+.reconcile-accounts {
+  display: grid;
+  gap: 6px;
+  padding: 0 16px 12px;
+}
+.reconcile-account {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.reconcile-account > strong {
+  font-size: 13px;
+}
+.reconcile-account-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 14px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+.reconcile-account-metrics b {
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 760px) {
+  .reconcile-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 .compact-empty {
   padding: 26px 16px 30px;

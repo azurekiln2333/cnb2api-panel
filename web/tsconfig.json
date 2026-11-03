@@ -7,6 +7,9 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
+    // Node's test runner imports src/*.ts directly, so shared helpers must use
+    // explicit .ts specifiers. Vite resolves them too.
+    "allowImportingTsExtensions": true,
     "types": ["vite/client"]
   },
   "include": ["src/**/*.ts", "src/**/*.vue"]

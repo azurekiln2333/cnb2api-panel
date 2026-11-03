@@ -15,6 +15,7 @@ const REMOTE_FIELDS = [
   "completion",
   "requests",
   "errors",
+  "credit",
   "cache_hit",
   "cache_miss",
 ];
@@ -30,6 +31,17 @@ const difference = (current, previous) =>
   );
 const decreased = (current, previous, fields) =>
   fields.some((field) => current[field] < previous[field]);
+// Workspace counters keep their /usage names; the API exposes camelCase so the
+// console never needs to know the upstream wire format.
+const upstreamDelta = (current, baseline) => ({
+  prompt: current.prompt - baseline.prompt,
+  completion: current.completion - baseline.completion,
+  requests: current.requests - baseline.requests,
+  errors: current.errors - baseline.errors,
+  credit: current.credit - baseline.credit,
+  cacheHit: current.cache_hit - baseline.cache_hit,
+  cacheMiss: current.cache_miss - baseline.cache_miss,
+});
 
 function validateSnapshot(value) {
   if (
@@ -45,10 +57,14 @@ function validateSnapshot(value) {
     throw new Error("invalid usage snapshot");
   const remote = {};
   for (const field of REMOTE_FIELDS) {
+    // credit carries fractional units; every other counter is a token count.
     const counter =
       value.totals[field] ??
-      (field.startsWith("cache_") || field === "errors" ? 0 : NaN);
-    if (!Number.isSafeInteger(counter) || counter < 0)
+      (field.startsWith("cache_") || field === "errors" || field === "credit"
+        ? 0
+        : NaN);
+    if (field === "credit" ? !Number.isFinite(counter) || counter < 0
+      : !Number.isSafeInteger(counter) || counter < 0)
       throw new Error("invalid usage counter");
     remote[field] = counter;
   }
@@ -59,6 +75,7 @@ function validateSnapshot(value) {
     bootedAt: new Date(value.booted_at).toISOString(),
     counters: remote,
     supportsCacheRead: value.totals.cache_hit !== undefined,
+    supportsCredit: value.totals.credit !== undefined,
     tokens: totals({
       input: remote.prompt,
       output: remote.completion,
@@ -129,6 +146,10 @@ export class WorkerUsageMonitor {
       local: current?.local || null,
       workspace: remote(current?.workspace),
       difference: remote(current?.difference),
+      // Real upstream cost and prefix-cache counters. These are read-only
+      // diagnostics; they never feed routing, quota or billing decisions.
+      upstream: current?.upstream || null,
+      supportsCredit: current?.supportsCredit === true,
     };
   }
 
@@ -211,9 +232,13 @@ export class WorkerUsageMonitor {
       previous.bootId !== snapshot.bootId ||
       previous.bootedAt !== snapshot.bootedAt ||
       previous.supportsCacheRead !== snapshot.supportsCacheRead ||
+      previous.supportsCredit !== snapshot.supportsCredit ||
       decreased(snapshot.counters, previous.lastRemote, REMOTE_FIELDS) ||
       decreased(localCurrent, previous.lastLocal, TOKEN_FIELDS);
     const baselineRemote = reset ? snapshot.tokens : previous.baselineRemote;
+    const baselineUpstream = reset
+      ? snapshot.counters
+      : previous.baselineUpstream;
     const baselineLocal = reset ? localCurrent : previous.baselineLocal;
     const local = difference(localCurrent, baselineLocal);
     const workspace = difference(snapshot.tokens, baselineRemote);
@@ -229,13 +254,16 @@ export class WorkerUsageMonitor {
       bootId: snapshot.bootId,
       bootedAt: snapshot.bootedAt,
       supportsCacheRead: snapshot.supportsCacheRead,
+      supportsCredit: snapshot.supportsCredit,
       baselineRemote,
+      baselineUpstream,
       baselineLocal,
       lastRemote: snapshot.counters,
       lastLocal: localCurrent,
       workspaceTotals: snapshot.tokens,
       local,
       workspace,
+      upstream: upstreamDelta(snapshot.counters, baselineUpstream),
       difference: Object.fromEntries(
         ["input", "output", "cacheRead", "cacheWrite", "total"].map((field) => [
           field,

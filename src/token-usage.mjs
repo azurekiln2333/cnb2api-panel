@@ -15,6 +15,17 @@ export const emptyTokenUsage = () => ({
   cacheWriteReported: 0,
 });
 
+// Cache miss is the input the provider could not serve from cache. It is derived
+// on read so stored totals keep their original shape: OpenAI `prompt_tokens`
+// already contains the hits, so the remainder is the miss; Anthropic
+// `input_tokens` is the miss on its own. Unknown input yields null, never zero.
+export function deriveCacheMiss(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  if (!Number.isSafeInteger(usage.input) || usage.input <= 0) return null;
+  const read = Number.isSafeInteger(usage.cacheRead) ? usage.cacheRead : 0;
+  return { cacheMiss: Math.max(0, usage.input - read), cacheMissReported: 1 };
+}
+
 export function addTokenUsage(target, value) {
   for (const key of Object.keys(emptyTokenUsage()))
     target[key] = (target[key] || 0) + (value?.[key] || 0);
@@ -221,8 +232,7 @@ export class TokenUsageCapture {
     result.input =
       (input ?? 0) +
       (this.anthropic ? (cacheRead ?? 0) + (cacheWrite ?? 0) : 0);
-    result.output = output ?? 0;
-    // A cache counter is a measured value on its own. Clamping it to an unknown
+    result.output = output ?? 0;    // A cache counter is a measured value on its own. Clamping it to an unknown
     // input total would report a real hit as zero, so only a known total bounds
     // it. An upstream that reports more cache than input is inconsistent, and
     // showing "cache read > input" is worse than clamping to the input total.

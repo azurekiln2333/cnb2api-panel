@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { fetchQuota, QuotaError, quotaFailure } from "./quota.mjs";
 import { quotaCreditValues } from "./quota-protection.mjs";
 import { InputError, normalizeEndpoint, publicAccount } from "./store.mjs";
-import { emptyTokenUsage, TokenUsageCapture } from "./token-usage.mjs";
+import { addTokenUsage, deriveCacheMiss, emptyTokenUsage, TokenUsageCapture } from "./token-usage.mjs";
 import { WorkerUsageMonitor } from "./worker-usage.mjs";
 import { initialUserMessage, requestShape } from "./request-details.mjs";
 import { MAX_REQUEST_BYTES, rewriteRequest } from "./request-overrides.mjs";
@@ -1057,7 +1057,12 @@ export class Pool {
       headers: { configured: headerNames, supported: null, attempts: [] },
     };
     const affinityKey = this.store.state.settings.sessionAffinity
-      ? sessionKey(req.headers, semanticPayload)
+      // Hash the forwarded payload, not the client payload: the override pipeline
+      // normalizes per-request volatile bytes (the Claude Code billing header),
+      // and hashing the raw body would give every turn a different key and split
+      // one conversation across accounts, which destroys the upstream prefix
+      // cache.
+      ? sessionKey(req.headers, forwardedPayload)
       : null;
     if (!this.store.state.settings.sessionAffinity) this.affinity.clear();
     const initialMessage = initialUserMessage(semanticPayload);
@@ -1080,6 +1085,17 @@ export class Pool {
     let responseBytes = 0;
     let usageCapture = null;
     let usageComplete = false;
+    // An attempt that produced billed tokens keeps them even when a later attempt
+    // succeeds. Discarding them made a retried request look free while the
+    // provider had already charged for the abandoned generation.
+    let usageTotals = null;
+    const foldUsage = ({ complete = false } = {}) => {
+      if (!usageCapture) return;
+      const finished = usageCapture.finish(complete);
+      usageTotals = usageTotals ? addTokenUsage(usageTotals, finished) : finished;
+      usageCapture = null;
+      usageComplete = false;
+    };
     // Structured, redacted reason for an interrupted inference request. Logged
     // with the request record so a live "upstream interrupted" report can be
     // traced to a watchdog abort, a client disconnect or a provider failure.
@@ -1139,6 +1155,7 @@ export class Pool {
         upstreamBytes = 0;
         upstreamFirstByteMs = null;
         streamFailure = null;
+        if (usageCapture) foldUsage({ complete: usageComplete });
         usageCapture = null;
         usageComplete = false;
         convertStream = false;
@@ -1337,6 +1354,11 @@ export class Pool {
             idleTimeoutMs,
             clientDisconnected,
           });
+          // A watchdog abort or client disconnect can still have produced billed
+          // tokens upstream. Record whether this attempt captured any usage so a
+          // missing-usage row is distinguishable from a free request.
+          streamFailure.usageCaptured = usageCapture?.sawUsage === true;
+          streamFailure.upstreamBytes = upstreamBytes;
           // Keep earlier attempts for diagnosis without attaching a stale
           // streamFailure to an eventual successful request.
           (diagnostics.streamFailures ??= []).push({ attempt: attempts, accountId: account.id, ...streamFailure });
@@ -1427,11 +1449,19 @@ export class Pool {
         attempts,
         durationMs: Date.now() - started,
         ...(path !== "/v1/messages/count_tokens" && attempts > 0
-          ? {
-              tokenUsage: usageCapture
-                ? usageCapture.finish(usageComplete)
-                : { ...emptyTokenUsage(), missingRequests: 1 },
-            }
+          ? (() => {
+              const tokenUsage = usageTotals
+                ? addTokenUsage(usageTotals, usageCapture
+                  ? usageCapture.finish(usageComplete)
+                  : emptyTokenUsage())
+                : usageCapture
+                  ? usageCapture.finish(usageComplete)
+                  : { ...emptyTokenUsage(), missingRequests: 1 };
+              // Cache miss is derived for reconciliation with the workspace
+              // /usage counter. Stored totals keep their original shape.
+              const cacheMiss = deriveCacheMiss(tokenUsage);
+              return { tokenUsage, ...(cacheMiss ? { cacheMiss } : {}) };
+            })()
           : {}),
         message: success
           ? "请求完成"

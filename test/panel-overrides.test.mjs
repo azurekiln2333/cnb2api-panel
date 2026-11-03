@@ -352,7 +352,10 @@ test("Claude Code compatibility rewrites Messages fingerprints before forwarding
   assert.equal(calls[0].headers["anthropic-version"], "2023-06-01");
   assert.equal(outbound.thinking, undefined);
   assert.doesNotMatch(outbound.system[0].text, /x-anthropic-billing-header|official cli for claude|to give feedback/i);
-  assert.match(outbound.system[0].text, /cc_version=2\.1\.212\.3f4; cc_entrypoint=sdk-cli;/, "billing values survive");
+  // The billing value is volatile per request, so it must be normalized away: a
+  // random value inside the cached prefix forces an upstream cache miss.
+  assert.match(outbound.system[0].text, /x-cc-billing-meta: cch=0/, "billing value normalized");
+  assert.doesNotMatch(outbound.system[0].text, /cc_version=|cc_entrypoint=/, "volatile billing metadata removed");
   assert.ok(outbound.system[0].text.includes("https://github.com/anthropics/claude-code/issues"), "issue URL survives");
   assert.doesNotMatch(outbound.tools[0].description, /x-anthropic-billing-header/i);
   assert.match(outbound.tools[0].description, /private-tool-description/);

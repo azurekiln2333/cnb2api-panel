@@ -256,3 +256,86 @@ test("snapshot timeout is reported as unavailable and accounts without an endpoi
   assert.equal(unregistered.workspaceTotals, null);
   assert.equal((await app.monitor.refreshAll()).accounts[0].status, "pending");
 });
+
+test("upstream credit and prefix-cache counters are diffed from the same baseline", async (t) => {
+  const app = await fixture(t);
+  const initial = await app.monitor.refresh(app.id);
+  assert.equal(initial.supportsCredit, true);
+  // A fresh baseline subtracts itself, so every delta starts at zero.
+  assert.deepEqual(initial.upstream, {
+    prompt: 0,
+    completion: 0,
+    requests: 0,
+    errors: 0,
+    credit: 0,
+    cacheHit: 0,
+    cacheMiss: 0,
+  });
+  app.respond({
+    boot_id: "first-boot",
+    booted_at: "2026-10-24T00:00:00.000Z",
+    totals: {
+      prompt: 9000,
+      completion: 400,
+      requests: 15,
+      errors: 1,
+      credit: 7.5,
+      cache_hit: 3840,
+      cache_miss: 5160,
+    },
+  });
+  const next = await app.monitor.refresh(app.id);
+  assert.equal(next.upstream.prompt, 8000);
+  assert.equal(next.upstream.completion, 200);
+  assert.equal(next.upstream.requests, 5);
+  assert.equal(next.upstream.errors, 1);
+  assert.equal(next.upstream.credit, 6.25);
+  assert.equal(next.upstream.cacheHit, 3540);
+  // The baseline snapshot already reported cache_miss = 1000 - 300 = 700.
+  assert.equal(next.upstream.cacheMiss, 4460);
+  // Cache hit + miss must still reconcile with the reported prompt tokens.
+  assert.equal(next.upstream.cacheHit + next.upstream.cacheMiss, next.upstream.prompt);
+  // The comparison never leaks into the local accounting totals.
+  assert.deepEqual(app.store.get(app.id).tokenUsage, local(50, 10, 20));
+  assert.equal(next.local.total, 0);
+});
+
+test("fractional credit is accepted while legacy snapshots omit it", async (t) => {
+  const app = await fixture(t);
+  app.respond({
+    boot_id: "first-boot",
+    booted_at: "2026-10-24T00:00:00.000Z",
+    totals: { prompt: 100, completion: 10, requests: 1, errors: 0, credit: 0.000125 },
+  });
+  const row = await app.monitor.refresh(app.id);
+  assert.equal(row.status, "ok");
+  assert.equal(row.supportsCredit, true);
+  assert.equal(row.upstream.credit, 0);
+
+  // A snapshot without the credit counter keeps the field but marks it absent.
+  app.respond({
+    boot_id: "second-boot",
+    booted_at: "2026-10-24T00:00:00.000Z",
+    totals: { prompt: 100, completion: 10, requests: 1, errors: 0 },
+  });
+  const legacy = await app.monitor.refresh(app.id);
+  assert.equal(legacy.status, "ok");
+  assert.equal(legacy.supportsCredit, false);
+  assert.equal(legacy.upstream.credit, 0);
+});
+
+test("a negative or non-JSON-numeric credit counter rejects the whole snapshot", async (t) => {
+  const app = await fixture(t);
+  await app.monitor.refresh(app.id);
+  // JSON cannot carry NaN/Infinity, so only negative and non-numeric values are
+  // reachable from a real workspace response.
+  for (const credit of [-1, "1.5", true]) {
+    app.respond({
+      boot_id: "first-boot",
+      booted_at: "2026-10-24T00:00:00.000Z",
+      totals: { prompt: 100, completion: 10, requests: 1, errors: 0, credit },
+    });
+    const row = await app.monitor.refresh(app.id);
+    assert.equal(row.status, "unavailable", `credit ${String(credit)} must be rejected`);
+  }
+});

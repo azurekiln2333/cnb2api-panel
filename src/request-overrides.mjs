@@ -33,13 +33,25 @@ const DSH_PATH_FINGERPRINT = "Tokens prefixed with @ are paths the user explicit
 const DSH_PATH_REPLACEMENT = "Treat tokens beginning with @ as paths explicitly referenced by the user. Resolve relative paths from the workspace root";
 
 // Claude Code fingerprints that the CNB channel rule rejects with business code
-// 11128. Each entry keeps the request semantics: the billing values survive the
-// header-name rewrite, and the remaining entries are equivalent wording.
+// 11128. Each entry keeps the request semantics: the remaining entries are
+// equivalent wording.
+//
+// The billing header entry additionally normalizes its value. Claude Code marks
+// the header with a per-request random value (cch=...), so renaming only the
+// token left a volatile byte range inside the cached prefix and the upstream
+// prefix cache never matched. The header is machine telemetry the model never
+// reads, so collapsing the value into a fixed placeholder keeps its meaning.
 const CLAUDE_CODE_PHRASES = [
+  // The billing value carries a per-request random token (cch=...). Normalize
+  // the value to a fixed placeholder so the cached prefix is byte-stable, and
+  // stop at the end of the value: only `key=value` segments are consumed, so
+  // text that follows the header on the same line keeps its bytes.
+  [/x-(?:anthropic-billing-header|cc-billing-meta)\s*:[ \t]*[a-z_]{1,32}=[^\s;]*(?:\s*;[ \t]*(?:[a-z_]{1,32}=[^\s;]*)?)*/gi,
+    "x-cc-billing-meta: cch=0"],
   [/x-anthropic-billing-header/gi, "x-cc-billing-meta"],
   [/to give feedback, users should report the issue at (https:\/\/github\.com\/anthropics\/claude-code\/issues)/gi,
     "to share feedback, users can report the issue at $1"],
-  [/you are claude code, anthropic's official cli for claude(\.)?/gi,
+  [/you are claude code, anthropic's official cli (?:tool )?for claude(\.)?/gi,
     "you are claude code, a command-line coding assistant$1"],
 ];
 const CLAUDE_CODE_DROP_FIELDS = ["reasoning_effort", "reasoning", "enable_thinking", "thinking"];

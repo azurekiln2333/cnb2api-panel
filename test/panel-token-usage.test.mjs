@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.mjs";
 import { createPanelServer } from "../src/app.mjs";
-import { addTokenUsage, emptyTokenUsage, TokenUsageCapture } from "../src/token-usage.mjs";
+import { addTokenUsage, deriveCacheMiss, emptyTokenUsage, TokenUsageCapture } from "../src/token-usage.mjs";
 
 const ADMIN = "usage-test-admin-key";
 const GATEWAY = "usage-test-gateway-key";
@@ -653,4 +653,114 @@ test("personal token requires an explicit authenticated reveal and stays absent 
   const comparison = await app.call("/api/usage/comparison", "POST", {});
   assert.equal(comparison.status, 200);
   assert.ok(!JSON.stringify(await comparison.json()).includes(PROXY));
+});
+
+
+test("deriveCacheMiss reports the uncached remainder and never fabricates a zero", () => {
+  // OpenAI prompt_tokens already contains the cache hits.
+  assert.deepEqual(deriveCacheMiss({ input: 120, cacheRead: 70 }), {
+    cacheMiss: 50,
+    cacheMissReported: 1,
+  });
+  assert.deepEqual(deriveCacheMiss({ input: 100, cacheRead: 0 }), {
+    cacheMiss: 100,
+    cacheMissReported: 1,
+  });
+  assert.deepEqual(deriveCacheMiss({ input: 100, cacheRead: 100 }), {
+    cacheMiss: 0,
+    cacheMissReported: 1,
+  });
+  // Unknown input stays unknown instead of looking like a measured zero.
+  assert.equal(deriveCacheMiss({ input: 0, cacheRead: 0 }), null);
+  assert.equal(deriveCacheMiss({ input: 0 }), null);
+  assert.equal(deriveCacheMiss(null), null);
+  assert.equal(deriveCacheMiss({ cacheRead: 10 }), null);
+});
+
+test("an aborted attempt keeps its measured usage instead of vanishing on retry", async (t) => {
+  // The provider bills a generation even when the panel aborts it. Folding every
+  // attempt into the request total keeps the local ledger comparable with the
+  // workspace /usage counters.
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "cnb-panel-abort-usage-"));
+  const directory = join(fixtureRoot, "data");
+  let attempt = 0;
+  const upstream = http.createServer(async (req, res) => {
+    if (req.url === "/v1/models") {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ object: "list", data: [{ id: "test-model" }] }));
+      return;
+    }
+    if (req.url === "/usage") {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    for await (const _ of req);
+    attempt++;
+    res.setHeader("Content-Type", "text/event-stream");
+    if (attempt === 1) {
+      // A billed generation that dies without finish_reason or [DONE].
+      res.write(
+        'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n' +
+          'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_cache_hit_tokens":60}}\n\n',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      res.destroy();
+      return;
+    }
+    res.end(
+      'data: {"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}\n\n' +
+        'data: {"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":7,"prompt_cache_hit_tokens":10}}\n\n' +
+        "data: [DONE]\n\n",
+    );
+  });
+  const endpoint = await listen(upstream);
+  const app = createPanelServer({
+    adminKey: ADMIN,
+    gatewayKey: GATEWAY,
+    dataDir: directory,
+    allowLocal: true,
+  });
+  app.store.settings({ quotaProtection: { enabled: false } });
+  const base = await listen(app.server);
+  t.after(async () => {
+    app.pool.stop();
+    await close(app.server);
+    await close(upstream);
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  });
+  const created = app.store.create({
+    name: "abort-workspace",
+    endpoint,
+    proxyKey: PROXY,
+  });
+  await app.pool.probe(created.id);
+  const response = await fetch(`${base}/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${GATEWAY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "test-model",
+      stream: true,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  });
+  await response.text().catch(() => {});
+  for (
+    let i = 0;
+    i < 200 &&
+    !app.store.state.logs.some((entry) => entry.kind === "request");
+    i++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  const record = app.store.state.logs.find((entry) => entry.kind === "request");
+  assert.ok(record, "request log written");
+  // The aborted attempt was billed: its usage must survive into the ledger.
+  assert.equal(record.tokenUsage.input, 100);
+  assert.equal(record.tokenUsage.output, 5);
+  assert.equal(record.tokenUsage.cacheRead, 60);
+  assert.equal(record.tokenUsage.total, 105);
+  assert.deepEqual(record.cacheMiss, { cacheMiss: 40, cacheMissReported: 1 });
 });
