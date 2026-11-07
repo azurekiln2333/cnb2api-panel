@@ -667,6 +667,13 @@ const states = computed(() => [
         <p v-if="row.local?.missingRequests" class="comparison-message">
           {{ number(row.local.missingRequests) }} 次本地尝试未上报用量。
         </p>
+        <p v-if="row.probe?.requests" class="comparison-message" data-testid="comparison-probe">
+          推理探活：{{ number(row.probe.requests) }} 次，{{
+            exact(row.probe.prompt + row.probe.completion)
+          }}
+          Tokens（输入 {{ exact(row.probe.prompt) }} / 输出
+          {{ exact(row.probe.completion) }}）。已计入本地合计，不计入 Token 统计。
+        </p>
         <div v-if="row.startedAt || row.syncedAt" class="comparison-timestamps">
           <span v-if="row.startedAt">基线 {{ time(row.startedAt, true) }}</span
           ><span v-if="row.syncedAt">同步 {{ time(row.syncedAt, true) }}</span>

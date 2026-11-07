@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { fetchQuota, QuotaError, quotaFailure } from "./quota.mjs";
 import { quotaCreditValues } from "./quota-protection.mjs";
-import { InputError, normalizeEndpoint, publicAccount } from "./store.mjs";
+import { emptyProbeUsage, InputError, normalizeEndpoint, publicAccount } from "./store.mjs";
 import { addTokenUsage, deriveCacheMiss, emptyTokenUsage, TokenUsageCapture } from "./token-usage.mjs";
 import { WorkerUsageMonitor } from "./worker-usage.mjs";
 import { initialUserMessage, requestShape } from "./request-details.mjs";
@@ -22,16 +22,13 @@ const sameConnection = (a, b) =>
   a.endpoint === b.endpoint && a.secrets.proxyKey === b.secrets.proxyKey;
 
 // Records which upstream produced the response in the account's runtime state.
-// A sent request header with no applied header means an old worker that ignores
-// the header and always uses classic, so it reads as "legacy" - but only on a
-// 2xx, because an error may come from an edge gateway rather than the worker. A
-// module-level helper keeps Pool.prototype.forward usable by the duck-typed test
-// doubles.
+// Current workers send the applied header on every response that called the
+// upstream, whether or not the request carried a mode. A 2xx inference response
+// without it therefore comes from an old worker that always uses classic, so it
+// reads as "legacy" - also for inherit accounts. Only a 2xx counts, because an
+// error may come from an edge gateway rather than the worker. A module-level
+// helper keeps Pool.prototype.forward usable by the duck-typed test doubles.
 function recordUpstreamMode(store, account, source, response) {
-  const requested =
-    account.upstreamMode && account.upstreamMode !== "inherit"
-      ? account.upstreamMode
-      : null;
   const reported = (
     response.headers.get("x-cnb2api-upstream-mode-applied") || ""
   )
@@ -44,7 +41,7 @@ function recordUpstreamMode(store, account, source, response) {
   // nothing about the worker version. Keep the previous measurement instead of
   // mislabelling a current worker as legacy.
   if (!reportedMode && !response.ok) return;
-  const applied = reportedMode ?? (requested ? "legacy" : null);
+  const applied = reportedMode ?? "legacy";
   let current;
   try {
     current = store.get(account.id);
@@ -54,18 +51,19 @@ function recordUpstreamMode(store, account, source, response) {
   if (!sameConnection(current, source)) return;
   // Every request would otherwise rewrite the runtime document for an unchanged
   // value; the timestamp marks the last observed change.
-  if (
-    current.upstreamModeApplied === applied &&
-    (applied === null || current.upstreamModeAppliedAt)
-  )
+  if (current.upstreamModeApplied === applied && current.upstreamModeAppliedAt)
     return;
-  // An inherit request against an old worker reports nothing at all, so the
-  // state stays "unknown" instead of looking freshly measured.
   store.patch(account.id, {
     upstreamModeApplied: applied,
-    upstreamModeAppliedAt: applied === null ? null : new Date().toISOString(),
+    upstreamModeAppliedAt: new Date().toISOString(),
   });
 }
+
+// The probe asks for one output token. A bounded body keeps a misbehaving
+// worker from holding memory; usage parsing has its own caps.
+const INFERENCE_PROBE_BYTES = 256 * 1024;
+const inferenceProbeModel = (account) =>
+  account.models[0] || account.discoveredModels[0] || "";
 const blocksRecovery = (a) =>
   ["upstream", "response"].includes(a.failureKind) ||
   (!a.failureKind && /^工作区返回 HTTP \d+/.test(a.lastError || ""));
@@ -361,6 +359,10 @@ export class Pool {
     this.wakes = new Map();
     this.autoWakeAttempts = new Map();
     this.lastCycle = 0;
+    // Optional real inference probes: in-flight work and the last successful
+    // real inference per account, which makes a probe redundant.
+    this.inferenceProbes = new Map();
+    this.inferenceSuccessAt = new Map();
     this.workerUsage = new WorkerUsageMonitor(store);
     this.registrationRelay = new RegistrationRelay(store, {
       ...registrationRelayOptions,
@@ -467,7 +469,7 @@ export class Pool {
     return bind(chosen);
   }
 
-  confirmInferenceSuccess(source) {
+  confirmInferenceSuccess(source, { probe = false } = {}) {
     let current;
     try {
       current = this.store.get(source.id);
@@ -476,9 +478,13 @@ export class Pool {
     }
     if (!sameConnection(current, source)) return;
     this.healthVersions.set(source.id, (this.healthVersions.get(source.id) || 0) + 1);
+    // Real traffic already proves generation, so the next inference probe waits.
+    if (!probe) this.inferenceSuccessAt.set(source.id, Date.now());
     // A completed request disproves older connection failures. Requests admitted
-    // before a real provider cooldown must still respect that cooldown.
-    if (isCooling(current) && blocksRecovery(current)) return;
+    // before a real provider cooldown must still respect that cooldown. Routing
+    // never admits a cooling account, so only a manual inference probe can start
+    // inside a cooldown, and its success proves that same cooldown is over.
+    if (newerRoutingCooldown(current, source)) return;
     if (current.status === "healthy" && !current.failures &&
         !current.failureKind && !current.cooldownUntil && !current.lastError) return;
     this.store.patch(source.id, {
@@ -547,7 +553,14 @@ export class Pool {
     const previous = this.probes.get(id);
     if (previous && sameConnection(previous, account)) return previous.promise;
     const current = { endpoint: account.endpoint, secrets: account.secrets };
-    current.promise = this.check(id).finally(() => {
+    // Never run the readiness check concurrently with an inference probe on the
+    // same account. Without one in flight the check still starts immediately.
+    const inference = this.inferenceProbes.get(id);
+    current.promise = (
+      inference
+        ? inference.promise.catch(() => {}).then(() => this.check(id))
+        : this.check(id)
+    ).finally(() => {
       if (this.probes.get(id) === current) this.probes.delete(id);
     });
     this.probes.set(id, current);
@@ -645,6 +658,189 @@ export class Pool {
       }
     }
     return publicAccount(this.store.get(id));
+  }
+
+  // Optional real generation request. The /v1/models probe proves the worker
+  // and its key, not that the upstream can generate or which upstream it uses.
+  inferenceProbe(id) {
+    const account = this.store.get(id);
+    if (!account.enabled) throw new InputError("账号已停用，无法测试推理", 409);
+    if (!account.endpoint) throw new InputError("工作区尚未注册地址，无法测试推理", 409);
+    const previous = this.inferenceProbes.get(id);
+    if (previous && sameConnection(previous, account)) return previous.promise;
+    const current = { endpoint: account.endpoint, secrets: account.secrets };
+    const health = this.probes.get(id);
+    current.promise = (
+      health
+        ? health.promise.catch(() => {}).then(() => this.runInferenceProbe(id))
+        : this.runInferenceProbe(id)
+    ).finally(() => {
+      if (this.inferenceProbes.get(id) === current) this.inferenceProbes.delete(id);
+    });
+    this.inferenceProbes.set(id, current);
+    return current.promise;
+  }
+
+  inferenceProbeDue(account, intervalMs, now = Date.now()) {
+    // Same gate as routing: disabled, cooling, unhealthy and quota-protected
+    // accounts receive no traffic, so a probe there spends quota for nothing.
+    if (!isReady(account)) return false;
+    if (this.inferenceProbes.has(account.id) || this.probes.has(account.id)) return false;
+    const last = Date.parse(account.inferenceProbe?.at || "");
+    if (Number.isFinite(last) && now - last < intervalMs) return false;
+    const success = this.inferenceSuccessAt.get(account.id);
+    return success === undefined || now - success >= intervalMs;
+  }
+
+  // Starts at most one due probe per tick. This staggers a pool whose probes
+  // all fall due together, for example right after enabling the setting.
+  inferenceTick(now = Date.now()) {
+    const { enabled, intervalMinutes } = this.store.state.settings.inferenceProbe;
+    if (!enabled) return null;
+    const due = this.store.state.accounts.find((a) =>
+      this.inferenceProbeDue(a, intervalMinutes * 60000, now),
+    );
+    if (!due) return null;
+    try {
+      return this.inferenceProbe(due.id).catch(() => null);
+    } catch {
+      return null;
+    }
+  }
+
+  async runInferenceProbe(id) {
+    const a = this.store.get(id);
+    const source = { ...a, healthVersion: this.healthVersions.get(id) || 0 };
+    const model = inferenceProbeModel(a);
+    const result = {
+      at: new Date().toISOString(),
+      ok: false,
+      status: null,
+      latencyMs: null,
+      model,
+      error: "",
+      usage: null,
+    };
+    const save = (probeUsage) => {
+      let current;
+      try {
+        current = this.store.get(id);
+      } catch {
+        return;
+      }
+      // A result from a replaced connection describes another worker.
+      if (!sameConnection(current, source)) return;
+      this.store.patch(id, {
+        inferenceProbe: result,
+        ...(probeUsage ? { probeUsage } : {}),
+      });
+    };
+    // The account may change while this probe waited for a readiness check.
+    if (!a.enabled || !a.endpoint) {
+      result.error = "账号已停用或尚未注册地址";
+      return result;
+    }
+    if (!model) {
+      result.error = "无可用模型";
+      save();
+      return result;
+    }
+    // Same mode rule as inference. No overrides, compatibility presets or
+    // header carrier: the probe tests the worker, not the client pipeline.
+    const mode =
+      a.upstreamMode && a.upstreamMode !== "inherit" ? a.upstreamMode : null;
+    const started = Date.now();
+    let response;
+    let usage = null;
+    try {
+      response = await fetch(`${a.endpoint}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${a.secrets.proxyKey}`,
+          "Content-Type": "application/json",
+          ...(mode ? { "x-cnb2api-upstream-mode": mode } : {}),
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 1,
+          stream: false,
+        }),
+        signal: AbortSignal.timeout(
+          this.store.state.settings.idleTimeoutSeconds * 1000,
+        ),
+        redirect: "error",
+      });
+      result.status = response.status;
+      recordUpstreamMode(this.store, a, source, response);
+      if (response.ok) {
+        const capture = new TokenUsageCapture(
+          response.headers.get("content-type") || "application/json",
+          "/v1/chat/completions",
+        );
+        const reader = response.body?.getReader();
+        let size = 0;
+        if (reader)
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              size += value.byteLength;
+              if (size > INFERENCE_PROBE_BYTES)
+                throw new InputError("推理响应超出大小限制", 502);
+              capture.push(value);
+            }
+          } finally {
+            await reader.cancel().catch(() => {});
+            reader.releaseLock();
+          }
+        const measured = capture.finish(true);
+        if (measured.reportedRequests && !measured.partialRequests)
+          usage = { prompt: measured.input, completion: measured.output };
+      } else await response.body?.cancel().catch(() => {});
+    } catch (error) {
+      // A connection or timeout failure cools the account exactly like a
+      // failed inference attempt.
+      const timedOut = wakeTimedOut(error);
+      result.latencyMs = Date.now() - started;
+      result.error = `推理探活：${timedOut ? "推理响应等待超时" : "推理请求连接失败"}`;
+      this.fail(id, result.error, timedOut ? 504 : 502, source, { routing: true });
+      save();
+      return result;
+    }
+    result.latencyMs = Date.now() - started;
+    result.usage = usage;
+    if (retryable(response.status)) {
+      result.error = `推理探活：工作区返回 HTTP ${response.status}，已进入冷却`;
+      this.fail(id, result.error, response.status, source, {
+        routing: true,
+        retryAfter: response.headers.get("retry-after"),
+      });
+      save();
+      return result;
+    }
+    if (!response.ok) {
+      // A rejected request (for example an unknown model) is a configuration
+      // fact, not a provider failure, so routing stays untouched.
+      result.error = `推理探活：工作区返回 HTTP ${response.status}`;
+      save();
+      return result;
+    }
+    result.ok = true;
+    this.confirmInferenceSuccess(source, { probe: true });
+    // The worker's /usage counters include the probe. Keep a separate offset
+    // so the reconciliation view can explain it without touching token totals.
+    let probeUsage = null;
+    if (usage) {
+      const total = { ...emptyProbeUsage(), ...this.store.get(id).probeUsage };
+      probeUsage = {
+        requests: total.requests + 1,
+        prompt: total.prompt + usage.prompt,
+        completion: total.completion + usage.completion,
+      };
+    }
+    save(probeUsage);
+    return result;
   }
 
   async recover(id) {
@@ -1036,6 +1232,7 @@ export class Pool {
     );
     this.quotaTimer.unref();
     this.timer = setInterval(() => {
+      this.inferenceTick();
       if (
         Date.now() - this.lastCycle <
         this.store.state.settings.healthIntervalSeconds * 1000

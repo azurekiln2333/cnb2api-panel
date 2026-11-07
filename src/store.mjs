@@ -50,8 +50,13 @@ const RUNTIME_FIELDS = [
   "workerUsage",
   "upstreamModeApplied",
   "upstreamModeAppliedAt",
+  "inferenceProbe",
+  "probeUsage",
   "registrationTokenVersion",
 ];
+// Inference probes reach the worker's /usage counters but never the gateway
+// request log, so their usage is kept apart for the reconciliation view.
+export const emptyProbeUsage = () => ({ requests: 0, prompt: 0, completion: 0 });
 const runtimeDefaults = () => ({
   status: "pending",
   discoveredModels: [],
@@ -70,6 +75,8 @@ const runtimeDefaults = () => ({
   tokenUsage: emptyTokenUsage(),
   upstreamModeApplied: null,
   upstreamModeAppliedAt: null,
+  inferenceProbe: null,
+  probeUsage: emptyProbeUsage(),
   registrationTokenVersion: 0,
 });
 
@@ -78,6 +85,23 @@ export class InputError extends Error {
     super(message);
     this.status = status;
   }
+}
+
+export const DEFAULT_INFERENCE_PROBE = Object.freeze({
+  enabled: false,
+  intervalMinutes: 30,
+});
+
+// A real generation request costs quota, so it stays off unless enabled and
+// runs at most once per interval per account.
+export function validateInferenceProbe(input, previous = DEFAULT_INFERENCE_PROBE) {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new InputError("推理探活配置格式无效");
+  const next = { ...DEFAULT_INFERENCE_PROBE, ...previous, ...input };
+  if (typeof next.enabled !== "boolean")
+    throw new InputError("推理探活开关须为布尔值");
+  integer(next.intervalMinutes, 5, 1440, "推理探活间隔");
+  return { enabled: next.enabled, intervalMinutes: next.intervalMinutes };
 }
 
 export const DEFAULT_SETTINGS = {
@@ -94,6 +118,7 @@ export const DEFAULT_SETTINGS = {
   upstreamHeaders: {},
   registrationRelay: { enabled: false, servers: [] },
   quotaProtection: DEFAULT_QUOTA_PROTECTION,
+  inferenceProbe: DEFAULT_INFERENCE_PROBE,
 };
 
 export const DEFAULT_SSO = {
@@ -458,6 +483,7 @@ export class Store {
         settings.upstreamHeaders = validateUpstreamHeaders(settings.upstreamHeaders);
         settings.registrationRelay = validateRegistrationRelay(settings.registrationRelay, { allowLocal, publicUrl });
         settings.quotaProtection = validateQuotaProtection(settings.quotaProtection);
+        settings.inferenceProbe = validateInferenceProbe(settings.inferenceProbe);
       } catch {
         throw new Error("Invalid request override settings; restore the data backup");
       }
@@ -491,6 +517,10 @@ export class Store {
           tokenUsage: {
             ...emptyTokenUsage(),
             ...(legacy ? a.tokenUsage : stats.accounts?.[a.id]?.tokenUsage),
+          },
+          probeUsage: {
+            ...emptyProbeUsage(),
+            ...(legacy ? null : stats.accounts?.[a.id]?.probeUsage),
           },
           secrets: this.decrypt(a.secrets),
         })),
@@ -826,6 +856,8 @@ export class Store {
       tokenUsage: emptyTokenUsage(),
       upstreamModeApplied: null,
       upstreamModeAppliedAt: null,
+      inferenceProbe: null,
+      probeUsage: emptyProbeUsage(),
       registrationTokenVersion: 0,
     };
     this.commit((s) => s.accounts.push(account));
@@ -854,6 +886,7 @@ export class Store {
               latencyMs: null,
               upstreamModeApplied: null,
               upstreamModeAppliedAt: null,
+              inferenceProbe: null,
             }
           : {},
         old.repo !== fields.repo ? { quota: null, lastWakeAt: null } : {},
@@ -902,6 +935,8 @@ export class Store {
         next.registrationRelay = validateRegistrationRelay(input.registrationRelay, { allowLocal: this.allowLocal, publicUrl: this.publicUrl });
       if (input.quotaProtection !== undefined)
         next.quotaProtection = validateQuotaProtection(input.quotaProtection, next.quotaProtection);
+      if (input.inferenceProbe !== undefined)
+        next.inferenceProbe = validateInferenceProbe(input.inferenceProbe, next.inferenceProbe);
     } catch (error) {
       throw new InputError(error.message);
     }

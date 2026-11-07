@@ -45,6 +45,21 @@ const fingerprint = (account) =>
     .digest("hex");
 const totals = (source = {}) =>
   Object.fromEntries(TOKEN_FIELDS.map((field) => [field, source[field] || 0]));
+const PROBE_FIELDS = ["requests", "prompt", "completion"];
+const probeTotals = (source = {}) =>
+  Object.fromEntries(PROBE_FIELDS.map((field) => [field, source?.[field] || 0]));
+// Inference probes never enter gateway token totals, but the worker counts
+// them. Folding them into the local side keeps them out of the difference.
+// A probe carries no cache counters, so it reports a measured zero for both.
+const withProbe = (local, probe) => ({
+  ...local,
+  input: local.input + probe.prompt,
+  output: local.output + probe.completion,
+  total: local.total + probe.prompt + probe.completion,
+  reportedRequests: local.reportedRequests + probe.requests,
+  cacheReadReported: local.cacheReadReported + probe.requests,
+  cacheWriteReported: local.cacheWriteReported + probe.requests,
+});
 const difference = (current, previous) =>
   Object.fromEntries(
     TOKEN_FIELDS.map((field) => [field, current[field] - previous[field]]),
@@ -293,6 +308,8 @@ export class WorkerUsageMonitor {
       startedAt: current?.startedAt || null,
       workspaceTotals: remote(current?.workspaceTotals),
       local: current?.local || null,
+      // Inference probe share of `local`, from the same baseline.
+      probe: current?.probe || null,
       workspace: remote(current?.workspace),
       difference: remote(current?.difference),
       // Real upstream cost and prefix-cache counters. These are read-only
@@ -376,7 +393,8 @@ export class WorkerUsageMonitor {
     }
 
     const now = new Date().toISOString();
-    const localCurrent = totals(account.tokenUsage);
+    const probeCurrent = probeTotals(account.probeUsage);
+    const localCurrent = withProbe(totals(account.tokenUsage), probeCurrent);
     const reset =
       !previous?.baselineUpstream ||
       previous.bootId !== snapshot.bootId ||
@@ -389,6 +407,10 @@ export class WorkerUsageMonitor {
       ? snapshot.counters
       : previous.baselineUpstream;
     const baselineLocal = reset ? localCurrent : previous.baselineLocal;
+    // Baselines written before probes existed predate any probe usage.
+    const baselineProbe = reset
+      ? probeCurrent
+      : probeTotals(previous.baselineProbe);
     const baselineCoverage = reset
       ? snapshot.coverage
       : previous.baselineCoverage;
@@ -415,6 +437,7 @@ export class WorkerUsageMonitor {
       schemaFingerprint: snapshot.schemaFingerprint,
       baselineUpstream,
       baselineLocal,
+      baselineProbe,
       baselineCoverage,
       lastRemote: snapshot.counters,
       lastCoverage: snapshot.coverage,
@@ -423,6 +446,12 @@ export class WorkerUsageMonitor {
         upstreamView(snapshot.counters, snapshot.coverage, snapshot.support),
       ),
       local,
+      probe: Object.fromEntries(
+        PROBE_FIELDS.map((field) => [
+          field,
+          probeCurrent[field] - baselineProbe[field],
+        ]),
+      ),
       workspace,
       upstream,
       difference: Object.fromEntries(

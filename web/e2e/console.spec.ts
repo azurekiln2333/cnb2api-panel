@@ -29,6 +29,7 @@ async function seed(request: APIRequestContext) {
       strategy: 'weighted',
       sessionAffinity: true,
       quotaProtection: { enabled: false, thresholdPercent: 10 },
+      inferenceProbe: { enabled: false, intervalMinutes: 30 },
     },
   })
   const data = await (await request.get('/api/accounts')).json()
@@ -2042,4 +2043,95 @@ test('wake errors identify Cloudflare HTML failures safely and preserve backend 
   await diagnosticsDialog.getByRole('button', { name: '关闭', exact: true }).click()
   expect((await page.request.get('/api/session')).status()).toBe(200)
   await expect(page.getByRole('heading', { name: /^账号池/ })).toBeVisible()
+})
+
+test('inference probe settings validate and persist the switch and interval', async ({
+  page,
+  request,
+}) => {
+  await seed(request)
+  await login(page)
+  await page.getByRole('link', { name: '网关设置', exact: true }).click()
+  const settings = page.getByTestId('inference-probe-settings')
+  const enabled = settings.getByRole('checkbox', { name: /启用推理探活/ })
+  const interval = settings.getByRole('spinbutton', { name: '推理探活间隔', exact: true })
+  const save = page.getByRole('button', { name: '保存配置', exact: true })
+  await expect(settings).toContainText('每次约 1 个输出 token')
+  await expect(enabled).not.toBeChecked()
+  await expect(interval).toHaveValue('30')
+  await interval.fill('4')
+  await save.click()
+  await expect(page.getByRole('alert')).toContainText('推理探活间隔须为 5 至 1440 的整数')
+  // A long interval keeps the scheduler from probing while this test runs.
+  await interval.fill('1440')
+  await enabled.check()
+  await save.click()
+  await expect
+    .poll(async () => (await (await request.get('/api/settings')).json()).settings.inferenceProbe)
+    .toEqual({ enabled: true, intervalMinutes: 1440 })
+  await page.reload()
+  await expect(enabled).toBeChecked()
+  await expect(interval).toHaveValue('1440')
+  await enabled.uncheck()
+  await interval.fill('30')
+  await save.click()
+  await expect
+    .poll(async () => (await (await request.get('/api/settings')).json()).settings.inferenceProbe)
+    .toEqual({ enabled: false, intervalMinutes: 30 })
+})
+
+test('the manage dialog tests inference and the account list shows the last result', async ({
+  page,
+  request,
+}) => {
+  const accounts = await seed(request)
+  // Establish the comparison baseline before the probe reaches the worker.
+  expect((await request.post('/api/usage/comparison', { data: {} })).status()).toBe(200)
+  const tokensBefore = (await (await request.get('/api/overview')).json()).stats.tokenUsage.total
+  await login(page)
+  await page.getByRole('button', { name: '管理AzureKiln · 主力', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: /测试推理/ }).click()
+  const result = dialog.getByTestId('inference-test-result')
+  await expect(result).toContainText('推理成功')
+  await expect(result).toContainText('deepseek-v4.1-flash')
+  await expect(result).toContainText('输入 1,200 / 输出 300 Tokens')
+  await dialog.getByRole('button', { name: '关闭弹窗', exact: true }).click()
+  await expect(page.getByTestId(`inference-probe-${accounts[0].id}`)).toContainText('推理探活成功')
+
+  // The probe never enters Token statistics, but explains the worker's /usage delta.
+  const overview = await (await request.get('/api/overview')).json()
+  expect(overview.stats.tokenUsage.total).toEqual(tokensBefore)
+  await page.getByRole('link', { name: '运行概览', exact: true }).click()
+  await page.getByRole('button', { name: '同步工作区用量', exact: true }).click()
+  const comparison = page.getByTestId(`usage-comparison-${accounts[0].id}`)
+  await expect(comparison.getByTestId('comparison-probe')).toContainText('推理探活：1 次，1,500')
+  await expect(comparison.getByTestId('comparison-local')).toHaveText('1,500')
+  await expect(comparison.getByTestId('comparison-workspace')).toHaveText('1,500')
+  await expect(comparison.getByTestId('comparison-difference')).toHaveText('0')
+  await page.getByRole('link', { name: /^账号管理/ }).click()
+
+  // A rejected request records the failure without hiding the error.
+  await page.route('**/api/accounts/*/inference-probe', (route) =>
+    route.fulfill({
+      json: {
+        at: new Date().toISOString(),
+        ok: false,
+        status: 400,
+        latencyMs: 12,
+        model: 'deepseek-v4.1-flash',
+        error: '推理探活：工作区返回 HTTP 400',
+        usage: null,
+      },
+    }),
+  )
+  await page.getByRole('button', { name: '管理AzureKiln · 主力', exact: true }).click()
+  await dialog.getByRole('button', { name: /测试推理/ }).click()
+  await expect(result).toContainText('推理失败')
+  await expect(result).toContainText('推理探活：工作区返回 HTTP 400')
+  await dialog.getByRole('button', { name: '关闭弹窗', exact: true }).click()
+
+  // Disabled accounts cannot be tested.
+  await page.getByRole('button', { name: '管理备用工作区', exact: true }).click()
+  await expect(dialog.getByRole('button', { name: /测试推理/ })).toBeDisabled()
 })

@@ -13,6 +13,7 @@ const accountActions = {
   PATCH: ["account.update", "修改账号"],
   DELETE: ["account.delete", "删除账号"],
   probe: ["account.probe", "手动探活"],
+  "inference-probe": ["account.inference_probe", "测试推理"],
   quota: ["account.quota", "同步组织额度"],
   wake: ["account.wake", "手动唤醒"],
   registration: ["account.token.rotate", "轮换注册密钥"],
@@ -22,7 +23,7 @@ const accountActions = {
 
 export function auditRequest(req, res, path, store, user) {
   const match =
-    /^\/api\/accounts\/([\w-]+)(?:\/(probe|quota|wake|registration|pat|credentials))?$/.exec(
+    /^\/api\/accounts\/([\w-]+)(?:\/(probe|inference-probe|quota|wake|registration|pat|credentials))?$/.exec(
       path,
     );
   const operation =

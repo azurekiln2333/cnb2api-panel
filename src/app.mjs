@@ -695,7 +695,7 @@ export function createPanelServer(options) {
           });
         }
         const match =
-          /^\/api\/accounts\/([\w-]+)(?:\/(probe|quota|wake|registration|pat|credentials))?$/.exec(
+          /^\/api\/accounts\/([\w-]+)(?:\/(probe|inference-probe|quota|wake|registration|pat|credentials))?$/.exec(
             path,
           );
         if (match) {
@@ -731,6 +731,9 @@ export function createPanelServer(options) {
               return json(res, 200, { pat: account.secrets.pat || "" });
             if (action === "probe")
               return json(res, 200, { account: await pool.probe(id) });
+            // Manual trigger: runs even when automatic inference probes are off.
+            if (action === "inference-probe")
+              return json(res, 200, await pool.inferenceProbe(id));
             if (action === "quota")
               return json(res, 200, { quota: await pool.quota(id) });
             if (action === "wake") return json(res, 200, await pool.wake(id));

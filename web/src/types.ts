@@ -23,6 +23,8 @@ export interface UsageComparison {
   startedAt: string | null
   workspaceTotals: NullableTokenMetrics | null
   local: TokenTotals | null
+  // Inference probe share of `local`; the worker counts these requests too.
+  probe?: ProbeUsage | null
   workspace: NullableTokenMetrics | null
   difference: NullableTokenMetrics | null
   upstream: UpstreamUsage | null
@@ -59,8 +61,8 @@ export interface QuotaProtectionState {
   thresholdPercent: number
 }
 export type UpstreamMode = 'inherit' | 'auto' | 'ide' | 'classic'
-// What the worker actually used. 'legacy' means the request header was sent but
-// the worker never reported back, i.e. an old worker pinned to classic.
+// What the worker actually used. 'legacy' means a successful inference response
+// carried no applied mode, i.e. an old worker pinned to classic.
 export type UpstreamModeApplied = 'ide' | 'classic' | 'legacy' | null
 export interface Account {
   id: string
@@ -103,6 +105,23 @@ export interface Account {
   updatedAt: string
   lastWakeAt: string | null
   tokenUsage: TokenTotals
+  inferenceProbe?: InferenceProbeResult | null
+  probeUsage?: ProbeUsage
+}
+// Last optional real inference probe of an account.
+export interface InferenceProbeResult {
+  at: string
+  ok: boolean
+  status: number | null
+  latencyMs: number | null
+  model: string
+  error: string
+  usage: { prompt: number; completion: number } | null
+}
+export interface ProbeUsage {
+  requests: number
+  prompt: number
+  completion: number
 }
 export interface Settings {
   strategy: 'weighted' | 'least-connections' | 'failover'
@@ -118,6 +137,7 @@ export interface Settings {
   upstreamHeaders: Record<string, string>
   registrationRelay: RegistrationRelayConfig
   quotaProtection: { enabled: boolean; thresholdPercent: number }
+  inferenceProbe: { enabled: boolean; intervalMinutes: number }
 }
 export interface RegistrationRelayServer {
   id: string

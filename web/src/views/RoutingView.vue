@@ -46,6 +46,7 @@ function normalized(settings: Settings): Settings {
       upstreamHeaders: settings.upstreamHeaders ?? {},
       registrationRelay: settings.registrationRelay ?? { enabled: false, servers: [] },
       quotaProtection: settings.quotaProtection ?? { enabled: true, thresholdPercent: 10 },
+      inferenceProbe: settings.inferenceProbe ?? { enabled: false, intervalMinutes: 30 },
     }),
   ) as Settings
 }
@@ -189,6 +190,14 @@ async function save() {
     form.quotaProtection.thresholdPercent > 100
   ) {
     error.value = '额度保护阈值须为 1 至 100 的整数。'
+    return
+  }
+  if (
+    !Number.isInteger(form.inferenceProbe.intervalMinutes) ||
+    form.inferenceProbe.intervalMinutes < 5 ||
+    form.inferenceProbe.intervalMinutes > 1440
+  ) {
+    error.value = '推理探活间隔须为 5 至 1440 的整数。'
     return
   }
   const overrides = overridesValidation.value.value
@@ -391,6 +400,39 @@ async function save() {
           </div>
         </label>
         <p class="subtle">额度未知、无效或同步失败时暂停新请求。验证成功后自动恢复。</p>
+      </div>
+    </section>
+    <section class="section-panel" data-testid="inference-probe-settings">
+      <header class="section-heading">
+        <Timer :size="20" />
+        <div>
+          <h2>推理探活</h2>
+          <p>定期发送一次真实推理请求，确认上游可以生成并测量上游模式。</p>
+        </div>
+      </header>
+      <div class="settings-fields">
+        <label class="affinity-toggle">
+          <input v-model="form.inferenceProbe.enabled" type="checkbox" />
+          <span
+            ><strong>启用推理探活</strong
+            ><small>每次约 1 个输出 token，会消耗少量额度。</small></span
+          >
+        </label>
+        <label>
+          <span>推理探活间隔<small>同一账号在间隔内有成功请求时跳过。</small></span>
+          <div class="unit-input">
+            <input
+              v-model.number="form.inferenceProbe.intervalMinutes"
+              aria-label="推理探活间隔"
+              type="number"
+              min="5"
+              max="1440"
+              step="1"
+              required
+            /><span>分钟</span>
+          </div>
+        </label>
+        <p class="subtle">只探测可路由的账号。失败结果与真实推理请求一样触发冷却。</p>
       </div>
     </section>
     <RegistrationRelaySettings

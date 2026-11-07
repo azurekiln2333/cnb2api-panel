@@ -203,7 +203,7 @@ test("inherit sends nothing and still records what the worker reports", async (t
   assert.equal(account.upstreamModeApplied, "classic");
 });
 
-test("a sent header with no applied header reads as a legacy worker", async (t) => {
+test("a 2xx with no applied header reads as a legacy worker, also for inherit", async (t) => {
   const app = await fixture(t);
   const id = await app.account({ upstreamMode: "auto" });
   app.upstream.applied = null;
@@ -221,15 +221,18 @@ test("a sent header with no applied header reads as a legacy worker", async (t) 
   account = (await (await app.call(`/api/accounts/${id}`)).json()).account;
   assert.equal(account.upstreamModeApplied, "classic");
 
-  // Inherit with no applied header is simply unmeasured. Disable the first
-  // account so the request has exactly one eligible target.
+  // Current workers always report the applied mode on an upstream response, so
+  // a 2xx without it means a legacy worker even for an inherit account. Disable
+  // the first account so the request has exactly one eligible target.
   app.store.patch(id, { enabled: false });
-  const unmeasured = await app.account();
+  const inherit = await app.account();
   app.upstream.applied = null;
+  app.calls.length = 0;
   await (await app.send()).text();
-  account = (await (await app.call(`/api/accounts/${unmeasured}`)).json()).account;
-  assert.equal(account.upstreamModeApplied, null);
-  assert.equal(account.upstreamModeAppliedAt, null);
+  assert.equal(app.calls[0].headers[MODE_HEADER], undefined);
+  account = (await (await app.call(`/api/accounts/${inherit}`)).json()).account;
+  assert.equal(account.upstreamModeApplied, "legacy");
+  assert.equal(typeof account.upstreamModeAppliedAt, "string");
 });
 
 test("a non-2xx without an applied header leaves the measurement unchanged", async (t) => {

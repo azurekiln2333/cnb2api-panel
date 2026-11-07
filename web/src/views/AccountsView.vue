@@ -28,6 +28,7 @@ import {
   FilterX,
   Waypoints,
   Coins,
+  Sparkles,
 } from '@lucide/vue'
 import { api } from '../api'
 import {
@@ -42,7 +43,7 @@ import {
   notify,
   strategyLabels,
 } from '../console'
-import type { Account, Page } from '../types'
+import type { Account, InferenceProbeResult, Page } from '../types'
 import { formatRemainingQuotaPercent, summarizeQuota } from '../quota'
 import AccountDialog from '../components/AccountDialog.vue'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -66,6 +67,46 @@ function upstreamModeAppliedLabel(account: Account) {
   if (account.upstreamModeApplied === 'classic') return '当前上游：经典 CNB 网关'
   return '上游模式：等待测量'
 }
+// Last optional real inference probe, automatic or manual.
+function inferenceProbeLabel(result: InferenceProbeResult) {
+  return `推理探活${result.ok ? '成功' : '失败'} · ${time(result.at, true)}`
+}
+function inferenceProbeDetail(result: InferenceProbeResult) {
+  if (result.ok)
+    return [result.model, result.latencyMs != null ? `${number(result.latencyMs)} ms` : '']
+      .filter(Boolean)
+      .join(' · ')
+  return result.error || (result.status ? `HTTP ${result.status}` : '推理探活失败')
+}
+const inferenceTest = ref<{
+  id: string
+  running: boolean
+  result: InferenceProbeResult | null
+  error: string
+} | null>(null)
+async function testInference() {
+  const account = managing.value
+  if (!account || inferenceTest.value?.running) return
+  inferenceTest.value = { id: account.id, running: true, result: null, error: '' }
+  try {
+    const result = await api<InferenceProbeResult>(
+      `/accounts/${account.id}/inference-probe`,
+      'POST',
+      {},
+    )
+    if (inferenceTest.value?.id === account.id) inferenceTest.value.result = result
+    await refresh()
+  } catch (error) {
+    if (inferenceTest.value?.id === account.id)
+      inferenceTest.value.error = error instanceof Error ? error.message : '测试推理失败'
+  } finally {
+    if (inferenceTest.value?.id === account.id) inferenceTest.value.running = false
+  }
+}
+watch(managingId, (id) => {
+  if (inferenceTest.value && inferenceTest.value.id !== id && !inferenceTest.value.running)
+    inferenceTest.value = null
+})
 const managingSubtitle = computed(() =>
   managing.value
     ? [managing.value.repo, upstreamModeAppliedLabel(managing.value)].filter(Boolean).join(' · ')
@@ -486,6 +527,21 @@ async function confirm() {
                       : '已手动停用，请启用账号恢复'
                 }}
               </div>
+              <div
+                v-if="account.inferenceProbe"
+                class="cell-secondary account-health-detail"
+                :class="{ 'account-health-error': !account.inferenceProbe.ok }"
+                :data-testid="`inference-probe-${account.id}`"
+                :title="inferenceProbeDetail(account.inferenceProbe)"
+              >
+                {{ inferenceProbeLabel(account.inferenceProbe) }}
+              </div>
+              <div
+                v-if="account.inferenceProbe && !account.inferenceProbe.ok"
+                class="cell-secondary account-health-detail account-health-error"
+              >
+                {{ inferenceProbeDetail(account.inferenceProbe) }}
+              </div>
             </td>
             <td class="quota-cell" :data-testid="`quota-${account.id}`">
               <template v-if="account.quota"
@@ -725,12 +781,43 @@ async function confirm() {
               ? '向 CNB 提交启动请求'
               : '需先配置个人令牌'
         }}</small></button
+      ><button
+        :disabled="!managing.enabled || !managing.endpoint || inferenceTest?.running"
+        @click="testInference"
+      >
+        <LoaderCircle v-if="inferenceTest?.running" :size="19" class="spin" /><Sparkles
+          v-else
+          :size="19"
+        /><strong>测试推理</strong
+        ><small>{{
+          !managing.enabled
+            ? '账号已停用'
+            : !managing.endpoint
+              ? '等待工作区注册地址'
+              : '发送 1 个 token 的真实推理请求'
+        }}</small></button
       ><button @click="confirmAction('rotate')">
         <KeyRound :size="19" /><strong>重置注册密钥</strong
         ><small>生成新的自注册配置</small></button
       ><button class="danger-action" @click="confirmAction('delete')">
         <Trash2 :size="19" /><strong>移除账号</strong><small>从当前号池中移除</small>
       </button>
+      <p
+        v-if="inferenceTest?.id === managing.id && !inferenceTest.running"
+        class="inference-test-result"
+        :class="{ error: !!inferenceTest.error || inferenceTest.result?.ok === false }"
+        role="status"
+        data-testid="inference-test-result"
+      >
+        <template v-if="inferenceTest.result"
+          >{{ inferenceTest.result.ok ? '推理成功' : '推理失败' }} ·
+          {{ inferenceProbeDetail(inferenceTest.result)
+          }}<template v-if="inferenceTest.result.usage">
+            · 输入 {{ number(inferenceTest.result.usage.prompt) }} / 输出
+            {{ number(inferenceTest.result.usage.completion) }} Tokens</template
+          ></template
+        ><template v-else>{{ inferenceTest.error }}</template>
+      </p>
     </div></ModalShell
   >
   <ModalShell

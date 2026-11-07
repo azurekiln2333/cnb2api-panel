@@ -3038,6 +3038,22 @@ button.button,
   background: var(--red-soft);
   border-color: var(--red);
 }
+.inference-test-result {
+  grid-column: 1 / -1;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  color: var(--secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.inference-test-result.error {
+  color: var(--red);
+  border-color: var(--red);
+  background: var(--red-soft);
+}
 .success-callout {
   display: flex;
   align-items: center;
