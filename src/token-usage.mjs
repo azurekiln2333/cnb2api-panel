@@ -1,3 +1,5 @@
+import { UsageMeasurement } from "./usage-measurement.mjs";
+
 // Capture only numeric usage while the original response bytes pass through.
 // Neither request prompts nor generated content are retained in the store.
 // `cacheReadReported`/`cacheWriteReported` count requests that actually carried
@@ -15,15 +17,16 @@ export const emptyTokenUsage = () => ({
   cacheWriteReported: 0,
 });
 
-// Cache miss is the input the provider could not serve from cache. It is derived
-// on read so stored totals keep their original shape: OpenAI `prompt_tokens`
-// already contains the hits, so the remainder is the miss; Anthropic
-// `input_tokens` is the miss on its own. Unknown input yields null, never zero.
+// Derive a miss only for a fully measured, matching attempt population.
+// An omitted cache counter cannot prove the whole input missed the cache.
 export function deriveCacheMiss(usage) {
   if (!usage || typeof usage !== "object") return null;
-  if (!Number.isSafeInteger(usage.input) || usage.input <= 0) return null;
-  const read = Number.isSafeInteger(usage.cacheRead) ? usage.cacheRead : 0;
-  return { cacheMiss: Math.max(0, usage.input - read), cacheMissReported: 1 };
+  const attempts = (usage.reportedRequests || 0) + (usage.missingRequests || 0);
+  if (!Number.isSafeInteger(attempts) || attempts <= 0 || usage.missingRequests > 0 ||
+      usage.partialRequests > 0 || usage.cacheReadReported !== attempts ||
+      !Number.isSafeInteger(usage.input) || usage.input < 0 ||
+      !Number.isSafeInteger(usage.cacheRead) || usage.cacheRead < 0) return null;
+  return { cacheMiss: Math.max(0, usage.input - usage.cacheRead), cacheMissReported: attempts };
 }
 
 export function addTokenUsage(target, value) {
@@ -32,53 +35,10 @@ export function addTokenUsage(target, value) {
   return target;
 }
 
-const count = (value) =>
-  Number.isSafeInteger(value) && value >= 0 ? value : null;
-const first = (...values) => values.map(count).find((n) => n !== null) ?? null;
-
 export function normalizeTokenUsage(usage) {
-  if (
-    !usage ||
-    typeof usage !== "object" ||
-    Array.isArray(usage) ||
-    usage.usage_estimated === true
-  )
-    return null;
-  // One usage object can carry both field families: New API enriches a native
-  // payload with zero placeholders. Prefer the family that holds measured
-  // counters instead of letting the mere presence of a name pick the protocol.
-  const anthropicFields =
-    "input_tokens" in usage ||
-    "output_tokens" in usage ||
-    "cache_read_input_tokens" in usage ||
-    "cache_creation_input_tokens" in usage;
-  const openaiFields = "prompt_tokens" in usage || "completion_tokens" in usage;
-  const anthropic = anthropicFields && !openaiFields;
-  const input = anthropic
-    ? count(usage.input_tokens)
-    : first(usage.prompt_tokens, usage.input_tokens);
-  const output = anthropic
-    ? count(usage.output_tokens)
-    : first(usage.completion_tokens, usage.output_tokens);
-  const cacheRead = first(
-    usage.cache_read_input_tokens,
-    usage.prompt_cache_hit_tokens,
-    usage.prompt_tokens_details?.cached_tokens,
-    usage.input_tokens_details?.cached_tokens,
-  );
-  const cacheWrite = first(
-    usage.cache_creation_input_tokens,
-    usage.prompt_cache_creation_tokens,
-    usage.prompt_cache_write_tokens,
-    usage.prompt_tokens_details?.cache_creation_tokens,
-    usage.prompt_tokens_details?.cache_write_tokens,
-  );
-  if ([input, output, cacheRead, cacheWrite].every((n) => n === null))
-    return null;
-  // Only a pure Anthropic shape reports cache beside the input total. A mixed
-  // object already carries an inclusive prompt total, so cache must not be added
-  // to it again.
-  return { input, output, cacheRead, cacheWrite, anthropic };
+  const measurement = new UsageMeasurement();
+  measurement.accept({ usage });
+  return measurement.value();
 }
 
 // The JSON body and any single SSE event have caps. Huge content events may be
@@ -98,49 +58,13 @@ export class TokenUsageCapture {
     this.skippingEvent = false;
     this.overflow = false;
     this.jsonBytes = 0;
-    this.usage = {
-      input: null,
-      output: null,
-      cacheRead: null,
-      cacheWrite: null,
-    };
-    this.anthropic = false;
+    this.measurement = new UsageMeasurement();
     this.sawUsage = false;
-    this.sawInputAfterStart = false;
     this.finished = false;
   }
 
   accept(value) {
-    if (!value || typeof value !== "object") return;
-    // Billing counters can be nested beside the plain usage. Read both so a
-    // measured value inside billing_usage is not silently dropped. Each source
-    // is normalized on its own, so a repeated counter merges by maximum instead
-    // of being added twice.
-    const sources = [
-      value.usage ?? value.message?.usage,
-      value.usage?.billing_usage,
-      value.message?.usage?.billing_usage,
-      value.billing_usage,
-    ];
-    // A billing envelope repeats Anthropic field names even for an OpenAI
-    // payload, so the primary usage object keeps the final say. Only when the
-    // primary object names no counter at all does the envelope become the sole
-    // evidence of the shape.
-    let shapeDecided = false;
-    for (const source of sources) {
-      const usage = normalizeTokenUsage(source);
-      if (!usage) continue;
-      this.sawUsage = true;
-      if (!shapeDecided) {
-        this.anthropic ||= usage.anthropic;
-        if (source === sources[0] || this.anthropic) shapeDecided = true;
-      }
-      if (value.type !== "message_start" && usage.input !== null)
-        this.sawInputAfterStart = true;
-      for (const key of ["input", "output", "cacheRead", "cacheWrite"])
-        if (usage[key] !== null)
-          this.usage[key] = Math.max(this.usage[key] ?? 0, usage[key]);
-    }
+    this.sawUsage = this.measurement.accept(value) !== null;
   }
 
   parse(text) {
@@ -205,7 +129,7 @@ export class TokenUsageCapture {
     } else this.buffer += text.slice(start);
   }
 
-  finish(complete = true) {
+  finish(complete = true, { partial = false } = {}) {
     if (!this.finished) {
       const tail = this.decoder.decode();
       if (this.sse) {
@@ -225,19 +149,11 @@ export class TokenUsageCapture {
       result.missingRequests = 1;
       return result;
     }
-    const { input, output, cacheRead, cacheWrite } = this.usage;
-    // Only the Anthropic shape reports cache counters beside the input total.
-    // OpenAI prompt_tokens already includes them, so adding them again would
-    // inflate the input. This must not depend on which source merged last.
-    result.input =
-      (input ?? 0) +
-      (this.anthropic ? (cacheRead ?? 0) + (cacheWrite ?? 0) : 0);
-    result.output = output ?? 0;    // A cache counter is a measured value on its own. Clamping it to an unknown
-    // input total would report a real hit as zero, so only a known total bounds
-    // it. An upstream that reports more cache than input is inconsistent, and
-    // showing "cache read > input" is worse than clamping to the input total.
-    result.cacheRead = input === null ? (cacheRead ?? 0) : Math.min(result.input, cacheRead ?? 0);
-    result.cacheWrite = input === null ? (cacheWrite ?? 0) : Math.min(result.input, cacheWrite ?? 0);
+    const { input, rawInput, output, cacheRead, cacheWrite } = this.measurement.value();
+    result.input = input ?? 0;
+    result.output = output ?? 0;
+    result.cacheRead = cacheRead ?? 0;
+    result.cacheWrite = cacheWrite ?? 0;
     result.total = result.input + result.output;
     result.reportedRequests = 1;
     result.cacheReadReported = Number(cacheRead !== null);
@@ -245,10 +161,10 @@ export class TokenUsageCapture {
     // Older CNB Anthropic adapters emit a zero placeholder at message_start and
     // only output_tokens at message_delta. That zero cannot prove true input.
     result.partialRequests = Number(
-      !complete ||
+      !complete || partial ||
         input === null ||
         output === null ||
-        (this.anthropicStream && input === 0 && !this.sawInputAfterStart),
+        (this.anthropicStream && rawInput === 0 && !this.measurement.sawInputAfterStart),
     );
     return result;
   }

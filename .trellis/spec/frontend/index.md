@@ -20,6 +20,7 @@ This directory contains guidelines for frontend development. Fill in each file w
 | [State Management](./state-management.md) | Local state, global state, server state | To fill |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
 | [Account and Log Controls](./account-log-controls.md) | Bulk probing, quota percentages and filtered export | Implemented |
+| [Usage Accounting Contract](../backend/token-usage.md) | Missing/zero/partial usage and cache/credit comparison coverage | Implemented |
 | [Console Loading](./console-loading.md) | Session startup, background refresh and paged logs | Implemented |
 | [Registration Relay](./registration-relay.md) | Linked-server configuration and independent delivery status | Implemented |
 | [Model List](./model-list.md) | Model inventory, source labels, search/copy and New API hints | Implemented |

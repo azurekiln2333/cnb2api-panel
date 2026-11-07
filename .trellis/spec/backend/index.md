@@ -24,6 +24,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Registration Relay](./registration-relay.md) | Durable single-hop workspace registration across panel servers | Implemented |
 | [Model Inventory](./model-inventory.md) | Observed/configured models and current routing eligibility | Implemented |
 | [Gateway Quota](./gateway-quota.md) | New API balance schema and deduplicated native CNB Credits | Implemented |
+| [Token Usage](./token-usage.md) | Cache/credit coverage, protocol normalization and retry attribution | Implemented |
 | [Logging Guidelines](./logging-guidelines.md) | Separate request/audit/runtime logs, bounded previews and retention | Implemented |
 | [Request Overrides](./request-overrides.md) | Request transformation, safe header carrier and diagnostics | Implemented |
 | [OIDC Authentication](./oidc-authentication.md) | Management sessions, SSO settings, provider validation | Implemented |

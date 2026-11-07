@@ -1,5 +1,6 @@
 import { abbreviateCount } from './format.ts'
-import type { TokenTotals, UpstreamUsage } from './types.ts'
+import type { TokenMetric, TokenTotals, UpstreamMetric, UpstreamUsage } from './types.ts'
+import { tokenCoverage, tokenValue, upstreamComplete, upstreamValue } from './usage.ts'
 
 /** A single account's reconciliation inputs, taken from /api/usage/comparison. */
 export interface ReconcileSource {
@@ -10,23 +11,13 @@ export interface ReconcileSource {
   upstream: UpstreamUsage | null
 }
 
+type LocalField = TokenMetric | 'cacheMiss'
+type UpstreamField = UpstreamMetric | 'total'
 export interface ReconcileTotals {
-  local: {
-    input: number
-    output: number
-    cacheRead: number
-    cacheWrite: number
-    cacheMiss: number
-    total: number
-  }
-  upstream: {
-    prompt: number
-    completion: number
-    credit: number
-    cacheHit: number
-    cacheMiss: number
-    total: number
-  }
+  local: Record<LocalField, number | null>
+  upstream: Record<UpstreamField, number | null>
+  localComplete: Record<LocalField, boolean>
+  upstreamComplete: Record<UpstreamField, boolean>
 }
 
 /**
@@ -53,8 +44,8 @@ export function formatHitRate(hit: number | null | undefined, miss: number | nul
 /**
  * Credit spent per thousand upstream tokens.
  *
- * This is the number that explains a quota burning faster than the token count:
- * a cache miss costs far more credit per token than a cache hit.
+ * Only compare counters covering the same observation interval and attempts.
+ * This ratio does not establish a provider price or the cause of credit use.
  */
 export function creditPerThousand(
   credit: number | null | undefined,
@@ -87,47 +78,81 @@ export function formatCreditPerThousand(
   return formatCredit(value)
 }
 
-const emptyTotals = (): ReconcileTotals => ({
-  local: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheMiss: 0, total: 0 },
-  upstream: { prompt: 0, completion: 0, credit: 0, cacheHit: 0, cacheMiss: 0, total: 0 },
-})
+const LOCAL_FIELDS: LocalField[] = [
+  'input',
+  'output',
+  'cacheRead',
+  'cacheWrite',
+  'cacheMiss',
+  'total',
+]
+const UPSTREAM_FIELDS: UpstreamField[] = [
+  'prompt',
+  'completion',
+  'credit',
+  'cacheHit',
+  'cacheMiss',
+  'cacheWrite',
+  'total',
+]
 
-/** Local cache misses: prompt tokens the workspace did not serve from cache. */
+/** A derived miss requires complete matching input and cache-read coverage. */
 export function localCacheMiss(local: TokenTotals | null | undefined) {
-  if (!local) return 0
+  if (
+    !local ||
+    tokenCoverage(local, 'input') !== 'complete' ||
+    tokenCoverage(local, 'cacheRead') !== 'complete'
+  )
+    return null
   return Math.max(0, local.input - local.cacheRead)
 }
 
-/**
- * Sum every synced account into one row, so the panel can show a pool-wide
- * total next to the per-account breakdown.
- */
+const record = <K extends string, V>(keys: K[], value: V) =>
+  Object.fromEntries(keys.map((key) => [key, value])) as Record<K, V>
+const add = <K extends string>(target: Record<K, number | null>, key: K, value: number | null) => {
+  if (value !== null) target[key] = (target[key] ?? 0) + value
+}
+
+/** Sum only synchronized windows; retain partial subtotals without inventing coverage. */
 export function sumReconcile(sources: ReconcileSource[]): ReconcileTotals {
-  const totals = emptyTotals()
-  for (const source of sources) {
-    const local = source.local
-    if (local) {
-      totals.local.input += local.input
-      totals.local.output += local.output
-      totals.local.cacheRead += local.cacheRead
-      totals.local.cacheWrite += local.cacheWrite
-      totals.local.cacheMiss += localCacheMiss(local)
-      totals.local.total += local.total
+  const rows = syncedSources(sources)
+  const totals: ReconcileTotals = {
+    local: record(LOCAL_FIELDS, rows.length ? null : 0),
+    upstream: record(UPSTREAM_FIELDS, rows.length ? null : 0),
+    localComplete: record(LOCAL_FIELDS, rows.length > 0),
+    upstreamComplete: record(UPSTREAM_FIELDS, rows.length > 0),
+  }
+  for (const { local, upstream } of rows) {
+    for (const field of LOCAL_FIELDS) {
+      const value =
+        field === 'cacheMiss' ? localCacheMiss(local) : local ? tokenValue(local, field) : null
+      const complete =
+        field === 'cacheMiss'
+          ? value !== null
+          : !!local && ['empty', 'complete'].includes(tokenCoverage(local, field))
+      add(totals.local, field, value)
+      totals.localComplete[field] &&= complete
     }
-    const upstream = source.upstream
-    if (upstream) {
-      totals.upstream.prompt += upstream.prompt
-      totals.upstream.completion += upstream.completion
-      totals.upstream.credit += upstream.credit
-      totals.upstream.cacheHit += upstream.cacheHit
-      totals.upstream.cacheMiss += upstream.cacheMiss
-      totals.upstream.total += upstream.prompt + upstream.completion
+    for (const field of UPSTREAM_FIELDS) {
+      const prompt = upstreamValue(upstream, 'prompt')
+      const completion = upstreamValue(upstream, 'completion')
+      const value =
+        field === 'total'
+          ? prompt === null || completion === null
+            ? null
+            : prompt + completion
+          : upstreamValue(upstream, field)
+      add(totals.upstream, field, value)
+      totals.upstreamComplete[field] &&=
+        field === 'total'
+          ? upstreamComplete(upstream, 'prompt', 'completion')
+          : upstreamComplete(upstream, field)
     }
   }
   return totals
 }
 
-/** Accounts that actually returned a workspace snapshot, in the original order. */
+/** Accounts that returned a current snapshot, in the original order. */
 export function syncedSources(sources: ReconcileSource[]) {
   return sources.filter((source) => source.status === 'ok' && source.upstream)
 }

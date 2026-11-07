@@ -117,3 +117,81 @@ Released registration relay, model inventory and New API quota; all local checks
 ### Status
 
 [OK] **Completed**
+
+
+## Session 5: Publish panel quota and health recovery fixes v1.2.2
+<!-- trellis-session: v=2 fp=f835b6a5401a2b98 -->
+
+**Date**: 2026-10-30
+**Task**: Publish panel quota and health recovery fixes v1.2.2
+**Branch**: `main`
+
+### Summary
+
+Published panel-only quota protection, probe recovery and registration heartbeat fixes to GitHub and CNB. Final v1.2.2 cloud publication verified.
+
+### Main Changes
+
+- Suspend accounts below ten percent and resume only after verified quota recovery; preserve manual enablement and background polling.
+- Reject stale probe failures after successful inference, isolate models-only throttling and automatically migrate legacy false probe cooldowns.
+- Preserve health and relay progress on same-URI registration heartbeats; publish only panel changes and leave unrelated CI work unstaged.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e3b179e` | fix: protect quota and prevent stale health failures |
+| `29acee2` | fix: automatically recover legacy probe cooldowns |
+
+### Testing
+
+- [OK] 346 backend tests, 45 browser tests, frontend build/typecheck/format, package and syntax checks passed.
+- [OK] GitHub main 41040302441 and v1.2.2 tag 41040301735 completed successfully; all four tag jobs passed.
+- [OK] CNB v1.2.2/latest digest 0bafa5d159c055d96640513e98d80405af2d29abde79e0d82bc116dcb6f3260c verified. Image source modules match tag bytes and compiled console reports 1.2.2.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- Existing servers must pull the new panel image and recreate the panel container. CNB build logs require login; CNB publication was verified from the public image.
+
+
+## Session 6: Release v1.2.3 quota compatibility and account resume
+<!-- trellis-session: v=2 fp=e3f1a4c8e21ee2c0 -->
+
+**Date**: 2026-10-30
+**Task**: Release v1.2.3 quota compatibility and account resume
+**Branch**: `main`
+
+### Summary
+
+Fixed omitted frozen Credits compatibility and safe quota diagnostics. Unified temporary quota pause and the existing enable action. Published and verified GitHub and CNB v1.2.3.
+
+### Main Changes
+
+- Preserve required allowance and usage validation while accepting omitted frozen usage as zero.
+- Keep credential-free upstream HTTP, timeout, network, JSON and field-validation diagnostics in quotaSync.error.
+- Resume temporary quota pauses through the existing account enable action; keep the override until verified recovery and clear it on manual disablement.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f5cafe8` | fix: tolerate omitted frozen quota and preserve sync diagnostics |
+| `91043bb` | fix: resume temporary quota pauses from the account enable action |
+
+### Testing
+
+- [OK] Backend: 385 passed. Browser: 46 passed. Console build, type check, format and Chinese prose checks passed.
+- [OK] GitHub main 41070501112 and tag 41070500516 succeeded. All four tag jobs succeeded.
+- [OK] CNB v1.2.3/latest digest 8862d91af161b85efd5eed1807a4e3c3eb28791ab7545fa0d085818044e77963. Four backend files match release commit byte-for-byte and compiled UI includes new pause/enable behavior.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- Deploy v1.2.3 and inspect specific quota synchronization diagnostics if the production failure persists.

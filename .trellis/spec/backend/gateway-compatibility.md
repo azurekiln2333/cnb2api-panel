@@ -67,10 +67,9 @@ Anthropic input/cache accounting rules on Responses usage.
 Responses usage maps one measured counter family onto the Responses shape.
 `prompt_tokens` (or `input_tokens` when only that family is present) becomes
 `input_tokens`, and `completion_tokens` (or `output_tokens`) becomes
-`output_tokens`. Cache hits resolve from `prompt_tokens_details.cached_tokens`
-first, then `prompt_cache_hit_tokens`, then `cache_read_input_tokens`; that is
-the same precedence and the same "later alias wins" rule as
-`normalizeTokenUsage`. Chat keeps cache hits inside `prompt_tokens`, so
+`output_tokens`. Cache aliases resolve by maximum through shared numeric capture,
+as described in [Token Usage](./token-usage.md). A zero placeholder must not
+suppress a measured alias. Chat keeps cache hits inside `prompt_tokens`, so
 `cached_tokens` is reported beside an unchanged `input_tokens`, never added and
 never subtracted. `total_tokens` is always `input_tokens + output_tokens` and
 ignores any upstream `total_tokens`. Clamp `cached_tokens` to `input_tokens` and

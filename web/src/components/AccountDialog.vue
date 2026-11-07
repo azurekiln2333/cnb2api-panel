@@ -34,6 +34,7 @@ const form = reactive({
   enabled: a?.enabled ?? true,
   autoWake: a?.autoWake ?? false,
   branch: a?.branch ?? 'main',
+  upstreamMode: a?.upstreamMode ?? 'inherit',
 })
 const advanced = ref(Boolean(a?.hasPat || a?.models.length || a?.priority))
 const removePat = ref(false)
@@ -340,6 +341,16 @@ async function save() {
               required
             /><small>数值大的先使用，故障后向下切换。</small></label
           >
+          <label class="span-2"
+            >上游模式<select v-model="form.upstreamMode">
+              <option value="inherit">跟随 worker 默认</option>
+              <option value="auto">自动（IDE 优先，经典回退）</option>
+              <option value="ide">IDE 网关</option>
+              <option value="classic">经典 CNB 网关</option></select
+            ><small
+              >仅影响推理请求。跟随 worker 默认时不发送模式头，行为与升级前一致。</small
+            ></label
+          >
         </div>
         <button
           type="button"
@@ -427,3 +438,13 @@ async function save() {
     </form>
   </ModalShell>
 </template>
+
+<style scoped>
+.account-form select {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  min-height: 39px;
+  font-size: 14px;
+}
+</style>

@@ -9,16 +9,36 @@ const TOKEN_FIELDS = [
   "reportedRequests",
   "missingRequests",
   "partialRequests",
+  "cacheReadReported",
+  "cacheWriteReported",
 ];
 const REMOTE_FIELDS = [
   "prompt",
   "completion",
   "requests",
   "errors",
+  "partial_requests",
   "credit",
   "cache_hit",
   "cache_miss",
+  "cache_write",
 ];
+const MEASURED_FIELDS = [
+  "prompt",
+  "completion",
+  "credit",
+  "cache_hit",
+  "cache_miss",
+  "cache_write",
+];
+const API_FIELDS = {
+  prompt: "prompt",
+  completion: "completion",
+  credit: "credit",
+  cache_hit: "cacheHit",
+  cache_miss: "cacheMiss",
+  cache_write: "cacheWrite",
+};
 const fingerprint = (account) =>
   createHash("sha256")
     .update(JSON.stringify([account.endpoint, account.secrets.proxyKey]))
@@ -33,15 +53,74 @@ const decreased = (current, previous, fields) =>
   fields.some((field) => current[field] < previous[field]);
 // Workspace counters keep their /usage names; the API exposes camelCase so the
 // console never needs to know the upstream wire format.
-const upstreamDelta = (current, baseline) => ({
-  prompt: current.prompt - baseline.prompt,
-  completion: current.completion - baseline.completion,
-  requests: current.requests - baseline.requests,
-  errors: current.errors - baseline.errors,
-  credit: current.credit - baseline.credit,
-  cacheHit: current.cache_hit - baseline.cache_hit,
-  cacheMiss: current.cache_miss - baseline.cache_miss,
-});
+const subtract = (current, baseline, fields) =>
+  Object.fromEntries(
+    fields.map((field) => [
+      field,
+      current[field] === null ? null : current[field] - (baseline[field] ?? 0),
+    ]),
+  );
+function upstreamView(counters, coverage, support) {
+  const result = {
+    requests: counters.requests,
+    errors: counters.errors,
+    partialRequests: counters.partial_requests,
+    coverage: {},
+  };
+  for (const field of MEASURED_FIELDS) {
+    const key = API_FIELDS[field];
+    const reported = coverage[field];
+    result.coverage[key] = reported;
+    // A legacy positive subtotal remains useful, but its coverage is unknown.
+    result[key] =
+      support[field] &&
+      (counters.requests === 0 || reported > 0 || counters[field] > 0)
+        ? counters[field]
+        : null;
+  }
+  return result;
+}
+function tokenView(upstream) {
+  return {
+    input: upstream.prompt,
+    output: upstream.completion,
+    cacheRead: upstream.cacheHit,
+    cacheWrite: upstream.cacheWrite,
+    total:
+      upstream.prompt === null || upstream.completion === null
+        ? null
+        : upstream.prompt + upstream.completion,
+  };
+}
+function localKnown(local, field) {
+  const attempts = local.reportedRequests + local.missingRequests;
+  if (!attempts) return local[field] === 0;
+  if (local.missingRequests || local.partialRequests) return false;
+  if (field === "cacheRead" || field === "cacheWrite")
+    return local[`${field}Reported`] === attempts;
+  return local.reportedRequests === attempts;
+}
+function remoteKnown(upstream, field) {
+  if (upstream.partialRequests !== 0) return false;
+  const keys =
+    field === "total"
+      ? ["prompt", "completion"]
+      : [
+          {
+            input: "prompt",
+            output: "completion",
+            cacheRead: "cacheHit",
+            cacheWrite: "cacheWrite",
+          }[field],
+        ];
+  return keys.every(
+    (key) =>
+      upstream[key] !== null &&
+      upstream.coverage[key] !== null &&
+      upstream.coverage[key] === upstream.requests &&
+      (upstream.requests > 0 || upstream[key] === 0),
+  );
+}
 
 function validateSnapshot(value) {
   if (
@@ -57,33 +136,78 @@ function validateSnapshot(value) {
     throw new Error("invalid usage snapshot");
   const remote = {};
   for (const field of REMOTE_FIELDS) {
+    if (field === "partial_requests" && value.totals[field] === undefined) {
+      remote[field] = null;
+      continue;
+    }
     // credit carries fractional units; every other counter is a token count.
     const counter =
       value.totals[field] ??
       (field.startsWith("cache_") || field === "errors" || field === "credit"
         ? 0
         : NaN);
-    if (field === "credit" ? !Number.isFinite(counter) || counter < 0
-      : !Number.isSafeInteger(counter) || counter < 0)
+    if (
+      field === "credit"
+        ? !Number.isFinite(counter) || counter < 0
+        : !Number.isSafeInteger(counter) || counter < 0
+    )
       throw new Error("invalid usage counter");
     remote[field] = counter;
   }
   if (!Number.isSafeInteger(remote.prompt + remote.completion))
     throw new Error("usage total exceeds safe integer range");
+  if (
+    remote.partial_requests !== null &&
+    remote.partial_requests > remote.requests
+  )
+    throw new Error("invalid partial usage count");
+  const schemaVersion = value.schema_version ?? 1;
+  if (
+    !Number.isSafeInteger(schemaVersion) ||
+    schemaVersion < 1 ||
+    schemaVersion > 2
+  )
+    throw new Error("unsupported usage schema");
+  const support = {};
+  const coverage = {};
+  for (const field of MEASURED_FIELDS) {
+    const supported =
+      schemaVersion === 2 && field !== "prompt" && field !== "completion"
+        ? value.capabilities?.[field]
+        : value.totals[field] !== undefined;
+    if (typeof supported !== "boolean")
+      throw new Error("invalid usage capability");
+    support[field] = supported;
+    if (schemaVersion === 2 && supported && value.totals[field] === undefined)
+      throw new Error("missing supported usage counter");
+    const reported = schemaVersion === 2 ? value.coverage?.[field] : null;
+    if (
+      schemaVersion === 2 &&
+      (!Number.isSafeInteger(reported) ||
+        reported < 0 ||
+        reported > remote.requests)
+    )
+      throw new Error("invalid usage coverage");
+    if (
+      schemaVersion === 2 &&
+      ((!supported && (reported || remote[field])) ||
+        (reported === 0 && remote[field] > 0))
+    )
+      throw new Error("inconsistent usage coverage");
+    coverage[field] = reported;
+  }
   return {
     bootId: value.boot_id,
     bootedAt: new Date(value.booted_at).toISOString(),
     counters: remote,
-    supportsCacheRead: value.totals.cache_hit !== undefined,
-    supportsCredit: value.totals.credit !== undefined,
-    tokens: totals({
-      input: remote.prompt,
-      output: remote.completion,
-      cacheRead: remote.cache_hit,
-      total: remote.prompt + remote.completion,
-      // /usage exposes aggregate requests, but cannot identify usage coverage.
-      // Only token fields are compared; coverage counters remain unknown/zero.
-    }),
+    coverage,
+    support,
+    schemaVersion,
+    schemaFingerprint: JSON.stringify([
+      schemaVersion,
+      support,
+      remote.partial_requests !== null,
+    ]),
   };
 }
 
@@ -124,13 +248,38 @@ export class WorkerUsageMonitor {
     const current =
       saved?.connectionFingerprint === fingerprint(account) ? saved : null;
     const remote = (value) =>
-      value
+      value && !current.schemaFingerprint
         ? {
             ...value,
-            cacheRead: current.supportsCacheRead ? value.cacheRead : null,
+            cacheRead:
+              current.supportsCacheRead && value.cacheRead > 0
+                ? value.cacheRead
+                : null,
             cacheWrite: null,
           }
-        : null;
+        : value || null;
+    const upstream =
+      current?.upstream && !current.schemaFingerprint
+        ? {
+            ...current.upstream,
+            credit:
+              current.supportsCredit && current.upstream.credit > 0
+                ? current.upstream.credit
+                : null,
+            cacheHit:
+              current.supportsCacheRead && current.upstream.cacheHit > 0
+                ? current.upstream.cacheHit
+                : null,
+            cacheMiss:
+              current.upstream.cacheMiss > 0
+                ? current.upstream.cacheMiss
+                : null,
+            cacheWrite: null,
+            coverage: Object.fromEntries(
+              Object.values(API_FIELDS).map((key) => [key, null]),
+            ),
+          }
+        : current?.upstream || null;
     return {
       accountId: account.id,
       accountName: account.name,
@@ -148,8 +297,9 @@ export class WorkerUsageMonitor {
       difference: remote(current?.difference),
       // Real upstream cost and prefix-cache counters. These are read-only
       // diagnostics; they never feed routing, quota or billing decisions.
-      upstream: current?.upstream || null,
+      upstream,
       supportsCredit: current?.supportsCredit === true,
+      schemaVersion: current?.schemaVersion ?? null,
     };
   }
 
@@ -228,46 +378,59 @@ export class WorkerUsageMonitor {
     const now = new Date().toISOString();
     const localCurrent = totals(account.tokenUsage);
     const reset =
-      !previous?.baselineRemote ||
+      !previous?.baselineUpstream ||
       previous.bootId !== snapshot.bootId ||
       previous.bootedAt !== snapshot.bootedAt ||
-      previous.supportsCacheRead !== snapshot.supportsCacheRead ||
-      previous.supportsCredit !== snapshot.supportsCredit ||
+      previous.schemaFingerprint !== snapshot.schemaFingerprint ||
       decreased(snapshot.counters, previous.lastRemote, REMOTE_FIELDS) ||
+      decreased(snapshot.coverage, previous.lastCoverage, MEASURED_FIELDS) ||
       decreased(localCurrent, previous.lastLocal, TOKEN_FIELDS);
-    const baselineRemote = reset ? snapshot.tokens : previous.baselineRemote;
     const baselineUpstream = reset
       ? snapshot.counters
       : previous.baselineUpstream;
     const baselineLocal = reset ? localCurrent : previous.baselineLocal;
+    const baselineCoverage = reset
+      ? snapshot.coverage
+      : previous.baselineCoverage;
     const local = difference(localCurrent, baselineLocal);
-    const workspace = difference(snapshot.tokens, baselineRemote);
-    const delta = difference(workspace, local);
+    const upstream = upstreamView(
+      subtract(snapshot.counters, baselineUpstream, REMOTE_FIELDS),
+      subtract(snapshot.coverage, baselineCoverage, MEASURED_FIELDS),
+      snapshot.support,
+    );
+    const workspace = tokenView(upstream);
     const state = {
       connectionFingerprint,
       status: "ok",
       message: reset
         ? "对比基线已建立，后续同步显示增量"
-        : "已同步；差值为工作区减本地，工作区未提供缓存写入计数",
+        : "已同步。差值为工作区减本地，缺失字段显示为 —",
       syncedAt: now,
       startedAt: reset ? now : previous.startedAt,
       bootId: snapshot.bootId,
       bootedAt: snapshot.bootedAt,
-      supportsCacheRead: snapshot.supportsCacheRead,
-      supportsCredit: snapshot.supportsCredit,
-      baselineRemote,
+      supportsCacheRead: snapshot.support.cache_hit,
+      supportsCredit: snapshot.support.credit,
+      schemaVersion: snapshot.schemaVersion,
+      schemaFingerprint: snapshot.schemaFingerprint,
       baselineUpstream,
       baselineLocal,
+      baselineCoverage,
       lastRemote: snapshot.counters,
+      lastCoverage: snapshot.coverage,
       lastLocal: localCurrent,
-      workspaceTotals: snapshot.tokens,
+      workspaceTotals: tokenView(
+        upstreamView(snapshot.counters, snapshot.coverage, snapshot.support),
+      ),
       local,
       workspace,
-      upstream: upstreamDelta(snapshot.counters, baselineUpstream),
+      upstream,
       difference: Object.fromEntries(
         ["input", "output", "cacheRead", "cacheWrite", "total"].map((field) => [
           field,
-          delta[field],
+          remoteKnown(upstream, field) && localKnown(local, field)
+            ? workspace[field] - local[field]
+            : null,
         ]),
       ),
     };

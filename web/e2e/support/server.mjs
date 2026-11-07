@@ -16,6 +16,7 @@ const workerTotals = {
   completion: 0,
   requests: 0,
   errors: 0,
+  partial_requests: 0,
   credit: 0,
   cache_hit: 0,
   cache_miss: 0,
@@ -53,6 +54,16 @@ const worker = http.createServer(async (req, res) => {
       JSON.stringify({
         boot_id: 'browser-worker-boot',
         booted_at: workerBootedAt,
+        schema_version: 2,
+        capabilities: { cache_hit: true, cache_miss: true, cache_write: false, credit: true },
+        coverage: {
+          prompt: workerTotals.requests,
+          completion: workerTotals.requests,
+          cache_hit: workerTotals.requests,
+          cache_miss: workerTotals.requests,
+          cache_write: 0,
+          credit: 0,
+        },
         totals: workerTotals,
       }),
     )

@@ -12,6 +12,7 @@ import {
   sumReconcile,
   syncedSources,
 } from '../src/reconcile.ts'
+import { tokenValue, tokenCoverage, tokenCoverageLabel, upstreamComplete } from '../src/usage.ts'
 
 const local = (input, output, cacheRead = 0, cacheWrite = 0) => ({
   input,
@@ -22,6 +23,8 @@ const local = (input, output, cacheRead = 0, cacheWrite = 0) => ({
   reportedRequests: 1,
   missingRequests: 0,
   partialRequests: 0,
+  cacheReadReported: 1,
+  cacheWriteReported: 1,
 })
 
 const upstream = (prompt, completion, credit, cacheHit, cacheMiss) => ({
@@ -29,9 +32,12 @@ const upstream = (prompt, completion, credit, cacheHit, cacheMiss) => ({
   completion,
   requests: 1,
   errors: 0,
+  partialRequests: 0,
   credit,
   cacheHit,
   cacheMiss,
+  cacheWrite: null,
+  coverage: { prompt: 1, completion: 1, credit: 1, cacheHit: 1, cacheMiss: 1, cacheWrite: 0 },
 })
 
 test('cache hit rate divides hits by hits plus misses', () => {
@@ -82,7 +88,7 @@ test('local cache misses are the prompt tokens served without a cache hit', () =
   assert.equal(localCacheMiss(local(1000, 10, 1000)), 0)
   // A broken upstream count must not produce a negative miss count.
   assert.equal(localCacheMiss(local(100, 10, 500)), 0)
-  assert.equal(localCacheMiss(null), 0)
+  assert.equal(localCacheMiss(null), null)
 })
 
 test('totals sum every synced account and skip rows without a snapshot', () => {
@@ -124,6 +130,7 @@ test('totals sum every synced account and skip rows without a snapshot', () => {
     credit: 7,
     cacheHit: 1100,
     cacheMiss: 1900,
+    cacheWrite: null,
     total: 3300,
   })
   // Local misses must reconcile with the workspace's own miss counter.
@@ -132,11 +139,11 @@ test('totals sum every synced account and skip rows without a snapshot', () => {
   assert.equal(formatCreditPerThousand(totals.upstream.credit, totals.upstream.total), '2.12')
 })
 
-test('an empty pool produces zero totals instead of null values', () => {
-  assert.deepEqual(sumReconcile([]), {
-    local: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheMiss: 0, total: 0 },
-    upstream: { prompt: 0, completion: 0, credit: 0, cacheHit: 0, cacheMiss: 0, total: 0 },
-  })
+test('an empty pool has zero values but no measured ratio coverage', () => {
+  const totals = sumReconcile([])
+  assert.equal(totals.local.total, 0)
+  assert.equal(totals.upstream.credit, 0)
+  assert.equal(totals.upstreamComplete.credit, false)
   assert.equal(formatHitRate(0, 0), '—')
 })
 
@@ -157,4 +164,71 @@ test('only rows with a real snapshot feed the reconciliation totals', () => {
     ['a'],
   )
   assert.equal(sumReconcile(sources).upstream.total, 2)
+})
+
+test('cache availability distinguishes missing, explicit zero and historical positive values', () => {
+  const missing = { ...local(100, 10), cacheReadReported: 0, cacheWriteReported: 0 }
+  assert.equal(tokenValue(missing, 'cacheRead'), null)
+  assert.equal(tokenCoverageLabel(missing, 'cacheRead'), '未上报')
+  assert.equal(localCacheMiss(missing), null)
+  assert.equal(tokenValue(local(100, 10), 'cacheRead'), 0)
+  assert.equal(tokenCoverage(local(100, 10), 'cacheRead'), 'complete')
+  const historical = { ...missing, cacheRead: 50 }
+  assert.equal(tokenValue(historical, 'cacheRead'), 50)
+  assert.equal(tokenCoverage(historical, 'cacheRead'), 'partial')
+  assert.equal(localCacheMiss(historical), null)
+  assert.equal(tokenValue({ ...missing, reportedRequests: 0 }, 'cacheRead'), null)
+  assert.equal(
+    tokenValue({ ...missing, input: 0, output: 0, total: 0, reportedRequests: 0 }, 'cacheRead'),
+    0,
+  )
+})
+
+test('partial attempt coverage suppresses rates and excludes unavailable stale snapshots', () => {
+  const partial = { ...local(1000, 100, 300), reportedRequests: 2, cacheReadReported: 1 }
+  assert.equal(localCacheMiss(partial), null)
+  assert.equal(tokenCoverageLabel(partial, 'cacheRead'), '部分上报（1/2 次尝试）')
+  const measured = upstream(1000, 100, 1, 300, 700)
+  const old = { ...upstream(200, 20, 0, 0, 0), coverage: undefined }
+  const rows = [
+    { accountId: 'a', accountName: 'A', status: 'ok', local: partial, upstream: measured },
+    { accountId: 'b', accountName: 'B', status: 'ok', local: null, upstream: old },
+    {
+      accountId: 'c',
+      accountName: 'C',
+      status: 'unavailable',
+      local: local(9000, 900),
+      upstream: upstream(9000, 900, 99, 0, 9000),
+    },
+  ]
+  const result = sumReconcile(rows)
+  assert.equal(result.upstream.credit, 1)
+  assert.equal(result.upstream.prompt, 1200)
+  assert.equal(result.upstreamComplete.credit, false)
+  assert.equal(result.upstreamComplete.cacheHit, false)
+  assert.equal(result.localComplete.cacheRead, false)
+  assert.equal(result.local.cacheMiss, null)
+  assert.equal(upstreamComplete(old, 'credit', 'prompt', 'completion'), false)
+  assert.equal(upstreamComplete(measured, 'credit', 'prompt', 'completion'), true)
+})
+
+test('interrupted and legacy completion counts suppress ratios without hiding subtotals', () => {
+  for (const partialRequests of [1, null, undefined]) {
+    const observed = { ...upstream(1000, 100, 0.25, 800, 200), partialRequests }
+    const result = sumReconcile([
+      {
+        accountId: 'a',
+        accountName: 'A',
+        status: 'ok',
+        local: local(1000, 100, 800),
+        upstream: observed,
+      },
+    ])
+    assert.equal(result.upstream.credit, 0.25)
+    assert.equal(result.upstream.cacheHit, 800)
+    assert.equal(result.upstreamComplete.credit, false)
+    assert.equal(result.upstreamComplete.cacheHit, false)
+    assert.equal(result.upstreamComplete.total, false)
+    assert.equal(upstreamComplete(observed, 'credit', 'prompt', 'completion'), false)
+  }
 })

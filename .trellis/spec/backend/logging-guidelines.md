@@ -67,6 +67,12 @@ exception messages into an audit record. Use static operation descriptions.
 - `upstreamEndpoint` identifies the last selected workspace without authentication headers.
 - `tokenUsage` keeps the existing reported/missing/partial accounting semantics.
 
+`usageAttempts` retains bounded numeric usage per account attempt. Global/hourly
+totals use the aggregate once; account totals use their own attempts. Reporting
+coverage counts attempts, including retries, while request counts still count
+client requests. Cache fields need their own coverage before displaying zero or
+deriving misses. See [Token Usage](./token-usage.md) for the full contract.
+
 `TokenUsageCapture` ignores usage objects marked `usage_estimated: true`. Older
 workers synthesize zero counters when no upstream usage was received; these are
 missing usage, not measured zero. Genuine numeric zero counters still count as

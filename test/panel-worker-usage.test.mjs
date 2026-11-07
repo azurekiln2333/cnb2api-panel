@@ -15,20 +15,41 @@ const local = (input, output, cacheRead = 0) => ({
   cacheRead,
   cacheWrite: 0,
   total: input + output,
-  reportedRequests: 1,
+  reportedRequests: Math.max(1, Math.ceil(input / 100)),
   missingRequests: 0,
   partialRequests: 0,
-  cacheReadReported: 0,
-  cacheWriteReported: 0,
+  cacheReadReported: Math.max(1, Math.ceil(input / 100)),
+  cacheWriteReported: Math.max(1, Math.ceil(input / 100)),
 });
 const snapshot = (prompt, completion, cacheHit = 0, boot = "first-boot") => ({
   boot_id: boot,
   booted_at: "2026-10-24T00:00:00.000Z",
+  schema_version: 2,
+  capabilities: {
+    cache_hit: true,
+    cache_miss: true,
+    cache_write: false,
+    credit: true,
+  },
+  coverage: Object.fromEntries(
+    [
+      "prompt",
+      "completion",
+      "cache_hit",
+      "cache_miss",
+      "cache_write",
+      "credit",
+    ].map((field) => [
+      field,
+      field === "cache_write" ? 0 : Math.max(1, Math.ceil(prompt / 100)),
+    ]),
+  ),
   totals: {
     prompt,
     completion,
-    requests: 10,
+    requests: Math.max(1, Math.ceil(prompt / 100)),
     errors: 0,
+    partial_requests: 0,
     credit: 1.25,
     cache_hit: cacheHit,
     cache_miss: prompt - cacheHit,
@@ -196,6 +217,9 @@ test("malformed, negative, unsafe and oversized responses are rejected with boun
 test("legacy snapshots without cache counters expose missing cache data instead of zero", async (t) => {
   const app = await fixture(t);
   const legacy = snapshot(100, 10);
+  delete legacy.schema_version;
+  delete legacy.capabilities;
+  delete legacy.coverage;
   delete legacy.totals.cache_hit;
   delete legacy.totals.cache_miss;
   app.respond(legacy);
@@ -267,18 +291,36 @@ test("upstream credit and prefix-cache counters are diffed from the same baselin
     completion: 0,
     requests: 0,
     errors: 0,
+    partialRequests: 0,
     credit: 0,
     cacheHit: 0,
     cacheMiss: 0,
+    cacheWrite: null,
+    coverage: {
+      prompt: 0,
+      completion: 0,
+      credit: 0,
+      cacheHit: 0,
+      cacheMiss: 0,
+      cacheWrite: 0,
+    },
   });
   app.respond({
-    boot_id: "first-boot",
-    booted_at: "2026-10-24T00:00:00.000Z",
+    ...snapshot(9000, 400, 3840),
+    coverage: {
+      prompt: 15,
+      completion: 15,
+      cache_hit: 15,
+      cache_miss: 15,
+      cache_write: 0,
+      credit: 15,
+    },
     totals: {
       prompt: 9000,
       completion: 400,
       requests: 15,
       errors: 1,
+      partial_requests: 0,
       credit: 7.5,
       cache_hit: 3840,
       cache_miss: 5160,
@@ -294,7 +336,10 @@ test("upstream credit and prefix-cache counters are diffed from the same baselin
   // The baseline snapshot already reported cache_miss = 1000 - 300 = 700.
   assert.equal(next.upstream.cacheMiss, 4460);
   // Cache hit + miss must still reconcile with the reported prompt tokens.
-  assert.equal(next.upstream.cacheHit + next.upstream.cacheMiss, next.upstream.prompt);
+  assert.equal(
+    next.upstream.cacheHit + next.upstream.cacheMiss,
+    next.upstream.prompt,
+  );
   // The comparison never leaks into the local accounting totals.
   assert.deepEqual(app.store.get(app.id).tokenUsage, local(50, 10, 20));
   assert.equal(next.local.total, 0);
@@ -305,7 +350,13 @@ test("fractional credit is accepted while legacy snapshots omit it", async (t) =
   app.respond({
     boot_id: "first-boot",
     booted_at: "2026-10-24T00:00:00.000Z",
-    totals: { prompt: 100, completion: 10, requests: 1, errors: 0, credit: 0.000125 },
+    totals: {
+      prompt: 100,
+      completion: 10,
+      requests: 1,
+      errors: 0,
+      credit: 0.000125,
+    },
   });
   const row = await app.monitor.refresh(app.id);
   assert.equal(row.status, "ok");
@@ -321,7 +372,7 @@ test("fractional credit is accepted while legacy snapshots omit it", async (t) =
   const legacy = await app.monitor.refresh(app.id);
   assert.equal(legacy.status, "ok");
   assert.equal(legacy.supportsCredit, false);
-  assert.equal(legacy.upstream.credit, 0);
+  assert.equal(legacy.upstream.credit, null);
 });
 
 test("a negative or non-JSON-numeric credit counter rejects the whole snapshot", async (t) => {
@@ -336,6 +387,153 @@ test("a negative or non-JSON-numeric credit counter rejects the whole snapshot",
       totals: { prompt: 100, completion: 10, requests: 1, errors: 0, credit },
     });
     const row = await app.monitor.refresh(app.id);
-    assert.equal(row.status, "unavailable", `credit ${String(credit)} must be rejected`);
+    assert.equal(
+      row.status,
+      "unavailable",
+      `credit ${String(credit)} must be rejected`,
+    );
+  }
+});
+
+test("supported but unreported fields stay unknown, while measured zero and partial coverage survive", async (t) => {
+  const app = await fixture(t);
+  const measured = (requests, prompt, credit, creditReports, cacheReports) => ({
+    ...snapshot(prompt, requests * 10, 0),
+    capabilities: {
+      cache_hit: true,
+      cache_miss: true,
+      cache_write: true,
+      credit: true,
+    },
+    totals: {
+      prompt,
+      completion: requests * 10,
+      requests,
+      errors: 0,
+      partial_requests: 0,
+      credit,
+      cache_hit: 0,
+      cache_miss: 0,
+      cache_write: 0,
+    },
+    coverage: {
+      prompt: requests,
+      completion: requests,
+      credit: creditReports,
+      cache_hit: cacheReports,
+      cache_miss: 0,
+      cache_write: cacheReports,
+    },
+  });
+  app.respond(measured(0, 0, 0, 0, 0));
+  await app.monitor.refresh(app.id);
+  app.respond(measured(1, 100, 0, 0, 0));
+  const missing = await app.monitor.refresh(app.id);
+  assert.equal(missing.supportsCredit, true);
+  assert.equal(missing.upstream.credit, null);
+  assert.equal(missing.upstream.cacheHit, null);
+  assert.equal(missing.upstream.cacheMiss, null);
+  assert.equal(missing.workspace.cacheRead, null);
+  assert.equal(missing.upstream.coverage.credit, 0);
+  app.respond(measured(2, 200, 0, 1, 1));
+  const partial = await app.monitor.refresh(app.id);
+  assert.equal(partial.upstream.credit, 0);
+  assert.equal(partial.upstream.cacheHit, 0);
+  assert.equal(partial.upstream.cacheWrite, 0);
+  assert.equal(partial.upstream.requests, 2);
+  assert.equal(partial.upstream.coverage.credit, 1);
+  assert.equal(partial.difference.cacheRead, null);
+  assert.equal(partial.local.cacheReadReported, 0);
+});
+
+test("schema and capability changes reset only comparison baselines", async (t) => {
+  const app = await fixture(t);
+  const legacy = {
+    boot_id: "first-boot",
+    booted_at: "2026-10-24T00:00:00.000Z",
+    totals: { prompt: 100, completion: 10, requests: 1 },
+  };
+  app.respond(legacy);
+  await app.monitor.refresh(app.id);
+  app.respond({
+    ...legacy,
+    totals: { prompt: 200, completion: 20, requests: 2 },
+  });
+  assert.equal((await app.monitor.refresh(app.id)).upstream.credit, null);
+  const modern = snapshot(300, 30, 100);
+  app.respond(modern);
+  let row = await app.monitor.refresh(app.id);
+  assert.equal(row.schemaVersion, 2);
+  assert.equal(row.workspace.total, 0);
+  const upgraded = {
+    ...snapshot(400, 40, 150),
+    capabilities: { ...modern.capabilities, cache_write: true },
+    totals: { ...snapshot(400, 40, 150).totals, cache_write: 0 },
+    coverage: { ...snapshot(400, 40, 150).coverage, cache_write: 4 },
+  };
+  app.respond(upgraded);
+  row = await app.monitor.refresh(app.id);
+  assert.equal(row.workspace.total, 0);
+  assert.equal(row.workspace.cacheWrite, 0);
+  assert.deepEqual(app.store.get(app.id).tokenUsage, local(50, 10, 20));
+});
+
+test("partial attempt counts preserve subtotals and suppress comparison completeness", async (t) => {
+  const app = await fixture(t);
+  app.respond(snapshot(100, 10, 50));
+  await app.monitor.refresh(app.id);
+  app.store.patch(app.id, { tokenUsage: local(150, 20, 70) });
+  const interrupted = snapshot(200, 20, 100);
+  interrupted.totals.partial_requests = 1;
+  app.respond(interrupted);
+  const row = await app.monitor.refresh(app.id);
+  assert.equal(row.upstream.partialRequests, 1);
+  assert.equal(row.upstream.requests, 1);
+  assert.equal(row.upstream.coverage.cacheHit, 1);
+  assert.equal(row.workspace.input, 100);
+  assert.equal(row.workspace.cacheRead, 50);
+  assert.equal(row.difference.input, null);
+  assert.equal(row.difference.cacheRead, null);
+  assert.equal(row.upstream.errors, 0);
+
+  // An older worker cannot prove a complete observation window.
+  const legacy = snapshot(300, 30, 150);
+  delete legacy.totals.partial_requests;
+  app.respond(legacy);
+  const reset = await app.monitor.refresh(app.id);
+  assert.equal(reset.upstream.partialRequests, null);
+  assert.equal(reset.workspace.input, 0);
+  assert.equal(reset.difference.input, null);
+  assert.deepEqual(app.store.get(app.id).tokenUsage, local(150, 20, 70));
+});
+
+test("invalid partial attempt counts reject the snapshot", async (t) => {
+  const app = await fixture(t);
+  for (const value of [-1, 1.5, 2, "1", null]) {
+    const invalid = snapshot(100, 10, 50);
+    invalid.totals.partial_requests = value;
+    app.respond(invalid);
+    assert.equal((await app.monitor.refresh(app.id)).status, "unavailable");
+  }
+});
+
+test("invalid coverage cannot manufacture measured usage", async (t) => {
+  const app = await fixture(t);
+  for (const invalid of [
+    {
+      ...snapshot(100, 10),
+      coverage: { ...snapshot(100, 10).coverage, credit: 2 },
+    },
+    {
+      ...snapshot(100, 10),
+      coverage: { ...snapshot(100, 10).coverage, prompt: 0 },
+    },
+    {
+      ...snapshot(100, 10),
+      capabilities: { ...snapshot(100, 10).capabilities, credit: false },
+    },
+  ]) {
+    app.respond(invalid);
+    assert.equal((await app.monitor.refresh(app.id)).status, "unavailable");
   }
 });

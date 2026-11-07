@@ -534,6 +534,8 @@ test('overview annotates large token counts with K, M and B abbreviations', asyn
     cacheWrite: 0,
     total: 2_500_000_000,
     reportedRequests: 3,
+    cacheReadReported: 3,
+    cacheWriteReported: 3,
     missingRequests: 0,
     partialRequests: 0,
   }
@@ -617,6 +619,13 @@ test('overview distinguishes missing token usage from measured zero in totals an
         accounts: comparison.accounts.map((row: Record<string, unknown>) => ({
           ...row,
           local: usage,
+          difference: {
+            input: usage.reportedRequests ? 0 : null,
+            output: usage.reportedRequests ? 0 : null,
+            cacheRead: null,
+            cacheWrite: null,
+            total: usage.reportedRequests ? 0 : null,
+          },
         })),
       },
     }),
@@ -624,7 +633,7 @@ test('overview distinguishes missing token usage from measured zero in totals an
   await login(page)
   await page.getByRole('link', { name: '运行概览', exact: true }).click()
   await expect(page.getByTestId('summary-token-total')).toHaveText('—')
-  await expect(page.getByTestId('overview-token-summary')).toContainText('2 次请求未上报用量')
+  await expect(page.getByTestId('overview-token-summary')).toContainText('2 次尝试未上报用量')
   const tokenPanel = page.getByRole('region', { name: 'Token 用量', exact: true })
   for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'total'])
     await expect(tokenPanel.getByTestId(`token-${key}`).locator('strong')).toHaveText('—')
@@ -633,14 +642,16 @@ test('overview distinguishes missing token usage from measured zero in totals an
   const account = page.getByTestId(`usage-comparison-${comparison.accounts[0].accountId}`)
   await expect(account.getByTestId('comparison-local')).toHaveText('—')
   await expect(account.getByTestId('comparison-difference')).toHaveText('—')
-  await expect(account).toContainText('2 次本地请求未上报用量')
+  await expect(account).toContainText('2 次本地尝试未上报用量')
   await account.getByText('查看输入、输出与缓存明细', { exact: true }).click()
-  await expect(account.getByRole('row', { name: '输入 Tokens — 0 —', exact: true })).toBeVisible()
+  await expect(
+    account.getByRole('row', { name: '输入 Tokens —未上报 0 —', exact: true }),
+  ).toBeVisible()
   usage = { ...usage, reportedRequests: 1, missingRequests: 0 }
   await page.reload()
   await page.getByRole('link', { name: '运行概览', exact: true }).click()
   await expect(page.getByTestId('summary-token-total')).toHaveText('0')
-  await expect(page.getByTestId('overview-token-summary')).toContainText('1 次已上报')
+  await expect(page.getByTestId('overview-token-summary')).toContainText('1 次尝试已上报')
   await expect(account.getByTestId('comparison-local')).toHaveText('0')
   await expect(account.getByTestId('comparison-difference')).toHaveText('0')
 })
@@ -685,16 +696,18 @@ test('overview shows measured token usage and compares aligned worker usage on d
     ['输入', after.stats.tokenUsage.today.input],
     ['输出', after.stats.tokenUsage.today.output],
     ['缓存读取', after.stats.tokenUsage.today.cacheRead],
-    ['缓存写入', after.stats.tokenUsage.today.cacheWrite],
+    ['缓存写入', null],
   ] as const) {
     const breakdown = page
       .getByTestId('overview-token-summary')
       .locator('dl > div')
       .filter({ has: page.getByText(label, { exact: true }) })
     const dd = breakdown.locator('dd')
-    await expect(dd).toHaveText(Number(value).toLocaleString('zh-CN'))
+    await expect(dd).toHaveText(value == null ? '—' : Number(value).toLocaleString('zh-CN'))
     // Short magnitudes appear only above 1000, so small fields stay unannotated.
-    if (Number(value) < 1000) await expect(breakdown.locator('small')).toHaveCount(0)
+    if (value == null) await expect(breakdown.locator('small')).toHaveText('未上报')
+    else if (Number(value) < 1000)
+      await expect(breakdown.locator('small.usage-short')).toHaveCount(0)
     else await expect(breakdown.locator('small')).toHaveText(`约 ${shortCount(Number(value))}`)
   }
   await expect(page.getByTestId('summary-token-total-short')).toHaveText(
@@ -709,7 +722,7 @@ test('overview shows measured token usage and compares aligned worker usage on d
   for (const [key, value] of Object.entries(after.stats.tokenUsage.today)) {
     if (['input', 'output', 'cacheRead', 'cacheWrite', 'total'].includes(key)) {
       await expect(tokenPanel.getByTestId(`token-${key}`).locator('strong')).toHaveText(
-        Number(value).toLocaleString('zh-CN'),
+        key === 'cacheWrite' ? '—' : Number(value).toLocaleString('zh-CN'),
       )
       const shortLabel = tokenPanel.getByTestId(`token-${key}`).locator('em.usage-short')
       if (Number(value) < 1000) await expect(shortLabel).toHaveCount(0)
@@ -774,6 +787,8 @@ test('upstream reconciliation exposes credit, cache hit rate and credit density 
       cacheWrite: null,
       total: 8_200,
       reportedRequests: 5,
+      cacheReadReported: 5,
+      cacheWriteReported: 5,
       missingRequests: 0,
       partialRequests: 0,
     },
@@ -784,6 +799,8 @@ test('upstream reconciliation exposes credit, cache hit rate and credit density 
       cacheWrite: 0,
       total: 8_200,
       reportedRequests: 5,
+      cacheReadReported: 5,
+      cacheWriteReported: 5,
       missingRequests: 0,
       partialRequests: 0,
     },
@@ -804,8 +821,10 @@ test('upstream reconciliation exposes credit, cache hit rate and credit density 
       requests: 5,
       errors: 0,
       credit: 2,
+      partialRequests: 0,
       cacheHit: 3_840,
       cacheMiss: 4_160,
+      coverage: { prompt: 5, completion: 5, credit: 5, cacheHit: 5, cacheMiss: 5, cacheWrite: 0 },
     },
     supportsCredit: true,
   }
@@ -822,8 +841,10 @@ test('upstream reconciliation exposes credit, cache hit rate and credit density 
       requests: 5,
       errors: 0,
       credit: 18,
+      partialRequests: 0,
       cacheHit: 0,
       cacheMiss: 8_000,
+      coverage: { prompt: 5, completion: 5, credit: 5, cacheHit: 5, cacheMiss: 5, cacheWrite: 0 },
     },
   }
   await page.route('**/api/usage/comparison', (route) =>
@@ -845,7 +866,7 @@ test('upstream reconciliation exposes credit, cache hit rate and credit density 
   )
   await login(page)
   await page.getByRole('link', { name: '运行概览', exact: true }).click()
-  const panel = page.getByRole('region', { name: '上游真实用量对账', exact: true })
+  const panel = page.getByRole('region', { name: '上游用量对账', exact: true })
   await expect(panel).toBeVisible()
 
   // Pool-wide totals: 3,840 hits against 12,160 misses is a 24% hit rate.
@@ -885,6 +906,16 @@ test('upstream reconciliation exposes credit, cache hit rate and credit density 
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
   await expect(panel.getByTestId('reconcile-hit-rate')).toBeVisible()
   await expect(panel.getByTestId('reconcile-table')).toBeVisible()
+
+  // Measured fields can all arrive before a canceled or broken stream.
+  warm.upstream.partialRequests = 1
+  await page.reload()
+  await expect(panel.getByTestId('reconcile-hit-rate')).toHaveText('—')
+  await expect(panel.getByTestId('reconcile-credit-ratio')).toHaveText('—')
+  await expect(warmRow.getByTestId('account-credit')).toHaveText('2')
+  await expect(warmRow.getByTestId('account-hit-rate')).toHaveText('—')
+  await expect(warmRow).toContainText('覆盖不完整')
+  await expect(row('credit').getByTestId('cell-upstream')).toContainText('部分上报')
 })
 
 test('upstream reconciliation stays empty until a workspace snapshot is available', async ({
@@ -918,10 +949,102 @@ test('upstream reconciliation stays empty until a workspace snapshot is availabl
   )
   await login(page)
   await page.getByRole('link', { name: '运行概览', exact: true }).click()
-  const panel = page.getByRole('region', { name: '上游真实用量对账', exact: true })
+  const panel = page.getByRole('region', { name: '上游用量对账', exact: true })
   await expect(panel.getByTestId('reconcile-empty')).toBeVisible()
-  await expect(panel).toContainText('同步工作区用量后，这里显示真实扣费与缓存命中')
+  await expect(panel).toContainText('同步后显示工作区上报的扣费与缓存计数')
   await expect(panel.getByTestId('reconcile-table')).toHaveCount(0)
+})
+
+test('missing cache and legacy credits stay unknown while measured zero remains visible', async ({
+  page,
+  request,
+}) => {
+  const seeded = await seed(request)
+  const overview = await (await request.get('/api/overview')).json()
+  let usage = {
+    input: 4007,
+    output: 100,
+    total: 4107,
+    cacheRead: 0,
+    cacheWrite: 0,
+    reportedRequests: 1,
+    missingRequests: 0,
+    partialRequests: 0,
+    cacheReadReported: 0,
+    cacheWriteReported: 0,
+  }
+  const legacy = {
+    accountId: seeded[0].id,
+    accountName: 'legacy-worker',
+    status: 'ok',
+    message: '已同步',
+    syncedAt: null,
+    bootedAt: null,
+    bootId: 'legacy',
+    startedAt: null,
+    workspaceTotals: null,
+    workspace: null,
+    difference: null,
+    local: usage,
+    supportsCredit: false,
+    upstream: {
+      prompt: 4007,
+      completion: 100,
+      requests: 1,
+      errors: 0,
+      credit: null,
+      cacheHit: null,
+      cacheMiss: null,
+      cacheWrite: null,
+      coverage: {
+        prompt: null,
+        completion: null,
+        credit: null,
+        cacheHit: null,
+        cacheMiss: null,
+        cacheWrite: null,
+      },
+    },
+  }
+  await page.route('**/api/overview', (route) =>
+    route.fulfill({
+      json: {
+        ...overview,
+        stats: {
+          ...overview.stats,
+          tokenUsage: { ...overview.stats.tokenUsage, today: usage, total: usage },
+        },
+      },
+    }),
+  )
+  await page.route('**/api/usage/comparison', (route) =>
+    route.fulfill({ json: { accounts: [{ ...legacy, local: usage }] } }),
+  )
+  await login(page)
+  await page.getByRole('link', { name: '运行概览', exact: true }).click()
+  const panel = page.getByRole('region', { name: 'Token 用量', exact: true })
+  await expect(panel.getByTestId('token-input').locator('strong')).toHaveText('4,007')
+  await expect(panel.getByTestId('token-cacheRead').locator('strong')).toHaveText('—')
+  await expect(panel.getByTestId('token-cacheRead')).toContainText('未上报')
+  await expect(page.getByTestId('reconcile-hit-rate')).toHaveText('—')
+  await expect(page.getByTestId('reconcile-credit-ratio')).toHaveText('—')
+  await expect(page.getByTestId('account-credit')).toHaveText('—')
+  await expect(page.getByTestId('account-local-miss')).toHaveText('—')
+  await panel.screenshot({ path: '../test-results/cache-unknown.png' })
+  usage = { ...usage, cacheReadReported: 1, cacheWriteReported: 1 }
+  await page.reload()
+  await page.getByRole('link', { name: '运行概览', exact: true }).click()
+  await expect(panel.getByTestId('token-cacheRead').locator('strong')).toHaveText('0')
+  await expect(panel.getByTestId('token-cacheWrite').locator('strong')).toHaveText('0')
+  await expect(page.getByTestId('account-local-miss')).toHaveText('4,007')
+  usage = { ...usage, reportedRequests: 2, cacheRead: 3840 }
+  await page.reload()
+  await page.getByRole('link', { name: '运行概览', exact: true }).click()
+  await expect(panel.getByTestId('token-cacheRead').locator('strong')).toHaveText('3,840')
+  await expect(panel.getByTestId('token-cacheRead')).toContainText('部分上报（1/2 次尝试）')
+  await expect(page.getByTestId('account-local-miss')).toHaveText('—')
+  await expect(page.getByTestId('reconcile-credit-ratio')).toHaveText('—')
+  await panel.screenshot({ path: '../test-results/cache-partial.png' })
 })
 
 test('request details show the first user message, usage and routing metadata on desktop and phone', async ({
@@ -982,7 +1105,7 @@ test('request details show the first user message, usage and routing metadata on
     ['input', '1,200'],
     ['output', '300'],
     ['cacheRead', '400'],
-    ['cacheWrite', '0'],
+    ['cacheWrite', '—'],
     ['total', '1,500'],
   ] as const) {
     await expect(dialog.getByTestId(`request-token-${field}`)).toHaveText(value)

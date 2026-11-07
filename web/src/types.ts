@@ -7,7 +7,11 @@ export interface TokenTotals {
   reportedRequests: number
   missingRequests: number
   partialRequests: number
+  cacheReadReported?: number
+  cacheWriteReported?: number
 }
+export type TokenMetric = 'input' | 'output' | 'cacheRead' | 'cacheWrite' | 'total'
+export type NullableTokenMetrics = Record<TokenMetric, number | null>
 export interface UsageComparison {
   accountId: string
   accountName: string
@@ -17,40 +21,30 @@ export interface UsageComparison {
   bootedAt: string | null
   bootId: string | null
   startedAt: string | null
-  workspaceTotals:
-    | (Omit<TokenTotals, 'cacheRead' | 'cacheWrite'> & {
-        cacheRead: number | null
-        cacheWrite: number | null
-      })
-    | null
+  workspaceTotals: NullableTokenMetrics | null
   local: TokenTotals | null
-  workspace:
-    | (Omit<TokenTotals, 'cacheRead' | 'cacheWrite'> & {
-        cacheRead: number | null
-        cacheWrite: number | null
-      })
-    | null
-  difference: {
-    input: number
-    output: number
-    cacheRead: number | null
-    cacheWrite: number | null
-    total: number
-  } | null
+  workspace: NullableTokenMetrics | null
+  difference: NullableTokenMetrics | null
   upstream: UpstreamUsage | null
   supportsCredit: boolean
+  schemaVersion?: number | null
 }
 // Real upstream counters reported by the workspace /usage endpoint, already
 // diffed against the same baseline as the token comparison.
 export interface UpstreamUsage {
-  prompt: number
-  completion: number
+  prompt: number | null
+  completion: number | null
   requests: number
   errors: number
-  credit: number
-  cacheHit: number
-  cacheMiss: number
+  partialRequests?: number | null
+  credit: number | null
+  cacheHit: number | null
+  cacheMiss: number | null
+  cacheWrite?: number | null
+  coverage?: Partial<Record<UpstreamMetric, number | null>>
 }
+export type UpstreamMetric =
+  'prompt' | 'completion' | 'credit' | 'cacheHit' | 'cacheMiss' | 'cacheWrite'
 export interface Quota {
   org: string
   credits: { total: number; used: number; freeze: number }
@@ -64,6 +58,10 @@ export interface QuotaProtectionState {
   remainingPercent: number | null
   thresholdPercent: number
 }
+export type UpstreamMode = 'inherit' | 'auto' | 'ide' | 'classic'
+// What the worker actually used. 'legacy' means the request header was sent but
+// the worker never reported back, i.e. an old worker pinned to classic.
+export type UpstreamModeApplied = 'ide' | 'classic' | 'legacy' | null
 export interface Account {
   id: string
   name: string
@@ -76,6 +74,9 @@ export interface Account {
   quotaProtectionOverride: boolean
   autoWake: boolean
   branch: string
+  upstreamMode: UpstreamMode
+  upstreamModeApplied: UpstreamModeApplied
+  upstreamModeAppliedAt: string | null
   models: string[]
   discoveredModels: string[]
   status: 'pending' | 'healthy' | 'unhealthy'

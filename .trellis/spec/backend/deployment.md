@@ -11,6 +11,26 @@ panel, and scope the watcher and its labels to `COMPOSE_PROJECT_NAME`. Keep
 Watchtower itself excluded from updates. Cleanup removes replaced images, not
 host data. The check interval defaults to 600 seconds.
 
+## Worker usage deployment
+
+The panel and cnb2api worker are separate artifacts. Worker `deploy/start.sh`
+copies `src/*.mjs` into its runtime directory, normally `/workspace/proxy`, then
+starts that copy. Editing the source checkout or replacing the panel image does
+not update an already-running worker. Include newly added usage helper modules
+when updating worker sources.
+
+Validate the authenticated worker `/usage` response: `schema_version: 2`, cache
+and credit capabilities, per-field `coverage`, and `totals.partial_requests`.
+Package version 1.0.0 alone
+cannot identify these features because historical worker copies diverged while
+retaining that version. Verify each active worker independently. Use capability
+fields as functional evidence and source hashes when exact identity is required.
+Preserve original files for a worker without Git.
+
+Never reset historical statistics to validate an update. Observe new traffic
+over one comparison interval. Missing provider credit/cache fields remain
+unknown even on a capable worker. Local tests do not establish a billing rate.
+
 Local builds must override the panel update label to `false` and put Watchtower
 behind an inactive profile. A local image must never be replaced automatically
 by the production updater.

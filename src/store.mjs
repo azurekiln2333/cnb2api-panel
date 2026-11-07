@@ -48,6 +48,8 @@ const RUNTIME_FIELDS = [
   "lastWakeAt",
   "tokenUsage",
   "workerUsage",
+  "upstreamModeApplied",
+  "upstreamModeAppliedAt",
   "registrationTokenVersion",
 ];
 const runtimeDefaults = () => ({
@@ -66,6 +68,8 @@ const runtimeDefaults = () => ({
   errors: 0,
   lastWakeAt: null,
   tokenUsage: emptyTokenUsage(),
+  upstreamModeApplied: null,
+  upstreamModeAppliedAt: null,
   registrationTokenVersion: 0,
 });
 
@@ -109,6 +113,20 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 const loopbackHost = (hostname) =>
   LOOPBACK_HOSTS.has(hostname) || hostname.endsWith(".localhost");
 const printable = (value) => !/[\x00-\x1f\x7f]/.test(value);
+
+// Per-account upstream selection. "inherit" sends no request header, so the
+// worker keeps its own startup default and the panel behaves exactly as before.
+export const UPSTREAM_MODES = ["inherit", "auto", "ide", "classic"];
+
+export function normalizeUpstreamMode(input, { lenient = false } = {}) {
+  if (input === undefined || input === null || input === "") return "inherit";
+  const value = typeof input === "string" ? input.trim().toLowerCase() : "";
+  if (UPSTREAM_MODES.includes(value)) return value;
+  // Stored data may predate this field or carry an unknown value; loading keeps
+  // the account usable instead of refusing the whole document.
+  if (lenient) return "inherit";
+  throw new InputError("上游模式须为 inherit、auto、ide 或 classic");
+}
 
 // Issuers need HTTPS; loopback HTTP stays available for local mocks and tests.
 export function normalizeIssuer(input, allowLocal = false) {
@@ -461,6 +479,8 @@ export class Store {
           quotaProtectionOverride: false,
           ...runtimeDefaults(),
           ...a,
+          // Accounts saved before this field existed load as "inherit".
+          upstreamMode: normalizeUpstreamMode(a.upstreamMode, { lenient: true }),
           ...(!legacy
             ? Object.fromEntries(
                 RUNTIME_FIELDS.filter(
@@ -769,6 +789,9 @@ export class Store {
       quotaProtectionOverride,
       autoWake,
       branch,
+      upstreamMode: normalizeUpstreamMode(
+        input.upstreamMode ?? previous?.upstreamMode ?? "inherit",
+      ),
       secrets,
     };
   }
@@ -801,6 +824,8 @@ export class Store {
       errors: 0,
       lastWakeAt: null,
       tokenUsage: emptyTokenUsage(),
+      upstreamModeApplied: null,
+      upstreamModeAppliedAt: null,
       registrationTokenVersion: 0,
     };
     this.commit((s) => s.accounts.push(account));
@@ -827,6 +852,8 @@ export class Store {
               lastError: "",
               discoveredModels: [],
               latencyMs: null,
+              upstreamModeApplied: null,
+              upstreamModeAppliedAt: null,
             }
           : {},
         old.repo !== fields.repo ? { quota: null, lastWakeAt: null } : {},
@@ -940,7 +967,14 @@ export class Store {
       if (entry.tokenUsage) {
         addTokenUsage(s.tokenUsage, entry.tokenUsage);
         addTokenUsage(bucket.tokenUsage, entry.tokenUsage);
-        if (account) addTokenUsage(account.tokenUsage, entry.tokenUsage);
+        if (Array.isArray(entry.usageAttempts)) {
+          // Request/global totals are already folded. Account totals receive
+          // only their own attempt measurements, never the final request sum.
+          for (const attempt of entry.usageAttempts) {
+            const owner = s.accounts.find((item) => item.id === attempt.accountId);
+            if (owner && attempt.tokenUsage) addTokenUsage(owner.tokenUsage, attempt.tokenUsage);
+          }
+        } else if (account) addTokenUsage(account.tokenUsage, entry.tokenUsage);
       }
       if (account) {
         account.requests++;

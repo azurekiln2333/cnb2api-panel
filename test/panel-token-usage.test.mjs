@@ -658,15 +658,15 @@ test("personal token requires an explicit authenticated reveal and stays absent 
 
 test("deriveCacheMiss reports the uncached remainder and never fabricates a zero", () => {
   // OpenAI prompt_tokens already contains the cache hits.
-  assert.deepEqual(deriveCacheMiss({ input: 120, cacheRead: 70 }), {
+  assert.deepEqual(deriveCacheMiss({ input: 120, cacheRead: 70, reportedRequests: 1, cacheReadReported: 1 }), {
     cacheMiss: 50,
     cacheMissReported: 1,
   });
-  assert.deepEqual(deriveCacheMiss({ input: 100, cacheRead: 0 }), {
+  assert.deepEqual(deriveCacheMiss({ input: 100, cacheRead: 0, reportedRequests: 1, cacheReadReported: 1 }), {
     cacheMiss: 100,
     cacheMissReported: 1,
   });
-  assert.deepEqual(deriveCacheMiss({ input: 100, cacheRead: 100 }), {
+  assert.deepEqual(deriveCacheMiss({ input: 100, cacheRead: 100, reportedRequests: 1, cacheReadReported: 1 }), {
     cacheMiss: 0,
     cacheMissReported: 1,
   });
@@ -677,7 +677,7 @@ test("deriveCacheMiss reports the uncached remainder and never fabricates a zero
   assert.equal(deriveCacheMiss({ cacheRead: 10 }), null);
 });
 
-test("an aborted attempt keeps its measured usage instead of vanishing on retry", async (t) => {
+test("an interrupted stream keeps measured usage without claiming complete cache coverage", async (t) => {
   // The provider bills a generation even when the panel aborts it. Folding every
   // attempt into the request total keeps the local ledger comparable with the
   // workspace /usage counters.
@@ -762,5 +762,6 @@ test("an aborted attempt keeps its measured usage instead of vanishing on retry"
   assert.equal(record.tokenUsage.output, 5);
   assert.equal(record.tokenUsage.cacheRead, 60);
   assert.equal(record.tokenUsage.total, 105);
-  assert.deepEqual(record.cacheMiss, { cacheMiss: 40, cacheMissReported: 1 });
+  assert.equal(record.cacheMiss, undefined);
+  assert.equal(record.tokenUsage.partialRequests, 1);
 });

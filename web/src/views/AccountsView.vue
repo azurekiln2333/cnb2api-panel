@@ -59,6 +59,18 @@ const showEditor = ref(false)
 const editingAccount = ref<Account | null>(null)
 const managingId = ref<string | null>(null)
 const managing = computed(() => accounts.value.find((a) => a.id === managingId.value) ?? null)
+// Runtime fact reported by the worker, not the configured preference.
+function upstreamModeAppliedLabel(account: Account) {
+  if (account.upstreamModeApplied === 'legacy') return '旧版 worker，固定经典'
+  if (account.upstreamModeApplied === 'ide') return '当前上游：IDE 网关'
+  if (account.upstreamModeApplied === 'classic') return '当前上游：经典 CNB 网关'
+  return '上游模式：等待测量'
+}
+const managingSubtitle = computed(() =>
+  managing.value
+    ? [managing.value.repo, upstreamModeAppliedLabel(managing.value)].filter(Boolean).join(' · ')
+    : '',
+)
 const confirming = ref<{ action: 'delete' | 'rotate'; account: Account } | null>(null)
 const confirmingBusy = ref(false)
 const page = ref(1)
@@ -556,6 +568,9 @@ async function confirm() {
               <div class="cell-secondary">
                 {{ account.models.length ? `${account.models.length} 个指定模型` : '全部模型' }}
               </div>
+              <div class="cell-secondary" :data-testid="`upstream-mode-${account.id}`">
+                {{ upstreamModeAppliedLabel(account) }}
+              </div>
             </td>
             <td>
               <div class="row-actions">
@@ -671,7 +686,7 @@ async function confirm() {
   <ModalShell
     v-if="managing"
     :title="managing.name"
-    :subtitle="managing.repo"
+    :subtitle="managingSubtitle"
     @close="managingId = null"
     ><div class="modal-body account-actions-grid">
       <button @click="edit(managing)">

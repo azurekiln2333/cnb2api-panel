@@ -1,3 +1,4 @@
+import { UsageMeasurement } from "./usage-measurement.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { InputError } from "./store.mjs";
 
@@ -305,57 +306,15 @@ export function toChatRequest(payload) {
 }
 
 const count = (value) => Number.isSafeInteger(value) && value >= 0;
-const integer = (value) => count(value) ? value : undefined;
-// Workers report the same counter under several names. Later sources of one
-// block win so a measured value replaces a zero placeholder, and equal counters
-// from mixed families stay equal instead of adding cache to a fresh input total.
-const counter = (...values) => values.map(integer).find((value) => value !== undefined);
-const maximum = (values) => values.reduce((left, right) => left === undefined
-  ? right
-  : right === undefined ? left : Math.max(left, right), undefined);
-function usage(value) {
-  if (!object(value) || value.usage_estimated === true) return null;
-  const anthropicFirst = counter(value.input_tokens);
-  const anthropicAll = [anthropicFirst, counter(value.output_tokens), counter(value.cache_read_input_tokens)].filter((n) => n !== undefined);
-  const measured = anthropicAll.some((n) => n !== 0);
-  // Chat usage keeps cache hits inside prompt_tokens. Anthropic usage reports
-  // them beside input_tokens, so the cached part is added back to match Chat.
-  const cacheOnly = !measured && anthropicAll.length > 0;
-  const prompt = counter(value.prompt_tokens) ?? anthropicFirst;
-  const completion = counter(value.completion_tokens) ?? counter(value.output_tokens);
-  if (!count(prompt) || !count(completion)) return null;
-  const cached = counter(
-    value.prompt_tokens_details?.cached_tokens,
-    value.prompt_cache_hit_tokens,
-    cacheOnly ? undefined : value.cache_read_input_tokens,
-  );
-  const input = prompt + (cacheOnly ? cached ?? 0 : 0);
-  const total = input + completion;
-  if (!count(total)) return null;
+function responseUsage(measurement) {
+  const value = measurement.value();
+  if (!value || !count(value.input) || !count(value.output) || !count(value.input + value.output)) return null;
   return {
-    input_tokens: input,
-    input_tokens_details: { cached_tokens: cached === undefined ? 0 : Math.min(input, cached) },
-    output_tokens: completion,
-    output_tokens_details: { reasoning_tokens: count(value.completion_tokens_details?.reasoning_tokens) ? Math.min(completion, value.completion_tokens_details.reasoning_tokens) : 0 },
-    total_tokens: total,
-  };
-}
-
-// Streaming usage can arrive in more than one block. Keep the strongest measured
-// value per counter and report null only when no block carried usage at all.
-function mergeUsage(current, reported) {
-  if (!reported) return current;
-  if (!current) return reported;
-  const cached = maximum([current.input_tokens_details?.cached_tokens, reported.input_tokens_details?.cached_tokens]) ?? 0;
-  const reasoning = maximum([current.output_tokens_details?.reasoning_tokens, reported.output_tokens_details?.reasoning_tokens]) ?? 0;
-  const input = Math.max(current.input_tokens, reported.input_tokens);
-  const output = Math.max(current.output_tokens, reported.output_tokens);
-  return {
-    input_tokens: input,
-    input_tokens_details: { cached_tokens: Math.min(input, cached) },
-    output_tokens: output,
-    output_tokens_details: { reasoning_tokens: Math.min(output, reasoning) },
-    total_tokens: input + output,
+    input_tokens: value.input,
+    input_tokens_details: { cached_tokens: value.cacheRead ?? 0 },
+    output_tokens: value.output,
+    output_tokens_details: { reasoning_tokens: Math.min(value.output, value.reasoning ?? 0) },
+    total_tokens: value.input + value.output,
   };
 }
 
@@ -436,7 +395,9 @@ export function toResponsesResponse(body, options = {}) {
   }
   if (["tool_calls", "function_call"].includes(choice.finish_reason) && !message.tool_calls?.length) throw upstreamError();
   if (!response.output.length) response.output.push({ id: `msg_${randomUUID()}`, type: "message", status: response.status, role: "assistant", content: [] });
-  response.usage = usage(body.usage);
+  const measurement = new UsageMeasurement();
+  measurement.accept(body);
+  response.usage = responseUsage(measurement);
   return response;
 }
 
@@ -445,6 +406,7 @@ export function toResponsesResponse(body, options = {}) {
 export class ResponsesStream {
   constructor(options = {}) {
     this.response = baseResponse(options);
+    this.usageMeasurement = new UsageMeasurement();
     this.toolContext = options.toolContext;
     this.decoder = new TextDecoder("utf-8", { fatal: true });
     this.buffer = "";
@@ -529,11 +491,14 @@ export class ResponsesStream {
 
   accept(value, events, errorEvent = false) {
     if (!object(value) || this.sawDone) throw upstreamError();
-    const reported = usage(value.usage);
-    if (reported) this.response.usage = mergeUsage(this.response.usage, reported);
+    this.usageMeasurement.accept(value);
+    this.response.usage = responseUsage(this.usageMeasurement);
     if (errorEvent || value.error || value.type === "error") throw upstreamError();
     if (typeof value.model === "string") this.response.model = value.model;
-    if (!Array.isArray(value.choices)) throw upstreamError();
+    if (!Array.isArray(value.choices)) {
+      if (value.choices === undefined && (value.usage || value.billing_usage)) return;
+      throw upstreamError();
+    }
     for (const choice of value.choices) {
       if (!object(choice) || (choice.index !== undefined && choice.index !== 0) || this.finishReason) throw upstreamError();
       const delta = choice.delta;

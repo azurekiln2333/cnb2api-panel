@@ -14,6 +14,7 @@ import {
 } from '@lucide/vue'
 import { number, compact, useConsole, accountState, time } from '../console'
 import { abbreviateCount } from '../format'
+import { tokenValue, tokenCoverageLabel, upstreamComplete, upstreamValue } from '../usage'
 import {
   formatCredit,
   formatCreditPerThousand,
@@ -23,7 +24,7 @@ import {
   syncedSources,
 } from '../reconcile'
 import { api } from '../api'
-import type { Page, TokenTotals, UsageComparison } from '../types'
+import type { Page, TokenMetric, TokenTotals, UsageComparison } from '../types'
 import { formatRemainingQuotaPercent, summarizeQuota } from '../quota'
 import StatusBadge from '../components/StatusBadge.vue'
 const emit = defineEmits<{ navigate: [page: Page] }>()
@@ -33,21 +34,22 @@ const tokenPeriod = ref<'today' | 'total'>('today')
 const credits = computed(() => summarizeQuota(accounts.value))
 const tokens = computed(() => overview.value?.stats.tokenUsage?.[tokenPeriod.value])
 const todayTokens = computed(() => overview.value?.stats.tokenUsage?.today)
-const unreported = (usage: TokenTotals | null | undefined) =>
-  !!usage && !usage.reportedRequests && usage.missingRequests > 0
-const tokenNumber = (usage: TokenTotals | null | undefined, key: keyof TokenTotals) =>
-  unreported(usage) ? '—' : number(usage?.[key])
-// Short magnitude beside the exact count, e.g. 23,019,762 → 23.02M.
-const tokenShort = (usage: TokenTotals | null | undefined, key: keyof TokenTotals) =>
-  unreported(usage) ? '' : abbreviateCount(usage?.[key])
+const tokenNumber = (usage: TokenTotals | null | undefined, key: TokenMetric) => {
+  const value = tokenValue(usage, key)
+  return value == null ? '—' : number(value)
+}
+const tokenShort = (usage: TokenTotals | null | undefined, key: TokenMetric) =>
+  abbreviateCount(tokenValue(usage, key))
+const exact = (value: number | null | undefined) => (value == null ? '—' : number(value))
+const short = (value: number | null | undefined) =>
+  value == null ? '—' : abbreviateCount(value) || number(value)
 const tokenSummaryStatus = computed(() => {
   const usage = todayTokens.value
   if (!usage) return '暂无用量数据，等待请求上报。'
   if (!usage.reportedRequests && !usage.missingRequests)
     return '今日暂无请求，调用统一入口后自动统计。'
-  if (!usage.reportedRequests)
-    return `${number(usage.missingRequests)} 次请求未上报用量，缺失部分不估算。`
-  return `${number(usage.reportedRequests)} 次已上报${usage.partialRequests ? `，${number(usage.partialRequests)} 次字段不完整` : ''}${usage.missingRequests ? ` · ${number(usage.missingRequests)} 次未上报` : ''}`
+  if (!usage.reportedRequests) return `${number(usage.missingRequests)} 次尝试未上报用量。`
+  return `${number(usage.reportedRequests)} 次尝试已上报${usage.partialRequests ? `，${number(usage.partialRequests)} 次字段不完整` : ''}${usage.missingRequests ? ` · ${number(usage.missingRequests)} 次未上报` : ''}`
 })
 const creditSummaryStatus = computed(() => {
   if (credits.value.errors) return `${credits.value.errors} 个组织同步失败，保留上次额度`
@@ -63,7 +65,25 @@ const tokenMetrics = [
   { key: 'cacheWrite', label: '缓存写入', hint: '输入中创建缓存的部分' },
   { key: 'total', label: 'Tokens 合计', hint: '输入 + 输出' },
 ] as const
-const comparisonMetrics = tokenMetrics.filter((item) => item.key !== 'cacheWrite')
+const comparisonMetrics = tokenMetrics
+const remoteCoverageLabel = (row: UsageComparison, key: TokenMetric) => {
+  if (row.workspace?.[key] == null) return '未上报'
+  const complete =
+    key === 'total'
+      ? upstreamComplete(row.upstream, 'prompt', 'completion')
+      : upstreamComplete(
+          row.upstream,
+          (
+            {
+              input: 'prompt',
+              output: 'completion',
+              cacheRead: 'cacheHit',
+              cacheWrite: 'cacheWrite',
+            } as const
+          )[key],
+        )
+  return complete ? '' : '覆盖不完整'
+}
 const comparisons = ref<UsageComparison[]>([])
 const comparing = ref(false)
 const comparisonError = ref('')
@@ -95,62 +115,44 @@ async function loadComparison(refresh = false) {
 onMounted(() => loadComparison())
 watch(overview, () => loadComparison())
 // Read-only reconciliation of panel counters against the workspace's own /usage
-// numbers. Credit and prefix-cache counters explain a quota that drains faster
-// than the token count suggests.
+// numbers. Coverage determines which counters and ratios can be compared.
 const reconciled = computed(() => syncedSources(comparisons.value))
 const reconcileTotals = computed(() => sumReconcile(comparisons.value))
 const reconcileRows = computed(() => {
   const totals = reconcileTotals.value
   const local = totals.local
   const upstream = totals.upstream
+  const pairs = [
+    ['prompt', 'input', '输入 / 提示 Tokens'],
+    ['completion', 'output', '输出 / 补全 Tokens'],
+    ['cacheHit', 'cacheRead', '缓存命中 Tokens'],
+    ['cacheMiss', 'cacheMiss', '缓存未命中 Tokens'],
+    ['cacheWrite', 'cacheWrite', '缓存写入 Tokens'],
+    ['total', 'total', 'Tokens 合计'],
+  ] as const
   return [
-    {
-      key: 'prompt',
-      label: '输入 / 提示 Tokens',
-      local: local.input,
-      upstream: upstream.prompt,
-      difference: upstream.prompt - local.input,
-    },
-    {
-      key: 'completion',
-      label: '输出 / 补全 Tokens',
-      local: local.output,
-      upstream: upstream.completion,
-      difference: upstream.completion - local.output,
-    },
-    {
-      key: 'cacheHit',
-      label: '缓存命中 Tokens',
-      local: local.cacheRead,
-      upstream: upstream.cacheHit,
-      difference: upstream.cacheHit - local.cacheRead,
-    },
-    {
-      key: 'cacheMiss',
-      label: '缓存未命中 Tokens',
-      local: local.cacheMiss,
-      upstream: upstream.cacheMiss,
-      difference: upstream.cacheMiss - local.cacheMiss,
-    },
-    {
-      key: 'cacheWrite',
-      label: '缓存写入 Tokens',
-      local: local.cacheWrite,
-      upstream: null,
-      difference: null,
-    },
-    {
-      key: 'total',
-      label: 'Tokens 合计',
-      local: local.total,
-      upstream: upstream.total,
-      difference: upstream.total - local.total,
-    },
+    ...pairs.map(([key, localKey, label]) => ({
+      key,
+      label,
+      local: local[localKey],
+      upstream: upstream[key],
+      localPartial: local[localKey] !== null && !totals.localComplete[localKey],
+      upstreamPartial: upstream[key] !== null && !totals.upstreamComplete[key],
+      difference:
+        totals.localComplete[localKey] &&
+        totals.upstreamComplete[key] &&
+        local[localKey] !== null &&
+        upstream[key] !== null
+          ? upstream[key] - local[localKey]
+          : null,
+    })),
     {
       key: 'credit',
-      label: 'Credit（工作区扣费）',
+      label: 'Credit（工作区上报）',
       local: null,
       upstream: upstream.credit,
+      localPartial: false,
+      upstreamPartial: upstream.credit !== null && !totals.upstreamComplete.credit,
       difference: null,
     },
   ]
@@ -240,6 +242,9 @@ const states = computed(() => [
         <div>
           <dt>输入</dt>
           <dd>{{ tokenNumber(todayTokens, 'input') }}</dd>
+          <small v-if="tokenCoverageLabel(todayTokens, 'input')">{{
+            tokenCoverageLabel(todayTokens, 'input')
+          }}</small>
           <small v-if="tokenShort(todayTokens, 'input')" class="usage-short"
             >约 {{ tokenShort(todayTokens, 'input') }}</small
           >
@@ -247,6 +252,9 @@ const states = computed(() => [
         <div>
           <dt>输出</dt>
           <dd>{{ tokenNumber(todayTokens, 'output') }}</dd>
+          <small v-if="tokenCoverageLabel(todayTokens, 'output')">{{
+            tokenCoverageLabel(todayTokens, 'output')
+          }}</small>
           <small v-if="tokenShort(todayTokens, 'output')" class="usage-short"
             >约 {{ tokenShort(todayTokens, 'output') }}</small
           >
@@ -254,6 +262,9 @@ const states = computed(() => [
         <div>
           <dt>缓存读取</dt>
           <dd>{{ tokenNumber(todayTokens, 'cacheRead') }}</dd>
+          <small v-if="tokenCoverageLabel(todayTokens, 'cacheRead')">{{
+            tokenCoverageLabel(todayTokens, 'cacheRead')
+          }}</small>
           <small v-if="tokenShort(todayTokens, 'cacheRead')" class="usage-short"
             >约 {{ tokenShort(todayTokens, 'cacheRead') }}</small
           >
@@ -261,6 +272,9 @@ const states = computed(() => [
         <div>
           <dt>缓存写入</dt>
           <dd>{{ tokenNumber(todayTokens, 'cacheWrite') }}</dd>
+          <small v-if="tokenCoverageLabel(todayTokens, 'cacheWrite')">{{
+            tokenCoverageLabel(todayTokens, 'cacheWrite')
+          }}</small>
           <small v-if="tokenShort(todayTokens, 'cacheWrite')" class="usage-short"
             >约 {{ tokenShort(todayTokens, 'cacheWrite') }}</small
           >
@@ -386,14 +400,14 @@ const states = computed(() => [
         <em v-if="tokenShort(tokens, item.key)" class="usage-short"
           >约 {{ tokenShort(tokens, item.key) }}</em
         >
-        <small>{{ item.hint }}</small>
+        <small>{{ tokenCoverageLabel(tokens, item.key) || item.hint }}</small>
       </div>
     </div>
     <div class="token-accounting-note">
       <span
-        >{{ number(tokens?.reportedRequests) }} 次用量已上报<span v-if="tokens?.partialRequests"
+        >{{ number(tokens?.reportedRequests) }} 次尝试已上报用量<span v-if="tokens?.partialRequests"
           >，其中 {{ number(tokens.partialRequests) }} 次仅有部分字段</span
-        >；{{ number(tokens?.missingRequests) }} 次未上报。</span
+        >。{{ number(tokens?.missingRequests) }} 次未上报。</span
       >
       <span>缓存已包含在输入中，不重复相加。缺失用量不估算，部分字段可能导致统计偏低。</span>
       <span v-if="overview?.stats.tokenUsage?.startedAt"
@@ -608,12 +622,12 @@ const states = computed(() => [
           </div>
           <div>
             <span>工作区合计</span
-            ><strong data-testid="comparison-workspace">{{ number(row.workspace?.total) }}</strong>
+            ><strong data-testid="comparison-workspace">{{ exact(row.workspace?.total) }}</strong>
           </div>
           <div>
             <span>差值（工作区 − 本地）</span
             ><strong data-testid="comparison-difference">{{
-              unreported(row.local) ? '—' : signed(row.difference?.total)
+              signed(row.difference?.total)
             }}</strong>
           </div>
         </div>
@@ -631,21 +645,27 @@ const states = computed(() => [
             <tbody>
               <tr v-for="item in comparisonMetrics" :key="item.key">
                 <th>{{ item.label }}</th>
-                <td>{{ tokenNumber(row.local, item.key) }}</td>
-                <td>{{ number(row.workspace?.[item.key]) }}</td>
-                <td>{{ unreported(row.local) ? '—' : signed(row.difference?.[item.key]) }}</td>
+                <td>
+                  {{ tokenNumber(row.local, item.key)
+                  }}<small>{{ tokenCoverageLabel(row.local, item.key) }}</small>
+                </td>
+                <td>
+                  {{ exact(row.workspace?.[item.key])
+                  }}<small>{{ remoteCoverageLabel(row, item.key) }}</small>
+                </td>
+                <td>{{ signed(row.difference?.[item.key]) }}</td>
               </tr>
             </tbody>
           </table>
           <p>
-            工作区本次启动累计：{{ number(row.workspaceTotals.total) }} Tokens（{{
+            工作区本次启动累计：{{ exact(row.workspaceTotals.total) }} Tokens（{{
               time(row.bootedAt, true)
             }}
-            启动）。工作区接口未提供缓存写入数据。
+            启动）。缺失字段显示为 —。
           </p>
         </details>
         <p v-if="row.local?.missingRequests" class="comparison-message">
-          {{ number(row.local.missingRequests) }} 次本地请求未上报用量，缺失部分不估算。
+          {{ number(row.local.missingRequests) }} 次本地尝试未上报用量。
         </p>
         <div v-if="row.startedAt || row.syncedAt" class="comparison-timestamps">
           <span v-if="row.startedAt">基线 {{ time(row.startedAt, true) }}</span
@@ -655,54 +675,61 @@ const states = computed(() => [
     </div>
     <div class="token-accounting-note">
       <span
-        >首次同步建立基线，后续显示增量；工作区重启或计数重置后重新建立。工作区数据可能包含直连请求，差值为正表示工作区更多。</span
+        >首次同步建立基线，后续显示增量。工作区重启后重建基线。计数重置后也重建基线。工作区数据可能包含直连请求。</span
       >
-      <span>比对结果独立显示，不计入本地统计。同步时仍在进行的请求和缺失用量可能产生差异。</span>
+      <span>比对结果不计入本地统计。尚未结束的请求和缺失用量可能产生差异。</span>
     </div>
   </section>
   <section class="section-panel reconcile-panel" aria-labelledby="reconcile-heading">
     <header class="chart-heading">
       <div>
-        <h2 id="reconcile-heading">上游真实用量对账</h2>
-        <p>工作区 /usage 的真实扣费与前缀缓存计数，与面板本地统计并排</p>
+        <h2 id="reconcile-heading">上游用量对账</h2>
+        <p>对比工作区上报用量与面板统计。未上报不等于零。</p>
       </div>
       <span class="subtle">{{ reconciled.length }} 个已同步工作区</span>
     </header>
     <div v-if="!reconciled.length" class="compact-empty" data-testid="reconcile-empty">
-      {{ comparing ? '正在读取工作区用量…' : '同步工作区用量后，这里显示真实扣费与缓存命中。' }}
+      {{ comparing ? '正在读取工作区用量…' : '同步后显示工作区上报的扣费与缓存计数。' }}
     </div>
     <template v-else>
       <div class="reconcile-summary" data-testid="reconcile-summary">
         <div>
           <span>缓存命中率</span>
           <strong data-testid="reconcile-hit-rate">{{
-            formatHitRate(reconcileTotals.upstream.cacheHit, reconcileTotals.upstream.cacheMiss)
+            reconcileTotals.upstreamComplete.cacheHit && reconcileTotals.upstreamComplete.cacheMiss
+              ? formatHitRate(reconcileTotals.upstream.cacheHit, reconcileTotals.upstream.cacheMiss)
+              : '—'
           }}</strong>
           <small
-            >命中 {{ abbreviateCount(reconcileTotals.upstream.cacheHit) || '0' }} / 未命中
-            {{ abbreviateCount(reconcileTotals.upstream.cacheMiss) || '0' }}</small
+            >命中 {{ short(reconcileTotals.upstream.cacheHit) }} / 未命中
+            {{ short(reconcileTotals.upstream.cacheMiss) }}</small
           >
         </div>
         <div>
           <span>Credit / 千 Tokens</span>
           <strong data-testid="reconcile-credit-ratio">{{
-            formatCreditPerThousand(reconcileTotals.upstream.credit, reconcileTotals.upstream.total)
+            reconcileTotals.upstreamComplete.credit && reconcileTotals.upstreamComplete.total
+              ? formatCreditPerThousand(
+                  reconcileTotals.upstream.credit,
+                  reconcileTotals.upstream.total,
+                )
+              : '—'
           }}</strong>
-          <small>共扣 {{ formatCredit(reconcileTotals.upstream.credit) }} Credit</small>
+          <small>已上报 {{ formatCredit(reconcileTotals.upstream.credit) }} Credit</small>
         </div>
         <div>
           <span>工作区 Tokens 合计</span>
           <strong data-testid="reconcile-upstream-total">{{
-            abbreviateCount(reconcileTotals.upstream.total) || '0'
+            short(reconcileTotals.upstream.total)
           }}</strong>
-          <small>{{ number(reconcileTotals.upstream.total) }} Tokens</small>
+          <small>{{ exact(reconcileTotals.upstream.total) }} Tokens</small>
         </div>
         <div>
           <span>面板本地 Tokens 合计</span>
           <strong data-testid="reconcile-local-total">{{
-            abbreviateCount(reconcileTotals.local.total) || '0'
+            short(reconcileTotals.local.total)
           }}</strong>
-          <small>{{ number(reconcileTotals.local.total) }} Tokens</small>
+          <small>{{ exact(reconcileTotals.local.total) }} Tokens</small>
         </div>
       </div>
       <table class="reconcile-table" data-testid="reconcile-table">
@@ -719,12 +746,14 @@ const states = computed(() => [
             <th>{{ row.label }}</th>
             <td data-testid="cell-local">
               {{ row.local == null ? '—' : number(row.local) }}
+              <small v-if="row.localPartial">部分上报</small>
               <small v-if="row.local != null && abbreviateCount(row.local)" class="usage-short">{{
                 abbreviateCount(row.local)
               }}</small>
             </td>
             <td data-testid="cell-upstream">
-              {{ row.upstream == null ? '—' : number(row.upstream) }}
+              {{ row.key === 'credit' ? formatCredit(row.upstream) : exact(row.upstream) }}
+              <small v-if="row.upstreamPartial">部分上报</small>
               <small
                 v-if="row.upstream != null && abbreviateCount(row.upstream)"
                 class="usage-short"
@@ -747,39 +776,48 @@ const states = computed(() => [
             <span
               >命中率
               <b data-testid="account-hit-rate">{{
-                formatHitRate(row.upstream?.cacheHit, row.upstream?.cacheMiss)
+                upstreamComplete(row.upstream, 'cacheHit', 'cacheMiss')
+                  ? formatHitRate(row.upstream?.cacheHit, row.upstream?.cacheMiss)
+                  : '—'
               }}</b></span
             >
             <span
               >Credit/千 Tokens
               <b data-testid="account-credit-ratio">{{
-                formatCreditPerThousand(
-                  row.upstream?.credit,
-                  (row.upstream?.prompt ?? 0) + (row.upstream?.completion ?? 0),
-                )
+                upstreamComplete(row.upstream, 'credit', 'prompt', 'completion')
+                  ? formatCreditPerThousand(
+                      row.upstream?.credit,
+                      (row.upstream?.prompt ?? 0) + (row.upstream?.completion ?? 0),
+                    )
+                  : '—'
               }}</b></span
             >
             <span
-              >扣费
-              <b data-testid="account-credit">{{ formatCredit(row.upstream?.credit) }}</b></span
+              >已上报扣费
+              <b data-testid="account-credit">{{
+                formatCredit(upstreamValue(row.upstream, 'credit'))
+              }}</b
+              ><small
+                v-if="
+                  upstreamValue(row.upstream, 'credit') != null &&
+                  !upstreamComplete(row.upstream, 'credit')
+                "
+                >覆盖不完整</small
+              ></span
             >
             <span
               >本地未命中
-              <b data-testid="account-local-miss">{{ number(localCacheMiss(row.local)) }}</b></span
+              <b data-testid="account-local-miss">{{ exact(localCacheMiss(row.local)) }}</b></span
             >
           </span>
         </article>
       </div>
     </template>
     <div class="token-accounting-note">
-      <span
-        >本地未命中 = 输入 − 缓存读取；工作区未命中直接取自 /usage 的
-        cache_miss。两者不一致说明面板记录的缓存读取与上游实际命中不同。</span
-      >
-      <span
-        >Credit / 千 Tokens 是同一段增量内的扣费密度。缓存未命中单价高于命中，该值升高表示同样的
-        token 数消耗了更多配额。</span
-      >
+      <span>完整上报时，本地未命中等于输入减缓存读取。</span>
+      <span>工作区未命中来自上游计数。缺失字段不补零。</span>
+      <span>部分上报只显示已知小计，不计算命中率或扣费密度。</span>
+      <span>扣费密度仅比较同一时段的完整用量，不代表模型单价。</span>
       <span>本区块只读，不参与路由、额度保护或计费计算。</span>
     </div>
   </section>

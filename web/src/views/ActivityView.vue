@@ -11,6 +11,7 @@ import {
   Download,
 } from '@lucide/vue'
 import { api } from '../api'
+import { tokenValue, tokenCoverageLabel } from '../usage'
 import { useConsole, time, number, copy, logPath, LOG_PAGE_SIZE } from '../console'
 import type { LogChannel, LogEntry, RequestShape } from '../types'
 import ModalShell from '../components/ModalShell.vue'
@@ -561,11 +562,12 @@ watch([pages, refreshing], ([count, busy]) => {
                 <dt>{{ field.label }}</dt>
                 <dd :data-testid="`request-token-${field.key}`">
                   {{
-                    selected.tokenUsage.reportedRequests
-                      ? number(selected.tokenUsage[field.key])
-                      : '—'
+                    tokenValue(selected.tokenUsage, field.key) == null
+                      ? '—'
+                      : number(tokenValue(selected.tokenUsage, field.key))
                   }}
                 </dd>
+                <small>{{ tokenCoverageLabel(selected.tokenUsage, field.key) }}</small>
               </div>
             </dl>
             <p

@@ -20,6 +20,52 @@ const retryable = (status) =>
   [401, 402, 403, 408, 429].includes(status) || status >= 500;
 const sameConnection = (a, b) =>
   a.endpoint === b.endpoint && a.secrets.proxyKey === b.secrets.proxyKey;
+
+// Records which upstream produced the response in the account's runtime state.
+// A sent request header with no applied header means an old worker that ignores
+// the header and always uses classic, so it reads as "legacy" - but only on a
+// 2xx, because an error may come from an edge gateway rather than the worker. A
+// module-level helper keeps Pool.prototype.forward usable by the duck-typed test
+// doubles.
+function recordUpstreamMode(store, account, source, response) {
+  const requested =
+    account.upstreamMode && account.upstreamMode !== "inherit"
+      ? account.upstreamMode
+      : null;
+  const reported = (
+    response.headers.get("x-cnb2api-upstream-mode-applied") || ""
+  )
+    .trim()
+    .toLowerCase();
+  const reportedMode =
+    reported === "ide" || reported === "classic" ? reported : null;
+  // A non-2xx without the applied header may come from an edge gateway in
+  // front of the worker (a sleeping or restarting workspace), so it proves
+  // nothing about the worker version. Keep the previous measurement instead of
+  // mislabelling a current worker as legacy.
+  if (!reportedMode && !response.ok) return;
+  const applied = reportedMode ?? (requested ? "legacy" : null);
+  let current;
+  try {
+    current = store.get(account.id);
+  } catch {
+    return;
+  }
+  if (!sameConnection(current, source)) return;
+  // Every request would otherwise rewrite the runtime document for an unchanged
+  // value; the timestamp marks the last observed change.
+  if (
+    current.upstreamModeApplied === applied &&
+    (applied === null || current.upstreamModeAppliedAt)
+  )
+    return;
+  // An inherit request against an old worker reports nothing at all, so the
+  // state stays "unknown" instead of looking freshly measured.
+  store.patch(account.id, {
+    upstreamModeApplied: applied,
+    upstreamModeAppliedAt: applied === null ? null : new Date().toISOString(),
+  });
+}
 const blocksRecovery = (a) =>
   ["upstream", "response"].includes(a.failureKind) ||
   (!a.failureKind && /^工作区返回 HTTP \d+/.test(a.lastError || ""));
@@ -1088,14 +1134,8 @@ export class Pool {
     // An attempt that produced billed tokens keeps them even when a later attempt
     // succeeds. Discarding them made a retried request look free while the
     // provider had already charged for the abandoned generation.
-    let usageTotals = null;
-    const foldUsage = ({ complete = false } = {}) => {
-      if (!usageCapture) return;
-      const finished = usageCapture.finish(complete);
-      usageTotals = usageTotals ? addTokenUsage(usageTotals, finished) : finished;
-      usageCapture = null;
-      usageComplete = false;
-    };
+    const usageTotals = emptyTokenUsage();
+    const usageAttempts = [];
     // Structured, redacted reason for an interrupted inference request. Logged
     // with the request record so a live "upstream interrupted" report can be
     // traced to a watchdog abort, a client disconnect or a provider failure.
@@ -1140,6 +1180,16 @@ export class Pool {
           ...account,
           healthVersion: this.healthVersions.get(account.id) || 0,
         };
+        // The worker derives both upstream URLs from its own environment; the
+        // panel only names the mode. "inherit" must stay byte-identical to the
+        // pre-existing request, so no header is sent for it. count_tokens is
+        // answered locally by the worker and never reports an applied mode, so
+        // it neither sends the header nor feeds the measurement.
+        const countTokens = path === "/v1/messages/count_tokens";
+        const requestedUpstreamMode =
+          !countTokens && account.upstreamMode && account.upstreamMode !== "inherit"
+            ? account.upstreamMode
+            : null;
         attempts++;
         excluded.add(account.id);
         this.active.set(account.id, (this.active.get(account.id) || 0) + 1);
@@ -1155,7 +1205,6 @@ export class Pool {
         upstreamBytes = 0;
         upstreamFirstByteMs = null;
         streamFailure = null;
-        if (usageCapture) foldUsage({ complete: usageComplete });
         usageCapture = null;
         usageComplete = false;
         convertStream = false;
@@ -1181,6 +1230,10 @@ export class Pool {
               ...(headerCarrier
                 ? { "x-cnb2api-upstream-headers": headerCarrier }
                 : {}),
+              // "inherit" sends nothing so the worker keeps its startup default.
+              ...(requestedUpstreamMode
+                ? { "x-cnb2api-upstream-mode": requestedUpstreamMode }
+                : {}),
             },
             body: requestBody,
             signal,
@@ -1190,6 +1243,7 @@ export class Pool {
           upstreamStatus = response.status;
           signal.throwIfAborted();
           finalStatus = response.status;
+          if (!countTokens) recordUpstreamMode(this.store, account, source, response);
           if (headerCarrier) {
             const supported = response.headers.get("x-cnb2api-override-support") === "1"
               ? true
@@ -1357,7 +1411,9 @@ export class Pool {
           // A watchdog abort or client disconnect can still have produced billed
           // tokens upstream. Record whether this attempt captured any usage so a
           // missing-usage row is distinguishable from a free request.
-          streamFailure.usageCaptured = usageCapture?.sawUsage === true;
+          streamFailure.usageCaptured = Boolean(usageCapture?.finish(upstreamDone, {
+            partial: true,
+          }).reportedRequests);
           streamFailure.upstreamBytes = upstreamBytes;
           // Keep earlier attempts for diagnosis without attaching a stale
           // streamFailure to an eventual successful request.
@@ -1400,6 +1456,18 @@ export class Pool {
           clearTimeout(timer);
           clearInterval(keepAlive);
           keepAlive = null;
+          // Body completion and conversion success are different facts. A
+          // complete JSON body still carries measured usage if conversion fails.
+          // Fold here, before the account changes, including attempts without
+          // usage so coverage has the same population as retry accounting.
+          if (path !== "/v1/messages/count_tokens") {
+            const tokenUsage = usageCapture
+              ? usageCapture.finish(upstreamDone, { partial: !usageComplete })
+              : { ...emptyTokenUsage(), missingRequests: 1 };
+            usageAttempts.push({ accountId: account.id, tokenUsage });
+            addTokenUsage(usageTotals, tokenUsage);
+            usageCapture = null;
+          }
           // Also covers failures before the reader's own cleanup starts.
           if (!upstreamDone) attempt.abort();
           this.active.set(
@@ -1450,17 +1518,11 @@ export class Pool {
         durationMs: Date.now() - started,
         ...(path !== "/v1/messages/count_tokens" && attempts > 0
           ? (() => {
-              const tokenUsage = usageTotals
-                ? addTokenUsage(usageTotals, usageCapture
-                  ? usageCapture.finish(usageComplete)
-                  : emptyTokenUsage())
-                : usageCapture
-                  ? usageCapture.finish(usageComplete)
-                  : { ...emptyTokenUsage(), missingRequests: 1 };
+              const tokenUsage = usageTotals;
               // Cache miss is derived for reconciliation with the workspace
               // /usage counter. Stored totals keep their original shape.
               const cacheMiss = deriveCacheMiss(tokenUsage);
-              return { tokenUsage, ...(cacheMiss ? { cacheMiss } : {}) };
+              return { tokenUsage, usageAttempts, ...(cacheMiss ? { cacheMiss } : {}) };
             })()
           : {}),
         message: success
