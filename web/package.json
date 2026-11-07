@@ -1,6 +1,6 @@
 {
   "name": "cnb2api-console",
-  "version": "1.2.11",
+  "version": "1.2.12",
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
