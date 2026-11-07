@@ -10,7 +10,7 @@ multiple processes or containers.
 | --- | --- | --- |
 | `panel.json` | Version 2 JSON | Panel/routing settings and SSO configuration |
 | `accounts.json` | Version 1 JSON | Account definitions, endpoints, routing attributes and encrypted credentials |
-| `stats.json` | Version 1 JSON | Hourly/aggregate usage and account runtime, health, quota and comparison state |
+| `stats.json` | Version 1 JSON | Hourly (30 days), packed daily (400 days, `src/usage-history.mjs`) and aggregate usage, plus account runtime, health, quota and comparison state |
 | `../logs/requests.log` | JSON lines | API requests only |
 | `../logs/audit.log` | JSON lines | Management audit and legacy account changes |
 | `../logs/system.log` | JSON lines | Registration, health failures, wake results and failover |

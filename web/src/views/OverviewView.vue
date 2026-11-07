@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Coins,
   Wallet,
+  CalendarRange,
 } from '@lucide/vue'
 import { number, compact, useConsole, accountState, time } from '../console'
 import { abbreviateCount } from '../format'
@@ -31,6 +32,7 @@ import type {
   TokenMetric,
   TokenTotals,
   UsageComparison,
+  UsageHistory,
 } from '../types'
 import {
   RATE_UNIT,
@@ -41,6 +43,20 @@ import {
   reportedText,
   tokensLeftText,
 } from '../credit-rates'
+import {
+  DEFAULT_HISTORY_RANGE,
+  HISTORY_RANGES,
+  historyAmount,
+  historyBars,
+  historyCount,
+  historyHasCache,
+  historyIndexAt,
+  historyIsEmpty,
+  historyPartialDays,
+  historyStep,
+  historyTicks,
+  type HistoryRange,
+} from '../history'
 import { formatRemainingQuotaPercent, summarizeQuota } from '../quota'
 import StatusBadge from '../components/StatusBadge.vue'
 const emit = defineEmits<{ navigate: [page: Page] }>()
@@ -82,6 +98,107 @@ const tokenMetrics = [
   { key: 'total', label: 'Tokens 合计', hint: '输入 + 输出' },
 ] as const
 const comparisonMetrics = tokenMetrics
+// Daily history card. The API returns one row per UTC+8 day, oldest first.
+const historyRange = ref<HistoryRange>(DEFAULT_HISTORY_RANGE)
+const history = ref<UsageHistory | null>(null)
+const historyError = ref('')
+const historyLoading = ref(false)
+const historyHover = ref<number | null>(null)
+const CHART_WIDTH = 1000
+const CHART_HEIGHT = 200
+// Headroom above the tallest bar keeps it clear of the card edge.
+const CHART_PEAK = 184
+const historyDays = computed(() => history.value?.days ?? [])
+const historyBarsList = computed(() => historyBars(historyDays.value))
+const historyEmpty = computed(() => historyIsEmpty(historyDays.value))
+const historyCache = computed(() => historyHasCache(historyDays.value))
+const historyTicksList = computed(() => historyTicks(historyDays.value))
+const historyPartial = computed(() => historyPartialDays(historyDays.value))
+const historyRows = computed(() => [...historyDays.value].reverse())
+const historyAccounts = computed(() => history.value?.accounts ?? [])
+const historyTotals = computed(() => history.value?.totals)
+const historySlot = computed(() => CHART_WIDTH / Math.max(1, historyBarsList.value.length))
+const historyBarWidth = computed(() => Math.max(1, historySlot.value * 0.66))
+const historyBarX = (index: number) =>
+  index * historySlot.value + (historySlot.value - historyBarWidth.value) / 2
+const historyHeight = (share: number) => share * CHART_PEAK
+const historyCachePath = computed(() => {
+  if (!historyCache.value) return ''
+  return historyBarsList.value
+    .map((bar, index) => {
+      const x = index * historySlot.value + historySlot.value / 2
+      const y = CHART_HEIGHT - historyHeight(bar.cacheShare)
+      return `${index ? 'L' : 'M'}${x.toFixed(2)},${y.toFixed(2)}`
+    })
+    .join(' ')
+})
+const hoveredHistory = computed(() =>
+  historyHover.value == null ? null : (historyBarsList.value[historyHover.value] ?? null),
+)
+// Keep the tooltip inside the chart near both edges.
+const historyTooltipStyle = computed(() => {
+  const share = ((historyHover.value ?? 0) + 0.5) / Math.max(1, historyBarsList.value.length)
+  return {
+    left: `${share * 100}%`,
+    transform: `translateX(${share < 0.25 ? '-10%' : share > 0.75 ? '-90%' : '-50%'})`,
+  }
+})
+const historyTooltipMetrics = [
+  { key: 'input', label: '输入' },
+  { key: 'output', label: '输出' },
+  { key: 'cacheRead', label: '缓存读取' },
+  { key: 'cacheWrite', label: '缓存写入' },
+] as const
+const historyTableMetrics = [
+  { key: 'input', label: '输入' },
+  { key: 'output', label: '输出' },
+  { key: 'cacheRead', label: '缓存读' },
+  { key: 'cacheWrite', label: '缓存写' },
+] as const
+// A newer range selection supersedes any response still in flight.
+let historyRequest = 0
+async function loadHistory() {
+  const request = ++historyRequest
+  historyLoading.value = true
+  try {
+    const result = await api<UsageHistory>(`/usage/history?days=${historyRange.value}`)
+    if (request !== historyRequest) return
+    history.value = result
+    historyError.value = ''
+  } catch (error) {
+    if (request !== historyRequest) return
+    historyError.value = error instanceof Error ? error.message : '历史用量读取失败'
+  } finally {
+    if (request === historyRequest) historyLoading.value = false
+  }
+}
+function pointHistory(event: PointerEvent) {
+  const box = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  if (!box.width) return
+  historyHover.value = historyIndexAt(
+    (event.clientX - box.left) / box.width,
+    historyBarsList.value.length,
+  )
+}
+function leaveHistory(event: PointerEvent) {
+  // A tap on a touch screen keeps its tooltip until the next tap.
+  if (event.pointerType === 'mouse') historyHover.value = null
+}
+function stepHistory(step: number) {
+  historyHover.value = historyStep(historyHover.value, step, historyBarsList.value.length)
+}
+function selectHistoryRange(range: HistoryRange) {
+  if (range === historyRange.value) return
+  historyRange.value = range
+  historyHover.value = null
+  void loadHistory()
+}
+// Overview polling reloads the history only after new traffic was recorded.
+const historyTrafficKey = computed(() => {
+  const stats = overview.value?.stats
+  const usage = stats?.tokenUsage?.total
+  return `${stats?.requests ?? 0}:${usage?.reportedRequests ?? 0}:${usage?.missingRequests ?? 0}`
+})
 const remoteCoverageLabel = (row: UsageComparison, key: TokenMetric) => {
   if (row.workspace?.[key] == null) return '未上报'
   const complete =
@@ -128,8 +245,12 @@ async function loadComparison(refresh = false) {
     comparing.value = false
   }
 }
-onMounted(() => loadComparison())
+onMounted(() => {
+  void loadComparison()
+  void loadHistory()
+})
 watch(overview, () => loadComparison())
+watch(historyTrafficKey, () => loadHistory())
 // Read-only reconciliation of panel counters against the workspace's own /usage
 // numbers. Coverage determines which counters and ratios can be compared.
 const reconciled = computed(() => syncedSources(comparisons.value))
@@ -531,6 +652,229 @@ const states = computed(() => [
       <span v-if="overview?.stats.tokenUsage?.startedAt"
         >累计自 {{ time(overview.stats.tokenUsage.startedAt, true) }} 开始记录，重启后保留。</span
       >
+    </div>
+  </section>
+  <section
+    class="section-panel history-panel"
+    aria-labelledby="history-usage-heading"
+    data-testid="overview-history"
+  >
+    <header class="chart-heading">
+      <div>
+        <h2 id="history-usage-heading"><CalendarRange :size="17" />历史用量</h2>
+        <p>按 UTC+8 自然日汇总 · 保留 400 天</p>
+      </div>
+      <div class="segmented" aria-label="历史用量范围">
+        <button
+          v-for="range in HISTORY_RANGES"
+          :key="range"
+          :class="{ active: historyRange === range }"
+          :aria-pressed="historyRange === range"
+          :data-testid="`history-range-${range}`"
+          @click="selectHistoryRange(range)"
+        >
+          {{ range }} 天
+        </button>
+      </div>
+    </header>
+    <p v-if="historyError" class="history-state history-error" role="alert">
+      {{ historyError }}
+    </p>
+    <p v-else-if="!history" class="history-state">正在读取历史用量…</p>
+    <div v-else-if="historyEmpty" class="history-empty" data-testid="history-empty">
+      <CalendarRange :size="22" />
+      <span>最近 {{ historyRange }} 天没有用量记录。</span>
+      <small>请求经过统一入口后按天累计。</small>
+    </div>
+    <template v-else-if="historyTotals">
+      <div class="history-summary" :aria-busy="historyLoading">
+        <div
+          v-for="item in historyTableMetrics.slice(0, 2)"
+          :key="item.key"
+          class="token-metric"
+          :data-testid="`history-total-${item.key}`"
+        >
+          <span>区间{{ item.label }}</span>
+          <strong :title="historyAmount(historyTotals.tokenUsage, item.key).title">{{
+            historyAmount(historyTotals.tokenUsage, item.key).text
+          }}</strong>
+        </div>
+        <div class="token-metric" data-testid="history-total-requests">
+          <span>区间请求</span>
+          <strong :title="number(historyTotals.requests)">{{
+            historyCount(historyTotals.requests)
+          }}</strong>
+          <small>{{ number(historyTotals.errors) }} 次失败</small>
+        </div>
+        <div class="token-metric" data-testid="history-total-partial">
+          <span>部分数据</span>
+          <strong>{{ number(historyPartial) }} 天</strong>
+          <small>分账号 Token 未知</small>
+        </div>
+      </div>
+      <div class="history-chart" data-testid="history-chart">
+        <svg
+          :viewBox="`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`"
+          preserveAspectRatio="none"
+          aria-hidden="true"
+        >
+          <line
+            class="history-baseline"
+            x1="0"
+            :y1="CHART_HEIGHT"
+            :x2="CHART_WIDTH"
+            :y2="CHART_HEIGHT"
+            vector-effect="non-scaling-stroke"
+          />
+          <g
+            v-for="(bar, index) in historyBarsList"
+            :key="bar.date"
+            :class="{ active: historyHover === index, partial: bar.partial }"
+          >
+            <rect
+              class="history-bar input"
+              :x="historyBarX(index)"
+              :y="CHART_HEIGHT - historyHeight(bar.inputShare)"
+              :width="historyBarWidth"
+              :height="historyHeight(bar.inputShare)"
+            />
+            <rect
+              class="history-bar output"
+              :x="historyBarX(index)"
+              :y="CHART_HEIGHT - historyHeight(bar.inputShare + bar.outputShare)"
+              :width="historyBarWidth"
+              :height="historyHeight(bar.outputShare)"
+            />
+          </g>
+          <path
+            v-if="historyCachePath"
+            class="history-cache-line"
+            :d="historyCachePath"
+            vector-effect="non-scaling-stroke"
+          />
+        </svg>
+        <div
+          class="history-hit"
+          tabindex="0"
+          role="img"
+          :aria-label="`最近 ${historyRange} 天的每日 Token 柱状图，可用左右方向键逐日查看`"
+          data-testid="history-hit"
+          @pointermove="pointHistory"
+          @pointerdown="pointHistory"
+          @pointerleave="leaveHistory"
+          @blur="historyHover = null"
+          @keydown.left.prevent="stepHistory(-1)"
+          @keydown.right.prevent="stepHistory(1)"
+          @keydown.esc="historyHover = null"
+        />
+        <div
+          v-if="hoveredHistory"
+          class="history-tooltip"
+          :style="historyTooltipStyle"
+          role="status"
+          data-testid="history-tooltip"
+        >
+          <strong
+            >{{ hoveredHistory.date
+            }}<span v-if="hoveredHistory.partial" class="history-partial">部分</span></strong
+          >
+          <dl>
+            <template v-for="item in historyTooltipMetrics" :key="item.key">
+              <dt>{{ item.label }}</dt>
+              <dd :title="historyAmount(hoveredHistory.tokenUsage, item.key).title">
+                {{ historyAmount(hoveredHistory.tokenUsage, item.key).text }}
+              </dd>
+            </template>
+            <dt>请求</dt>
+            <dd>{{ number(hoveredHistory.requests) }}</dd>
+            <dt>失败</dt>
+            <dd>{{ number(hoveredHistory.errors) }}</dd>
+          </dl>
+        </div>
+      </div>
+      <div class="history-axis" aria-hidden="true">
+        <span
+          v-for="tick in historyTicksList"
+          :key="tick.index"
+          :style="{ left: `${((tick.index + 0.5) / historyBarsList.length) * 100}%` }"
+          >{{ tick.label }}</span
+        >
+      </div>
+      <div class="history-legend">
+        <span><i class="history-swatch input" />输入</span>
+        <span><i class="history-swatch output" />输出</span>
+        <span v-if="historyCache"><i class="history-swatch cache" />缓存读取（含在输入中）</span>
+        <span v-if="historyPartial"><i class="history-swatch partial" />部分数据</span>
+      </div>
+      <div class="history-tables">
+        <div class="history-days-wrap">
+          <table class="history-table" data-testid="history-days">
+            <thead>
+              <tr>
+                <th scope="col">日期</th>
+                <th v-for="item in historyTableMetrics" :key="item.key" scope="col">
+                  {{ item.label }}
+                </th>
+                <th scope="col">请求</th>
+                <th scope="col">失败</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="row in historyRows"
+                :key="row.date"
+                :data-testid="`history-day-${row.date}`"
+              >
+                <th scope="row">
+                  {{ row.date
+                  }}<span v-if="row.partial" class="history-partial" title="分账号 Token 未知"
+                    >部分</span
+                  >
+                </th>
+                <td
+                  v-for="item in historyTableMetrics"
+                  :key="item.key"
+                  :title="historyAmount(row.tokenUsage, item.key).title"
+                >
+                  {{ historyAmount(row.tokenUsage, item.key).text }}
+                </td>
+                <td>{{ historyCount(row.requests) }}</td>
+                <td>{{ historyCount(row.errors) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="history-accounts" data-testid="history-accounts">
+          <h3>账号合计</h3>
+          <ul v-if="historyAccounts.length">
+            <li
+              v-for="row in historyAccounts"
+              :key="row.accountId"
+              :data-testid="`history-account-${row.accountId}`"
+            >
+              <span class="history-account-name" :title="row.accountId">
+                {{ row.name || '已删除账号'
+                }}<span v-if="row.partial" class="history-partial" title="部分天数缺少分账号 Token"
+                  >部分</span
+                >
+              </span>
+              <strong :title="historyAmount(row.tokenUsage, 'total').title">{{
+                historyAmount(row.tokenUsage, 'total').text
+              }}</strong>
+              <small
+                >{{ number(row.requests) }} 次请求 · 输入
+                {{ historyAmount(row.tokenUsage, 'input').text }} · 输出
+                {{ historyAmount(row.tokenUsage, 'output').text }}</small
+              >
+            </li>
+          </ul>
+          <p v-else class="history-state">区间内没有分账号记录。</p>
+        </div>
+      </div>
+    </template>
+    <div class="token-accounting-note">
+      <span>今日与累计在上方 Token 卡片查看。小时明细保留 30 天，按日汇总保留 400 天。</span>
+      <span>升级前的天数由小时明细回填。回填的天缺少分账号 Token，标记为“部分”。</span>
     </div>
   </section>
   <section

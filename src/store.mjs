@@ -14,6 +14,12 @@ import {
 import { resolve, join } from "node:path";
 import { addTokenUsage, emptyTokenUsage } from "./token-usage.mjs";
 import { loadCreditHistory, loadReportedHistory } from "./credit-rates.mjs";
+import {
+  backfillDaily,
+  emptyDaily,
+  loadDaily,
+  recordDaily,
+} from "./usage-history.mjs";
 import { loadRegistrationRelay, validateRegistrationRelay } from "./registration-relay.mjs";
 import {
   DEFAULT_QUOTA_PROTECTION,
@@ -491,6 +497,14 @@ export class Store {
       } catch {
         throw new Error("Invalid request override settings; restore the data backup");
       }
+      const hourly = (stats.hourly || []).map((b) => ({
+        ...b,
+        tokenUsage: { ...emptyTokenUsage(), ...b.tokenUsage },
+      }));
+      // Documents written before the daily rollup existed rebuild it from the
+      // hourly window. The next commit persists the rebuilt rollup.
+      const daily =
+        stats.daily === undefined ? backfillDaily(hourly) : loadDaily(stats.daily);
       this.state = {
         version: 2,
         settings,
@@ -503,10 +517,8 @@ export class Store {
           stats.tokenUsageStartedAt || new Date().toISOString(),
         // Documents written before Credits rate estimates have no history.
         creditHistory: legacy ? {} : loadCreditHistory(stats.creditHistory),
-        hourly: (stats.hourly || []).map((b) => ({
-          ...b,
-          tokenUsage: { ...emptyTokenUsage(), ...b.tokenUsage },
-        })),
+        hourly,
+        daily,
         accounts: accounts.accounts.map((a) => ({
           quotaProtectionOverride: false,
           ...runtimeDefaults(),
@@ -563,6 +575,7 @@ export class Store {
         sso: { ...DEFAULT_SSO },
         logs: [],
         hourly: [],
+        daily: emptyDaily(),
         tokenUsage: emptyTokenUsage(),
         tokenUsageStartedAt: new Date().toISOString(),
         creditHistory: {},
@@ -624,6 +637,7 @@ export class Store {
       "stats.json": JSON.stringify({
         version: 1,
         hourly: state.hourly,
+        daily: state.daily,
         tokenUsage: state.tokenUsage,
         tokenUsageStartedAt: state.tokenUsageStartedAt,
         registrationRelay: state.registrationRelay,
@@ -998,7 +1012,7 @@ export class Store {
           requests: 0,
           errors: 0,
           durationMs: 0,
-          accounts: {},
+          accounts: {},
           tokenUsage: emptyTokenUsage(),
         };
         s.hourly.push(bucket);
@@ -1009,7 +1023,11 @@ export class Store {
       if (entry.accountId)
         bucket.accounts[entry.accountId] =
           (bucket.accounts[entry.accountId] || 0) + 1;
-      s.hourly = s.hourly.filter((b) => Date.parse(b.at) > now - 30 * 86400000);
+      s.hourly = s.hourly.filter((b) => Date.parse(b.at) > now - 30 * 86400000);
+      // The daily rollup outlives the hourly window with its own retention and
+      // carries the per-account split; hourly buckets stay totals-only so every
+      // commit stays small.
+      recordDaily(s.daily, entry, now);
       const account = s.accounts.find((a) => a.id === entry.accountId);
       if (entry.tokenUsage) {
         addTokenUsage(s.tokenUsage, entry.tokenUsage);

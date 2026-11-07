@@ -211,6 +211,35 @@ export interface HourBucket {
   accounts: Record<string, number>
   tokenUsage?: TokenTotals
 }
+// One UTC+8 day from /api/usage/history. The daily rollup outlives the hourly window.
+export interface UsageHistoryDay {
+  date: string
+  requests: number
+  errors: number
+  tokenUsage: TokenTotals
+  // Rebuilt from hourly data saved before the rollup: the per-account split is unknown.
+  partial: boolean
+}
+export interface UsageHistoryAccount {
+  accountId: string
+  // Empty for an account deleted after it recorded usage.
+  name: string
+  tokenUsage: TokenTotals
+  requests: number
+  // Some days in the range have no per-account token split for this account.
+  partial: boolean
+}
+export interface UsageHistory {
+  range: { days: number; from: string; to: string }
+  days: UsageHistoryDay[]
+  accounts: UsageHistoryAccount[]
+  totals: {
+    requests: number
+    errors: number
+    tokenUsage: TokenTotals
+    partial: boolean
+  }
+}
 export interface Stats {
   total: number
   ready: number

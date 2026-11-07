@@ -11,6 +11,7 @@ import {
   ssoIsConfigured,
   validateSso,
 } from "./store.mjs";
+import { HISTORY_DAYS, usageHistory } from "./usage-history.mjs";
 import {
   OidcError,
   buildAuthorizationUrl,
@@ -631,7 +632,9 @@ export function createPanelServer(options) {
           return json(res, 200, {
             accounts: pool.accounts(),
             settings: store.state.settings,
-            hourly: store.state.hourly,
+            // The console charts hourly totals only. The per-account split
+            // stays server-side to keep the polled payload small.
+            hourly: store.state.hourly.map(({ accountTokens, ...b }) => b),
             // The default 24h window; other windows use /api/credits/rates.
             creditRates: creditRates(store.state, { now: pool.quotaNow() }),
             stats: {
@@ -683,6 +686,14 @@ export function createPanelServer(options) {
           if (!Object.hasOwn(CREDIT_WINDOWS, window))
             throw new InputError("统计区间须为 1h、24h 或 7d");
           return json(res, 200, creditRates(store.state, { window, now: pool.quotaNow() }));
+        }
+        if (path === "/api/usage/history" && method === "GET") {
+          const requested = Number(
+            new URL(req.url, "http://panel.local").searchParams.get("days") ?? 30,
+          );
+          if (!HISTORY_DAYS.includes(requested))
+            throw new InputError("统计范围须为 7、30、90 或 365 天");
+          return json(res, 200, usageHistory(store.state, requested));
         }
         if (path === "/api/usage/comparison" && method === "GET")
           return json(res, 200, pool.workerUsage.overview());
