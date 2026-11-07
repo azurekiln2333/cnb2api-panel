@@ -1898,8 +1898,15 @@ test('the existing enable action resumes a temporary quota pause and follows cur
   await expect.poll(async () => (await account()).quotaProtectionOverride).toBe(false)
   await request.post('http://127.0.0.1:19221/test/quota', { data: { used: 901 } })
   await syncQuota()
-  await page.clock.fastForward(15001)
-  await expect(health.locator('.status-badge')).toHaveText('临时暂停')
+  // One fake-clock tick allows exactly one overview poll. On a slow runner that
+  // poll can overlap a refresh still in flight and be skipped, so keep ticking
+  // until the console has caught up instead of relying on a single poll.
+  await expect
+    .poll(async () => {
+      await page.clock.fastForward(15001)
+      return (await health.locator('.status-badge').textContent())?.trim()
+    })
+    .toBe('临时暂停')
   await manage()
   await expect(dialog.getByRole('button', { name: '启用账号' })).toBeVisible()
   for (const disabled of accounts.slice(1)) {
