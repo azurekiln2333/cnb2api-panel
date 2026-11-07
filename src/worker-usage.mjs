@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { recordReportedSample } from "./credit-rates.mjs";
 
 const TOKEN_FIELDS = [
   "input",
@@ -251,8 +252,9 @@ async function readSnapshot(response, maxBytes) {
 
 /** Independent diagnostics: worker snapshots never modify gateway token totals or health. */
 export class WorkerUsageMonitor {
-  constructor(store, { timeoutMs = 5000, maxBytes = 65536 } = {}) {
+  constructor(store, { timeoutMs = 5000, maxBytes = 65536, now = Date.now } = {}) {
     this.store = store;
+    this.now = now;
     this.timeoutMs = timeoutMs;
     this.maxBytes = maxBytes;
     this.pending = new Map();
@@ -463,7 +465,13 @@ export class WorkerUsageMonitor {
         ]),
       ),
     };
-    this.store.patch(id, { workerUsage: state });
+    // Rate samples follow the same baseline: a reset here restarts them too.
+    const creditReportHistory = recordReportedSample(
+      account.creditReportHistory,
+      snapshot,
+      { at: new Date(this.now()).toISOString(), reset },
+    );
+    this.store.patch(id, { workerUsage: state, creditReportHistory });
     return this.row(this.store.get(id));
   }
 }

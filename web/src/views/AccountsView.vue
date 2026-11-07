@@ -45,6 +45,7 @@ import {
 } from '../console'
 import type { Account, InferenceProbeResult, Page } from '../types'
 import { formatRemainingQuotaPercent, summarizeQuota } from '../quota'
+import { accountRateLine } from '../credit-rates'
 import AccountDialog from '../components/AccountDialog.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import ModalShell from '../components/ModalShell.vue'
@@ -118,6 +119,11 @@ const page = ref(1)
 const sortBy = ref<'created' | 'name'>('created')
 const groups = computed(() => [...new Set(accounts.value.map((a) => a.group))])
 const credits = computed(() => summarizeQuota(accounts.value))
+// 24h Credits per million tokens, from the overview payload.
+const rateRows = computed(
+  () => new Map((overview.value?.creditRates?.accounts ?? []).map((row) => [row.accountId, row])),
+)
+const rateLine = (id: string) => accountRateLine(rateRows.value.get(id))
 const tabs = computed(() => [
   { id: 'all', label: '全部账号', count: accounts.value.length },
   {
@@ -572,6 +578,12 @@ async function confirm() {
                   class="quota-updated"
                   :title="`同步于 ${time(account.quota.syncedAt, true)}，同组织共享`"
                   >上次成功 {{ time(account.quota.syncedAt, true) }} · 组织共享</span
+                ><small
+                  v-if="rateLine(account.id)"
+                  class="quota-rate"
+                  :data-testid="`rate-${account.id}`"
+                  title="24 小时 Credits / 百万 tokens"
+                  >{{ rateLine(account.id) }}</small
                 ></template
               ><template v-else
                 ><span class="unsynced">— <small>未同步</small></span
@@ -985,6 +997,15 @@ async function confirm() {
 }
 .quota-updated {
   margin-top: 3px;
+}
+.quota-rate {
+  display: block;
+  margin-top: 2px;
+  max-width: 190px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--secondary);
+  font-variant-numeric: tabular-nums;
 }
 .quota-sync-state {
   margin-top: 2px;

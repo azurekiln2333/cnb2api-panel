@@ -250,11 +250,47 @@ export interface LogEntry {
   tokenUsage?: TokenTotals
   requestDiagnostics?: RequestDiagnostics
 }
+export type CreditRateWindow = '1h' | '24h' | '7d'
+// Credits per million tokens. Billing comes from CNB organization volume;
+// reported comes from the worker /usage credit counter.
+export interface CreditBillingRate {
+  rate: number
+  inputRate: number | null
+  outputRate: number | null
+  r2: number | null
+}
+export interface CreditRateBase {
+  windowStart: string | null
+  windowEnd: string | null
+  deltaCredits: number | null
+  deltaTokens: number | null
+  billing: CreditBillingRate | null
+  reported: { rate: number; partial: boolean } | null
+  reportedStatus: 'ok' | 'partial' | 'missing' | 'insufficient'
+  deviation: number | null
+  remainingCredits: number | null
+  tokensLeft: number | null
+  status: 'ok' | 'insufficient' | 'no_data'
+}
+export interface CreditRateRow extends CreditRateBase {
+  accountId: string
+  accountName: string
+  org: string | null
+  sharedOrg: boolean
+}
+export interface CreditRates {
+  window: CreditRateWindow
+  minTokens: number
+  generatedAt: string
+  accounts: CreditRateRow[]
+  overall: CreditRateBase & { organizations: number }
+}
 export interface Overview {
   accounts: Account[]
   settings: Settings
   hourly: HourBucket[]
   stats: Stats
+  creditRates?: CreditRates
 }
 export interface SsoSettings {
   ssoEnabled: boolean

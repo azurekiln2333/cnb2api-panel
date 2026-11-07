@@ -522,6 +522,107 @@ test('overview summary cards remain visible when token and credit data is absent
   await expect(credits).toContainText('尚未配置额度同步')
 })
 
+test('overview Credits rate card switches windows and shows estimates and empty states', async ({
+  page,
+  request,
+}) => {
+  const [first] = await seed(request)
+  const base = {
+    windowStart: '2026-11-01T00:00:00.000Z',
+    windowEnd: '2026-11-01T20:00:00.000Z',
+    deltaCredits: 25,
+    deltaTokens: 2_000_000,
+    billing: { rate: 12.5, inputRate: 10, outputRate: 30, r2: 0.95 },
+    reported: { rate: 16, partial: true },
+    reportedStatus: 'partial',
+    deviation: 0.28,
+    remainingCredits: 287.7,
+    tokensLeft: 23_019_762,
+    status: 'ok',
+  }
+  const rates = (accounts: Array<{ id: string; name: string }>) => ({
+    window: '24h',
+    minTokens: 100_000,
+    generatedAt: '2026-11-01T20:00:00.000Z',
+    overall: { ...base, organizations: 1 },
+    accounts: accounts.map((account) => ({
+      ...base,
+      accountId: account.id,
+      accountName: account.name,
+      org: 'azurekiln',
+      sharedOrg: true,
+    })),
+  })
+  await page.route('**/api/overview', async (route) => {
+    const response = await route.fetch()
+    const data = await response.json()
+    for (const account of data.accounts)
+      account.quota ??= {
+        org: 'azurekiln',
+        credits: { total: 2000, used: 100, freeze: 25 },
+        dev: { total: 100, used: 10, freeze: 0 },
+        ci: { total: 100, used: 0 },
+        syncedAt: new Date().toISOString(),
+      }
+    data.creditRates = rates(data.accounts)
+    await route.fulfill({ response, json: data })
+  })
+  // A delayed response proves the card waits for the requested window.
+  await page.route('**/api/credits/rates?window=1h', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    const empty = {
+      ...base,
+      windowStart: null,
+      windowEnd: null,
+      deltaCredits: null,
+      deltaTokens: null,
+      billing: null,
+      reported: null,
+      reportedStatus: 'missing',
+      deviation: null,
+      tokensLeft: null,
+      status: 'insufficient',
+    }
+    await route.fulfill({
+      json: { ...rates([]), window: '1h', overall: { ...empty, organizations: 1 } },
+    })
+  })
+  await login(page)
+  await expect(page.getByTestId(`rate-${first.id}`)).toHaveText(
+    '单价 12.5 · 上报 16（部分上报） · 组织共享',
+  )
+  await page.getByRole('link', { name: '运行概览', exact: true }).click()
+  const card = page.getByTestId('overview-credit-rate')
+  await expect(card).toBeInViewport()
+  await expect(card.getByTestId('rate-billing')).toHaveText('12.5')
+  await expect(card).toContainText('Credits / 百万 tokens')
+  await expect(card.getByTestId('rate-reported')).toHaveText('16')
+  await expect(card).toContainText('部分上报')
+  await expect(card.getByTestId('rate-deviation')).toHaveText('+28.0%')
+  await expect(card.getByTestId('rate-split')).toHaveText('10 / 30')
+  await expect(card.getByTestId('rate-tokens-left')).toHaveText('约可用 23.02M tokens')
+  await expect(card.getByTestId('rate-deviation-hint')).toHaveText(
+    '差异较大：组织内可能有其他消耗，或估算区间过短',
+  )
+  await card.getByRole('button', { name: '1h', exact: true }).click()
+  await expect(card.getByRole('button', { name: '1h', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
+  await expect(card.getByTestId('rate-billing')).toHaveText('数据不足（需至少 10 万 tokens）')
+  await expect(card.getByTestId('rate-reported')).toHaveText('未上报')
+  await expect(card.getByTestId('rate-deviation')).toHaveText('—')
+  await expect(card.getByTestId('rate-deviation-hint')).toHaveCount(0)
+  await expect(card.getByTestId('rate-status')).toHaveText('额度同步两次后开始估算。')
+  await card.getByRole('button', { name: '24h', exact: true }).click()
+  await expect(card.getByTestId('rate-billing')).toHaveText('12.5')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(card).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  )
+})
+
 test('overview annotates large token counts with K, M and B abbreviations', async ({
   page,
   request,

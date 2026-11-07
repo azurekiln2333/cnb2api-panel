@@ -5,6 +5,7 @@ import { quotaCreditValues } from "./quota-protection.mjs";
 import { emptyProbeUsage, InputError, normalizeEndpoint, publicAccount } from "./store.mjs";
 import { addTokenUsage, deriveCacheMiss, emptyTokenUsage, TokenUsageCapture } from "./token-usage.mjs";
 import { WorkerUsageMonitor } from "./worker-usage.mjs";
+import { orgOf, recordBillingSample } from "./credit-rates.mjs";
 import { initialUserMessage, requestShape } from "./request-details.mjs";
 import { MAX_REQUEST_BYTES, rewriteRequest } from "./request-overrides.mjs";
 import { SessionAffinity, sessionKey } from "./session-affinity.mjs";
@@ -363,7 +364,7 @@ export class Pool {
     // real inference per account, which makes a probe redundant.
     this.inferenceProbes = new Map();
     this.inferenceSuccessAt = new Map();
-    this.workerUsage = new WorkerUsageMonitor(store);
+    this.workerUsage = new WorkerUsageMonitor(store, { now });
     this.registrationRelay = new RegistrationRelay(store, {
       ...registrationRelayOptions,
       publicUrl,
@@ -1000,7 +1001,7 @@ export class Pool {
         throw new QuotaError("quota_invalid_response");
       this.quotaPreferred.set(org, currentSource.id);
       const syncedAt = new Date(this.quotaNow()).toISOString();
-      patchOrg({
+      const fields = {
         quota: { ...quota, syncedAt },
         quotaSync: {
           status: "ok",
@@ -1010,6 +1011,13 @@ export class Pool {
           ).toISOString(),
           error: "",
         },
+      };
+      // The rate history sample shares the quota commit, so the persisted
+      // snapshot and its history entry can never disagree.
+      this.store.commit((s) => {
+        for (const a of s.accounts)
+          if (orgOf(a) === org) Object.assign(a, fields);
+        s.creditHistory = recordBillingSample(s, org, quota, syncedAt);
       });
       return quota;
     } catch (error) {

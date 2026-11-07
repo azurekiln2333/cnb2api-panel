@@ -24,7 +24,23 @@ import {
   syncedSources,
 } from '../reconcile'
 import { api } from '../api'
-import type { Page, TokenMetric, TokenTotals, UsageComparison } from '../types'
+import type {
+  CreditRates,
+  CreditRateWindow,
+  Page,
+  TokenMetric,
+  TokenTotals,
+  UsageComparison,
+} from '../types'
+import {
+  RATE_UNIT,
+  billingText,
+  deviationHint,
+  formatDeviation,
+  formatRate,
+  reportedText,
+  tokensLeftText,
+} from '../credit-rates'
 import { formatRemainingQuotaPercent, summarizeQuota } from '../quota'
 import StatusBadge from '../components/StatusBadge.vue'
 const emit = defineEmits<{ navigate: [page: Page] }>()
@@ -156,6 +172,52 @@ const reconcileRows = computed(() => {
       difference: null,
     },
   ]
+})
+// The overview payload carries the 24h window; other windows load on demand.
+const rateWindows: CreditRateWindow[] = ['1h', '24h', '7d']
+const rateWindow = ref<CreditRateWindow>('24h')
+const windowRates = ref<CreditRates | null>(null)
+const rateError = ref('')
+let rateRequest = 0
+async function loadRates() {
+  const window = rateWindow.value
+  if (window === '24h') return
+  const request = ++rateRequest
+  try {
+    const result = await api<CreditRates>(`/credits/rates?window=${window}`)
+    if (request !== rateRequest) return
+    windowRates.value = result
+    rateError.value = ''
+  } catch (error) {
+    if (request === rateRequest)
+      rateError.value = error instanceof Error ? error.message : 'Credits 单价读取失败'
+  }
+}
+watch(rateWindow, () => {
+  rateError.value = ''
+  loadRates()
+})
+watch(overview, () => loadRates())
+const rates = computed(() =>
+  rateWindow.value === '24h'
+    ? (overview.value?.creditRates ?? null)
+    : windowRates.value?.window === rateWindow.value
+      ? windowRates.value
+      : null,
+)
+const overallRate = computed(() => rates.value?.overall ?? null)
+const rateSplit = computed(() => {
+  const billing = overallRate.value?.billing
+  return billing?.inputRate != null && billing.outputRate != null
+    ? `${formatRate(billing.inputRate)} / ${formatRate(billing.outputRate)}`
+    : '—'
+})
+const rateSummaryStatus = computed(() => {
+  if (rateError.value) return rateError.value
+  const row = overallRate.value
+  if (!rates.value) return '正在读取 Credits 单价…'
+  if (!row?.windowStart || !row.windowEnd) return '额度同步两次后开始估算。'
+  return `${time(row.windowStart, true)} 至 ${time(row.windowEnd, true)} · ${number(row.deltaTokens)} tokens · ${number(row.deltaCredits, 2)} Credits`
 })
 const signedShort = (value: number | null) =>
   value == null ? '—' : `${value > 0 ? '+' : ''}${abbreviateCount(value) || number(value)}`
@@ -331,6 +393,62 @@ const states = computed(() => [
               : '在账号池配置仓库与个人令牌后自动读取。'
         }}
       </p>
+    </section>
+    <section
+      class="stat-card overview-summary-card rate-summary-card"
+      aria-labelledby="overview-rate-summary-heading"
+      data-testid="overview-credit-rate"
+    >
+      <div class="stat-top">
+        <h2 id="overview-rate-summary-heading">Credits 单价</h2>
+        <div class="segmented" aria-label="Credits 单价统计区间">
+          <button
+            v-for="item in rateWindows"
+            :key="item"
+            :class="{ active: rateWindow === item }"
+            :aria-pressed="rateWindow === item"
+            @click="rateWindow = item"
+          >
+            {{ item }}
+          </button>
+        </div>
+      </div>
+      <div class="overview-summary-value">
+        <strong data-testid="rate-billing" :class="{ 'rate-empty': !overallRate?.billing }">{{
+          billingText(overallRate)
+        }}</strong
+        ><span v-if="overallRate?.billing">{{ RATE_UNIT }} · 账单估算</span>
+      </div>
+      <dl class="overview-summary-breakdown">
+        <div>
+          <dt>工作区上报</dt>
+          <dd data-testid="rate-reported">{{ reportedText(overallRate) }}</dd>
+          <small v-if="overallRate?.reported?.partial">部分上报</small>
+        </div>
+        <div>
+          <dt>偏差</dt>
+          <dd data-testid="rate-deviation">{{ formatDeviation(overallRate?.deviation) }}</dd>
+        </div>
+        <div>
+          <dt>输入 / 输出</dt>
+          <dd data-testid="rate-split">{{ rateSplit }}</dd>
+        </div>
+        <div>
+          <dt>剩余额度</dt>
+          <dd data-testid="rate-tokens-left">
+            {{ tokensLeftText(overallRate?.tokensLeft) || '—' }}
+          </dd>
+        </div>
+      </dl>
+      <p
+        v-if="deviationHint(overallRate?.deviation)"
+        class="overview-summary-state quota-error-text"
+        data-testid="rate-deviation-hint"
+      >
+        {{ deviationHint(overallRate?.deviation) }}
+      </p>
+      <p class="overview-summary-state" data-testid="rate-status">{{ rateSummaryStatus }}</p>
+      <p class="overview-summary-note">账单估算包含组织内其他 Credits 消耗 · 同组织不重复累计</p>
     </section>
   </div>
   <div class="stats-grid">
@@ -859,9 +977,28 @@ const states = computed(() => [
 <style scoped>
 .overview-summary-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 13px;
+}
+.rate-summary-card {
+  border-top-color: var(--green);
+}
+.rate-summary-card .stat-top {
+  gap: 8px;
+}
+.overview-summary-value strong.rate-empty {
+  font-size: 15px;
+  font-weight: 550;
+  color: var(--secondary);
+}
+@media (max-width: 1180px) {
+  .overview-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .rate-summary-card {
+    grid-column: 1 / -1;
+  }
 }
 .overview-summary-card {
   min-width: 0;

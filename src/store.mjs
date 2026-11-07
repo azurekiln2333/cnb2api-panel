@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { resolve, join } from "node:path";
 import { addTokenUsage, emptyTokenUsage } from "./token-usage.mjs";
+import { loadCreditHistory, loadReportedHistory } from "./credit-rates.mjs";
 import { loadRegistrationRelay, validateRegistrationRelay } from "./registration-relay.mjs";
 import {
   DEFAULT_QUOTA_PROTECTION,
@@ -52,6 +53,7 @@ const RUNTIME_FIELDS = [
   "upstreamModeAppliedAt",
   "inferenceProbe",
   "probeUsage",
+  "creditReportHistory",
   "registrationTokenVersion",
 ];
 // Inference probes reach the worker's /usage counters but never the gateway
@@ -77,6 +79,7 @@ const runtimeDefaults = () => ({
   upstreamModeAppliedAt: null,
   inferenceProbe: null,
   probeUsage: emptyProbeUsage(),
+  creditReportHistory: null,
   registrationTokenVersion: 0,
 });
 
@@ -384,7 +387,8 @@ export function normalizeEndpoint(input, allowLocal = false) {
 }
 
 export function publicAccount(account) {
-  const { secrets, workerUsage, ...visible } = account;
+  // Rate histories feed /api/credits/rates only; they never reach account lists.
+  const { secrets, workerUsage, creditReportHistory, ...visible } = account;
   return {
     ...visible,
     hasProxyKey: Boolean(secrets.proxyKey),
@@ -497,6 +501,8 @@ export class Store {
         tokenUsage: { ...emptyTokenUsage(), ...stats.tokenUsage },
         tokenUsageStartedAt:
           stats.tokenUsageStartedAt || new Date().toISOString(),
+        // Documents written before Credits rate estimates have no history.
+        creditHistory: legacy ? {} : loadCreditHistory(stats.creditHistory),
         hourly: (stats.hourly || []).map((b) => ({
           ...b,
           tokenUsage: { ...emptyTokenUsage(), ...b.tokenUsage },
@@ -522,6 +528,9 @@ export class Store {
             ...emptyProbeUsage(),
             ...(legacy ? null : stats.accounts?.[a.id]?.probeUsage),
           },
+          creditReportHistory: legacy
+            ? null
+            : loadReportedHistory(stats.accounts?.[a.id]?.creditReportHistory),
           secrets: this.decrypt(a.secrets),
         })),
       };
@@ -556,6 +565,7 @@ export class Store {
         hourly: [],
         tokenUsage: emptyTokenUsage(),
         tokenUsageStartedAt: new Date().toISOString(),
+        creditHistory: {},
       };
       this.persist(this.state, true);
     }
@@ -617,6 +627,7 @@ export class Store {
         tokenUsage: state.tokenUsage,
         tokenUsageStartedAt: state.tokenUsageStartedAt,
         registrationRelay: state.registrationRelay,
+        creditHistory: state.creditHistory || {},
         accounts: Object.fromEntries(
           state.accounts.map((a) => [
             a.id,
@@ -858,6 +869,7 @@ export class Store {
       upstreamModeAppliedAt: null,
       inferenceProbe: null,
       probeUsage: emptyProbeUsage(),
+      creditReportHistory: null,
       registrationTokenVersion: 0,
     };
     this.commit((s) => s.accounts.push(account));

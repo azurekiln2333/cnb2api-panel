@@ -30,6 +30,7 @@ import { auditRequest } from "./audit.mjs";
 import { queryLogs } from "./logs.mjs";
 import { parseRelayHeaders } from "./registration-relay.mjs";
 import { gatewayQuotaRoute, gatewayQuotaResponse } from "./gateway-quota.mjs";
+import { CREDIT_WINDOWS, creditRates } from "./credit-rates.mjs";
 
 const SESSION_MS = 12 * 60 * 60 * 1000;
 const OIDC_TRANSACTION_MS = 10 * 60 * 1000;
@@ -631,6 +632,8 @@ export function createPanelServer(options) {
             accounts: pool.accounts(),
             settings: store.state.settings,
             hourly: store.state.hourly,
+            // The default 24h window; other windows use /api/credits/rates.
+            creditRates: creditRates(store.state, { now: pool.quotaNow() }),
             stats: {
               total: store.state.accounts.length,
               ready: store.state.accounts.filter(isReady).length,
@@ -673,6 +676,13 @@ export function createPanelServer(options) {
               ),
             },
           });
+        }
+        if (path === "/api/credits/rates" && method === "GET") {
+          const window =
+            new URL(req.url, "http://panel.local").searchParams.get("window") || "24h";
+          if (!Object.hasOwn(CREDIT_WINDOWS, window))
+            throw new InputError("统计区间须为 1h、24h 或 7d");
+          return json(res, 200, creditRates(store.state, { window, now: pool.quotaNow() }));
         }
         if (path === "/api/usage/comparison" && method === "GET")
           return json(res, 200, pool.workerUsage.overview());
