@@ -49,6 +49,7 @@ try {
     publicUrl: (process.env.PANEL_PUBLIC_URL || '').replace(/\/$/, ''),
     allowLocal: process.env.PANEL_ALLOW_LOCAL_UPSTREAM === 'true',
     ssoBootstrap: ssoBootstrapFromEnv(process.env),
+    platformToken: process.env.PLATFORM_TOKEN || '',
   });
   server.listen(port, process.env.PANEL_HOST || '127.0.0.1', () => {
     console.log(

@@ -105,6 +105,7 @@ export function createPanelServer(options) {
     publicUrl = "",
     allowLocal = false,
     ssoBootstrap = null,
+    platformToken = "",
     poolOptions = {},
     webRoot = fileURLToPath(new URL("../web/dist/", import.meta.url)),
   } = options;
@@ -172,6 +173,22 @@ export function createPanelServer(options) {
       token: cookie,
       user: entry.user,
       ssoFingerprint: entry.ssoFingerprint,
+    };
+  };
+  // Service-to-service management access for the unified platform2api panel.
+  // Disabled unless PLATFORM_TOKEN is set, so browser login is unchanged.
+  const platformTokenMatches = (req) => {
+    if (!platformToken) return false;
+    const header = req.headers.authorization || "";
+    const match = /^Bearer\s+(.+)$/i.exec(header);
+    return Boolean(match) && equals(match[1].trim(), platformToken);
+  };
+  const serviceSession = (req) => {
+    if (!platformTokenMatches(req)) return null;
+    return {
+      token: "",
+      user: { name: "platform2api", email: "", picture: "", provider: "token" },
+      ssoFingerprint: "",
     };
   };
   const isSecure = (req) =>
@@ -540,18 +557,23 @@ export function createPanelServer(options) {
             { "Set-Cookie": sessionCookie(req, token, SESSION_MS / 1000) },
           );
         }
-        const session = getSession(req);
+        const session = getSession(req) || serviceSession(req);
         if (!session) throw new InputError("请先登录管理面板", 401);
+        if (session.user.provider === "token") req.auditActor = session.user;
         if (path === "/api/session" && method === "GET")
           return json(res, 200, { authenticated: true, user: session.user });
         if (path === "/api/session" && method === "DELETE") {
-          sessions.delete(session.token);
-          return json(
-            res,
-            200,
-            { ok: true },
-            { "Set-Cookie": sessionCookie(req, "", 0) },
-          );
+          // Token-based service sessions own no cookie; nothing to clear.
+          if (session.user.provider !== "token") {
+            sessions.delete(session.token);
+            return json(
+              res,
+              200,
+              { ok: true },
+              { "Set-Cookie": sessionCookie(req, "", 0) },
+            );
+          }
+          return json(res, 200, { ok: true });
         }
         if (path === "/api/auth/settings" && method === "GET")
           return json(
