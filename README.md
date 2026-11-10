@@ -49,24 +49,28 @@ chmod 600 .env
 
 已有部署保留原 `.env`，无需复制模板。
 
-运行两次以下命令，分别生成两个密钥。
+运行一次以下命令，生成面板密钥。
 
 ```bash
 openssl rand -hex 24
 ```
 
-修改 `.env` 中的两个密钥和域名。
+修改 `.env` 中的面板密钥和域名。
 
 ```dotenv
-PANEL_ADMIN_KEY=replace-with-first-random-key
-GATEWAY_KEY=replace-with-second-random-key
+PANEL_ADMIN_KEY=replace-with-random-key
 PANEL_PUBLIC_URL=https://ai.example.com
 PANEL_PORT=9002
 PANEL_BIND_HOST=127.0.0.1
 ```
 
-两个密钥必须不同，且各有至少 12 个字符。
-密钥应只含无空格的可打印 ASCII 字符。
+面板密钥至少 12 个字符。
+它只含无空格的可打印 ASCII 字符。
+统一面板用同一个密钥管理本面板。
+网关密钥可不填。
+留空时面板在首次启动生成一个，保存到 `data/gateway.key`。
+填写 `GATEWAY_KEY` 时以该值为准。
+网关密钥至少 12 个字符，且不能与面板密钥相同。
 
 启动面板。
 
@@ -241,7 +245,7 @@ Docker 构建与 CI 使用同一版本。
 发布包自带 `web/dist`，无需安装前端依赖。
 
 进入项目目录，复制 `.env.example` 为 `.env`。
-填写两个密钥和域名。
+填写面板密钥和域名。
 配置本机监听地址及数据和日志目录。
 
 ```dotenv
@@ -317,6 +321,7 @@ location / {
 使用 `PANEL_ADMIN_KEY` 登录。
 客户端填写 API 基址 `https://ai.example.com/v1`。
 客户端密钥填写 `GATEWAY_KEY`。
+留空 `GATEWAY_KEY` 时，在“接入配置”页查看生成的密钥。
 
 ## 模型列表与 New API 接入
 
@@ -339,7 +344,7 @@ CodeBuddy 客户端的可选模型也不能证明接口支持。
 |------|----|
 | 渠道类型 | OpenAI |
 | 代理地址 | `https://ai.example.com` |
-| 密钥 | 面板的 `GATEWAY_KEY` |
+| 密钥 | 面板的网关密钥，见“接入配置”页 |
 | 模型 | 从面板拉取模型，或填写已确认的模型 ID |
 
 代理地址只填根域名，不加 `/v1`。
@@ -485,12 +490,22 @@ Client Secret 不会通过配置接口返回浏览器。
 
 ## 密钥和账号接入
 
-### 两个系统密钥
+### 面板密钥和网关密钥
 
 | 配置项 | 用途 | 保存位置 |
 | --- | --- | --- |
 | `PANEL_ADMIN_KEY` | 登录管理面板 | `.env` 或进程环境变量 |
-| `GATEWAY_KEY` | 客户端调用统一 API | `.env` 或进程环境变量 |
+| `PANEL_ADMIN_KEY` | 统一面板调用管理接口 | 同上 |
+| `GATEWAY_KEY` | 客户端调用统一 API | `.env`，或首次启动生成的 `data/gateway.key` |
+
+管理接口接受 `Authorization: Bearer <面板密钥>`。
+该分支不要求浏览器登录会话。
+请求携带不匹配的 `Origin` 时，面板拒绝非 GET 请求。
+该分支只覆盖 `/api/` 管理路由。
+模型和推理接口仍检查网关密钥。
+旧的 `PLATFORM_TOKEN` 仍然有效。
+新部署无需配置该变量。
+统一面板默认用面板密钥访问本站。
 
 ### 每个账号的三个凭据
 
@@ -1042,7 +1057,8 @@ Docker 使用 Compose 的宿主机 `./data` 挂载。
 | `logs/audit.log` | 管理操作审计 | 明文日志 |
 | `logs/system.log` | 工作区运行事件 | 明文日志 |
 | `data/master.key` | 解密账号凭据的本地密钥 | 原始密钥文件 |
-| `.env` | 两个系统密钥及启动配置 | 明文配置 |
+| `data/gateway.key` | 自动生成的网关密钥 | 原始密钥文件 |
+| `.env` | 面板密钥及启动配置 | 明文配置 |
 
 `PROXY_KEY`、`REG_TOKEN` 和 CNB 个人令牌使用 AES-256-GCM。
 SSO 客户端密钥也使用 AES-256-GCM。
@@ -1134,7 +1150,7 @@ Watchtower 无法修改容器挂载。
 找到原进程实际使用的 `PANEL_DATA_DIR`。
 将整个数据目录复制到新项目的 `data/`。
 已有独立日志时，将其复制到新项目的 `logs/`。
-保留原 `.env` 中的两个密钥和域名。
+保留原 `.env` 中的密钥和域名。
 普通 Node 需同步修改绝对数据路径。
 Docker 继续使用 `/app/data` 容器路径。
 
