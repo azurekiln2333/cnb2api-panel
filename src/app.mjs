@@ -25,6 +25,7 @@ import {
   verifyIdTokenForConfig,
 } from "./auth.mjs";
 import { Pool, isReady, isCooling } from "./pool.mjs";
+import { resolveGatewayKey } from "./gateway-key.mjs";
 import { MAX_REQUEST_BYTES } from "./request-overrides.mjs";
 import { addTokenUsage, emptyTokenUsage } from "./token-usage.mjs";
 import { auditRequest } from "./audit.mjs";
@@ -99,7 +100,7 @@ async function body(req, maxBytes = 65536) {
 export function createPanelServer(options) {
   const {
     adminKey,
-    gatewayKey,
+    gatewayKey: configuredGatewayKey,
     dataDir,
     logDir,
     publicUrl = "",
@@ -111,14 +112,6 @@ export function createPanelServer(options) {
   } = options;
   if (!adminKey || adminKey.length < 12)
     throw new Error("PANEL_ADMIN_KEY must contain at least 12 characters");
-  if (!gatewayKey || gatewayKey.length < 12)
-    throw new Error("GATEWAY_KEY must contain at least 12 characters");
-  if (adminKey === gatewayKey)
-    throw new Error("PANEL_ADMIN_KEY and GATEWAY_KEY must be different");
-  if (/[^\x21-\x7e]/.test(gatewayKey))
-    throw new Error(
-      "GATEWAY_KEY must contain printable ASCII characters without spaces",
-    );
   if (publicUrl) {
     let parsed;
     try {
@@ -140,6 +133,15 @@ export function createPanelServer(options) {
     }
   }
   const store = new Store(dataDir, { allowLocal, logDir, publicUrl });
+  // GATEWAY_KEY is optional: the environment wins, otherwise the panel keeps a
+  // generated key in the data directory so restarts and upgrades keep working.
+  const gatewayKey = resolveGatewayKey({
+    value: configuredGatewayKey,
+    adminKey,
+    directory: store.directory,
+  });
+  if (adminKey === gatewayKey)
+    throw new Error("PANEL_ADMIN_KEY and GATEWAY_KEY must be different");
   // Environment variables only seed an unconfigured panel; saved SSO settings win.
   if (ssoBootstrap && typeof ssoBootstrap === "object") {
     if (!ssoIsConfigured(store.state.sso)) {
@@ -185,9 +187,10 @@ export function createPanelServer(options) {
     if (!match) return false;
     const presented = match[1].trim();
     if (!presented) return false;
+    const accepted = [adminKey, platformToken].filter(Boolean);
     // Compare against every accepted key so the cost does not reveal a match.
     let matched = false;
-    for (const candidate of [adminKey, platformToken].filter(Boolean))
+    for (const candidate of accepted)
       if (equals(presented, candidate)) matched = true;
     return matched;
   };
