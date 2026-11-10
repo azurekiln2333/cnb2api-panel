@@ -68,11 +68,19 @@ const reference = (account) => ({ id: account.id, name: account.name });
 
 test("model inventory requires a management session and handles an empty catalog", async (t) => {
   const app = await fixture(t);
-  for (const authorization of [undefined, GATEWAY, ADMIN]) {
+  for (const authorization of [undefined, GATEWAY]) {
     const response = await app.call("/api/models", { authorization });
     assert.equal(response.status, 401);
     assert.ok(!(await response.text()).includes(PROXY));
   }
+  // The panel key is the service-to-service bearer, so the unified panel reaches
+  // this route without a browser session (design D2 item 7).
+  const service = await app.call("/api/models", {
+    authenticated: false,
+    authorization: ADMIN,
+  });
+  assert.equal(service.status, 200);
+  assert.ok(!(await service.text()).includes(PROXY));
   await app.login();
   assert.deepEqual(await app.inventory(), []);
   // A wildcard route does not invent catalog entries for arbitrary model names.

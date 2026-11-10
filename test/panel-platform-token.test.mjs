@@ -108,3 +108,60 @@ test("key login still works when PLATFORM_TOKEN is set", async (t) => {
   });
   assert.equal(session.status, 200);
 });
+
+test("PANEL_ADMIN_KEY authorizes management routes without PLATFORM_TOKEN", async (t) => {
+  const { base } = await start(t, {});
+
+  const unauth = await get(base, "/api/overview");
+  assert.equal(unauth.status, 401);
+
+  const ok = await get(base, "/api/overview", {
+    Authorization: `Bearer ${ADMIN}`,
+  });
+  assert.equal(ok.status, 200);
+
+  const reads = await get(base, "/api/settings", {
+    Authorization: `Bearer ${ADMIN}`,
+  });
+  assert.equal(reads.status, 200);
+});
+
+test("the admin key bearer keeps working while key login is disabled", async (t) => {
+  const { base, app } = await start(t, {});
+
+  // Persist an enabled SSO with key login closed, the state the console reaches
+  // only after a proven SSO session. The bearer is the service path, so it must
+  // survive that switch (design D2 item 7).
+  app.store.saveSso({
+    ...app.store.state.sso,
+    enabled: true,
+    keyLoginEnabled: false,
+    issuer: "https://sso.example.com",
+    clientId: "panel-client",
+    clientSecret: "panel-client-secret",
+    allowedEmails: ["admin@example.com"],
+  });
+
+  const login = await fetch(`${base}/api/session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key: ADMIN }),
+  });
+  assert.equal(login.status, 403);
+
+  const ok = await get(base, "/api/overview", {
+    Authorization: `Bearer ${ADMIN}`,
+  });
+  assert.equal(ok.status, 200);
+});
+
+test("a bearer with the gateway key or a wrong key is rejected", async (t) => {
+  const { base } = await start(t, { platformToken: TOKEN });
+
+  for (const value of [GATEWAY, "wrong-admin-key-000", `${ADMIN}x`]) {
+    const response = await get(base, "/api/overview", {
+      Authorization: `Bearer ${value}`,
+    });
+    assert.equal(response.status, 401);
+  }
+});

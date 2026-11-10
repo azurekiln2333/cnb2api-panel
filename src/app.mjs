@@ -176,15 +176,23 @@ export function createPanelServer(options) {
     };
   };
   // Service-to-service management access for the unified platform2api panel.
-  // Disabled unless PLATFORM_TOKEN is set, so browser login is unchanged.
-  const platformTokenMatches = (req) => {
-    if (!platformToken) return false;
+  // PANEL_ADMIN_KEY is the credential; the old PLATFORM_TOKEN stays accepted as
+  // an alias so existing deployments keep working. This branch needs no cookie,
+  // CSRF token or origin check, and survives key login being disabled.
+  const managementKeyMatches = (req) => {
     const header = req.headers.authorization || "";
     const match = /^Bearer\s+(.+)$/i.exec(header);
-    return Boolean(match) && equals(match[1].trim(), platformToken);
+    if (!match) return false;
+    const presented = match[1].trim();
+    if (!presented) return false;
+    // Compare against every accepted key so the cost does not reveal a match.
+    let matched = false;
+    for (const candidate of [adminKey, platformToken].filter(Boolean))
+      if (equals(presented, candidate)) matched = true;
+    return matched;
   };
   const serviceSession = (req) => {
-    if (!platformTokenMatches(req)) return null;
+    if (!managementKeyMatches(req)) return null;
     return {
       token: "",
       user: { name: "platform2api", email: "", picture: "", provider: "token" },
