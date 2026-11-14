@@ -28,7 +28,7 @@ const worker = http.createServer(async (req, res) => {
     const chunks = []
     for await (const chunk of req) chunks.push(chunk)
     const { logs } = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-    store.state.logs = [...logs, ...store.state.logs.filter((entry) => entry.kind !== 'request')]
+    store.logs.replace([...logs, ...store.logs.all().filter((entry) => entry.kind !== 'request')])
     return res.end(JSON.stringify({ ok: true }))
   }
   if (req.url === '/test/quota') {
@@ -128,6 +128,8 @@ const shutdown = () => {
   server.close()
   worker.close()
   oidc.close()
+  // SQLite keeps the data files open until the store releases them.
+  store.close()
   rmSync(fixtureRoot, { recursive: true, force: true })
   process.exit(0)
 }
