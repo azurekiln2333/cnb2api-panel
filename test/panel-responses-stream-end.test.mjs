@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const ADMIN = "stream-end-admin-key";
 const GATEWAY = "stream-end-gateway-key";
@@ -73,14 +74,14 @@ async function fixture(t, handlers) {
     app.pool.stop();
     await close(app.server);
     for (const server of servers) await close(server);
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   const responses = (body) => fetch(`${base}/v1/responses`, {
     method: "POST",
     headers: { Authorization: `Bearer ${GATEWAY}`, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const logs = () => app.store.state.logs.filter((entry) => entry.kind === "request");
+  const logs = () => app.store.logs.all().filter((entry) => entry.kind === "request");
   return { ...app, base, calls, responses, logs };
 }
 

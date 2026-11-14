@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { Store } from "../src/store.mjs";
 import { Pool } from "../src/pool.mjs";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const key = "probe-worker-private-key";
 const models = () => Response.json({ object: "list", data: [{ id: "test-model" }] });
@@ -29,7 +30,7 @@ function fixture(t) {
   const account = store.create({ name: "probe", endpoint: "http://127.0.0.1:9001", proxyKey: key });
   t.after(() => {
     pool.stop();
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   return { store, pool, id: account.id };
 }
@@ -85,8 +86,8 @@ test("probe errors distinguish timeout, DNS, TLS, authentication and invalid mod
       const result = await app.pool.probe(app.id);
       assert.equal(result.status, "unhealthy");
       assert.match(result.lastError, pattern);
-      assert.equal(app.store.state.logs[0].status, status);
-      assert.ok(!JSON.stringify(app.store.state.logs).includes(key));
+      assert.equal(app.store.logs.all()[0].status, status);
+      assert.ok(!JSON.stringify(app.store.logs.all()).includes(key));
     });
   }
 });
@@ -253,7 +254,7 @@ test("slow first inference response is not treated as the worker connection time
     app.pool.stop();
     await close(app.server);
     await close(worker);
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   const account = app.store.create({ name: "slow", endpoint, proxyKey: key });
   app.store.settings({ connectTimeoutSeconds: 1, idleTimeoutSeconds: 10,

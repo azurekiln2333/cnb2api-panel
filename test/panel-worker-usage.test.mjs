@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.mjs";
 import { WorkerUsageMonitor } from "../src/worker-usage.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const KEY = "worker-comparison-private-key";
 const local = (input, output, cacheRead = 0) => ({
@@ -81,7 +82,7 @@ async function fixture(t, options = {}) {
   t.after(async () => {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    removeAll(fixtureRoot);
   });
   return {
     store,

@@ -7,8 +7,8 @@ export const HISTORY_DAYS = [7, 30, 90, 365];
 const DAY_MS = 86_400_000;
 const UTC8_OFFSET_MS = 8 * 3_600_000;
 
-// Store.commit() clones and serializes the whole state on every request, so
-// the rollup packs token counters into short strings of base-36 numbers joined
+// Every request rewrites its hourly and daily rows, so the rollup packs token
+// counters into short strings of base-36 numbers joined
 // by ":". Most slots are differences that stay zero for fully measured
 // traffic, and trailing zeros are dropped:
 //   input:output:cacheRead:cacheWrite:missing:extraAttempts:partial:

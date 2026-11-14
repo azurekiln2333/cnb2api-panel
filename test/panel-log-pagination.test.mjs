@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 async function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), "panel-log-pagination-"));
@@ -21,7 +22,7 @@ async function fixture(t) {
   t.after(async () => {
     app.server.closeAllConnections();
     await new Promise((done) => app.server.close(done));
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   const login = await fetch(`${base}/api/session`, {
     method: "POST",
@@ -59,7 +60,7 @@ test("paged request logs bound long-message responses and preserve complete deta
       initialMessage: { role: "user", text, truncated: false },
     }),
   );
-  app.store.state.logs = entries;
+  app.store.logs.replace(entries);
   const response = await app.call("/api/logs?limit=20&offset=0");
   assert.equal(response.status, 200);
   const body = await response.text();
@@ -79,7 +80,7 @@ test("paged request logs bound long-message responses and preserve complete deta
   ).json();
   assert.deepEqual(detail.log, entries[0]);
   assert.equal(
-    app.store.state.logs[0].requestDiagnostics.received.messageCount,
+    app.store.logs.all()[0].requestDiagnostics.received.messageCount,
     1,
   );
 });
@@ -96,7 +97,7 @@ test("request outcome and full-message search filter before pagination", async (
       },
     }),
   );
-  app.store.state.logs = entries;
+  app.store.logs.replace(entries);
   const expected = entries.filter(
     (entry, index) =>
       index % 3 === 0 && !(entry.status >= 200 && entry.status < 400),
@@ -138,7 +139,7 @@ test("log channels retain kind filters and search metadata independently", async
     requestEntry(3, { kind: "health", message: "Health failure", status: 500 }),
     requestEntry(4, { kind: "wake", message: "Wake success", status: 200 }),
   ];
-  app.store.state.logs = entries;
+  app.store.logs.replace(entries);
   for (const search of ["operator", "ACCOUNT.UPDATE", "127.0.0.2"]) {
     const audit = await (
       await app.call(
@@ -168,8 +169,8 @@ test("log channels retain kind filters and search metadata independently", async
 
 test("pagination clamps limits and offsets while legacy requests keep their response shape", async (t) => {
   const app = await fixture(t);
-  app.store.state.logs = Array.from({ length: 120 }, (_, index) =>
-    requestEntry(index),
+  app.store.logs.replace(
+    Array.from({ length: 120 }, (_, index) => requestEntry(index)),
   );
   const upper = await (
     await app.call("/api/logs?limit=50000&offset=-1")
@@ -182,7 +183,7 @@ test("pagination clamps limits and offsets while legacy requests keep their resp
   assert.equal(lower.offset, 1);
   assert.deepEqual(
     lower.logs.map((entry) => entry.id),
-    [app.store.state.logs[1].id],
+    [app.store.logs.all()[1].id],
   );
   const invalid = await (
     await app.call("/api/logs?limit=invalid&offset=invalid")
@@ -211,7 +212,7 @@ test("downloads export all matching rows across pages and require a management s
   const entries = Array.from({ length: 75 }, (_, index) =>
     requestEntry(index, { accountName: index % 3 ? "Other" : "Selected" }),
   );
-  app.store.state.logs = entries;
+  app.store.logs.replace(entries);
   const expected = entries.filter(
     (entry) => entry.accountName === "Selected" && entry.status >= 400,
   );

@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const ADMIN = "matrix-test-admin-key";
 const GATEWAY = "matrix-test-gateway-key";
@@ -111,7 +112,7 @@ async function fixture(t, handler) {
     app.pool.stop();
     await close(app.server);
     await close(worker);
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   const account = app.store.create({ name: "matrix-worker", endpoint, proxyKey: WORKER });
   await app.pool.probe(account.id);
@@ -127,7 +128,7 @@ async function fixture(t, handler) {
     });
   // Store prepends new records, so the oldest request log is last.
   const requestLogs = () =>
-    app.store.state.logs.filter((entry) => entry.kind === "request").reverse();
+    app.store.logs.all().filter((entry) => entry.kind === "request").reverse();
   return { ...app, base, endpoint, calls, post, requestLogs, accountId: account.id };
 }
 
@@ -407,7 +408,7 @@ test("endpoint error shapes follow the calling client protocol", async (t) => {
   // Client errors never cool or switch the healthy workspace.
   assert.equal(app.store.get(app.accountId).status, "healthy");
   assert.ok(app.requestLogs().every((entry) => entry.status === 400));
-  assert.ok(!JSON.stringify(app.store.state.logs).includes("upstream rejected chat"));
+  assert.ok(!JSON.stringify(app.store.logs.all()).includes("upstream rejected chat"));
 });
 
 test("pool exhaustion returns the protocol-shaped public 503 on all three endpoints", async (t) => {

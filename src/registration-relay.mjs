@@ -10,6 +10,14 @@ const pair = (accountId, serverId) => `${accountId}/${serverId}`;
 const eligible = (account) => Boolean(account.endpoint && account.secrets.registrationToken);
 const credentialVersion = (account) => account.registrationTokenVersion || 0;
 const latest = (values) => values.filter(Boolean).sort().at(-1) || null;
+// A peer that rejects the registration key never starts accepting it by itself,
+// so automatic retries stop and the operator has to fix the key or sync.
+const AUTH_FAILURE_LIMIT = 3;
+const AUTH_HINT = "；已暂停自动重试，请核对注册密钥后手动同步";
+// Repeating identical delivery failures only ever add noise to the 1000-entry
+// system channel, so repeats are folded into one aggregated record.
+const NOTICE_WINDOW_MS = 3600000;
+const NOTICE_REPEATS = 10;
 
 export const RELAY_HEADERS = Object.freeze({
   version: "x-cnb2api-registration-relay",
@@ -74,6 +82,8 @@ export function loadRegistrationRelay(value) {
       typeof delivery.origin !== "string" || delivery.origin.length > 500 || !["pending", "failed", "success"].includes(delivery.status) ||
       !integer(delivery.attempts) || !integer(delivery.nextAttemptAt) || !date(delivery.lastAttemptAt) || !date(delivery.lastSuccessAt) ||
       (delivery.paused !== undefined && typeof delivery.paused !== "boolean") ||
+      (delivery.needsAction !== undefined && typeof delivery.needsAction !== "boolean") ||
+      (delivery.authFailures !== undefined && !integer(delivery.authFailures)) ||
       typeof delivery.lastError !== "string" || delivery.lastError.length > 160) invalid();
   }
   for (const [accountId, sources] of Object.entries(value.receipts)) {
@@ -167,6 +177,7 @@ export class RegistrationRelay {
     this.active = new Map();
     this.stopped = false;
     this.scheduled = false;
+    this.notices = new Map();
   }
 
   register(accountId, endpoint, relay = null) {
@@ -234,7 +245,8 @@ export class RegistrationRelay {
       const failed = jobs.filter((job) => job.status === "failed").length;
       const newestFailure = jobs.filter((job) => job.lastError).sort((left, right) => (right.lastAttemptAt || "").localeCompare(left.lastAttemptAt || ""))[0];
       return { ...server, status: !enabled || !server.enabled ? "disabled" : failed ? "failed" : pending ? "pending" : jobs.length ? "success" : "idle",
-        pending, failed, lastAttemptAt: latest(jobs.map((job) => job.lastAttemptAt)),
+        pending, failed, needsAction: jobs.some((job) => job.needsAction === true),
+        lastAttemptAt: latest(jobs.map((job) => job.lastAttemptAt)),
         lastSuccessAt: latest(jobs.map((job) => job.lastSuccessAt)), lastError: newestFailure?.lastError || "" };
     }) };
   }
@@ -270,7 +282,7 @@ export class RegistrationRelay {
     const started = [];
     for (const [key, saved] of Object.entries(this.store.state.registrationRelay.deliveries)) {
       if (this.active.size >= 4) break;
-      if (this.active.has(key) || saved.status === "success" || saved.nextAttemptAt > this.now() || !validJob(this.store.state, saved)) continue;
+      if (this.active.has(key) || saved.status === "success" || saved.needsAction === true || saved.nextAttemptAt > this.now() || !validJob(this.store.state, saved)) continue;
       const work = { job: structuredClone(saved), controller: new AbortController() };
       this.active.set(key, work);
       const promise = this.deliver(work).finally(() => {
@@ -348,18 +360,52 @@ export class RegistrationRelay {
       const current = state.registrationRelay.deliveries[pair(job.accountId, job.serverId)];
       if (error) {
         current.status = "failed";
-        current.lastError = message;
-        current.nextAttemptAt = this.now() + Math.min(300000, 5000 * 2 ** Math.min(6, current.attempts - 1));
+        current.authFailures =
+          error.relayKind === "authentication" ? (current.authFailures || 0) + 1 : 0;
+        if (current.authFailures >= AUTH_FAILURE_LIMIT) {
+          // Retrying a rejected registration key only burns quota and buries
+          // useful log entries; wait for a config change or a manual sync.
+          current.needsAction = true;
+          current.lastError = `${message}${AUTH_HINT}`;
+          current.nextAttemptAt = Number.MAX_SAFE_INTEGER;
+        } else {
+          current.lastError = message;
+          current.nextAttemptAt = this.now() + Math.min(300000, 5000 * 2 ** Math.min(6, current.attempts - 1));
+        }
       } else {
         current.status = "success";
         current.lastError = "";
+        current.authFailures = 0;
+        current.needsAction = false;
         current.lastSuccessAt = new Date(this.now()).toISOString();
         current.nextAttemptAt = 0;
       }
     });
     const account = this.store.get(job.accountId);
-    this.store.record({ kind: "register", accountId: job.accountId, accountName: account.name,
+    this.notice(job, { kind: "register", accountId: job.accountId, accountName: account.name,
       relayServerId: job.serverId, status: error ? error.status || 502 : 200,
       message: error ? message : "注册信息已同步到联动服务器" });
+  }
+
+  // Collapses consecutive identical delivery outcomes into one system log entry
+  // with a repeat count, at most once per hour or per NOTICE_REPEATS repeats.
+  notice(job, entry) {
+    const key = pair(job.accountId, job.serverId);
+    const signature = `${entry.status}|${entry.message}`;
+    const previous = this.notices.get(key);
+    const now = this.now();
+    if (!previous || previous.signature !== signature) {
+      this.notices.set(key, { signature, since: now, repeats: 0 });
+      this.store.record(entry);
+      return;
+    }
+    previous.repeats++;
+    if (now - previous.since < NOTICE_WINDOW_MS && previous.repeats % NOTICE_REPEATS)
+      return;
+    previous.since = now;
+    this.store.record({
+      ...entry,
+      message: `${entry.message}（已重复 ${previous.repeats + 1} 次）`,
+    });
   }
 }

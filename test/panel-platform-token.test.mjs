@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const ADMIN = "platform-token-admin-key";
 const GATEWAY = "platform-token-gateway-key";
@@ -32,7 +33,7 @@ async function start(t, options = {}) {
   const base = await listen(app.server);
   t.after(async () => {
     await close(app.server);
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   return { base, app };
 }

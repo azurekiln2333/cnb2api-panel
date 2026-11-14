@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { createPanelServer } from "../src/app.mjs";
 import { Store } from "../src/store.mjs";
 import { initialUserMessage } from "../src/request-details.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 test("initial user previews omit other roles and preserve supported text blocks", () => {
   for (const content of [
@@ -145,7 +146,7 @@ async function fixture(t, handler) {
       server.closeAllConnections();
       await new Promise((done) => server.close(done));
     }
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    removeAll(fixtureRoot);
   });
   const send = (path, payload) =>
     fetch(`${base}${path}`, {
@@ -226,9 +227,9 @@ test("request details preserve streaming bytes and survive storage alongside leg
     durationMs: 1,
   });
   const restored = new Store(app.directory, { allowLocal: true });
-  assert.equal(restored.state.logs[0].initialMessage, undefined);
+  assert.equal(restored.logs.all()[0].initialMessage, undefined);
   assert.deepEqual(
-    restored.state.logs.find((entry) => entry.id === log.id),
+    restored.logs.all().find((entry) => entry.id === log.id),
     log,
   );
 });
@@ -248,7 +249,7 @@ test("Anthropic requests retain the first user text and HTTP failures provide a 
   const response = await app.send("/v1/messages", payload);
   assert.equal(response.status, 400);
   assert.equal((await response.json()).error.message, "private-error-body");
-  const log = app.store.state.logs.find((entry) => entry.kind === "request");
+  const log = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.deepEqual(log.initialMessage, {
     role: "user",
     text: "测试 Claude 消息",
@@ -257,7 +258,7 @@ test("Anthropic requests retain the first user text and HTTP failures provide a 
   assert.equal(log.message, "工作区返回 HTTP 400");
   assert.equal(log.stream, false);
   assert.ok(
-    !JSON.stringify(app.store.state.logs).includes("private-error-body"),
+    !JSON.stringify(app.store.logs.all()).includes("private-error-body"),
   );
 });
 
@@ -272,7 +273,7 @@ test("empty upstream responses have no first-byte timing and system-only request
   });
   assert.equal(response.status, 204);
   await response.text();
-  const log = app.store.state.logs.find((entry) => entry.kind === "request");
+  const log = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.equal(log.firstByteMs, null);
   assert.equal(log.responseBytes, 0);
   assert.equal(log.initialMessage, undefined);

@@ -7,6 +7,7 @@ import { once } from "node:events";
 import { Store } from "../src/store.mjs";
 import { Pool } from "../src/pool.mjs";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 function fixture(t) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "cnb-panel-wake-"));
@@ -23,7 +24,7 @@ function fixture(t) {
   });
   t.after(() => {
     pool.stop();
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    removeAll(fixtureRoot);
   });
   return { store, pool, id: account.id };
 }
@@ -67,7 +68,7 @@ test("official URL-only and mixed responses confirm existing workspaces without 
       assert.ok(current.lastWakeAt);
       assert.equal(current.endpoint, "");
       assert.equal(current.status, "pending");
-      assert.equal(app.store.state.logs[0].status, 200);
+      assert.equal(app.store.logs.all()[0].status, 200);
     });
   }
 });
@@ -118,7 +119,7 @@ test("manual and automatic calls share an actual in-flight workspace start", asy
         { ok: true },
       ]);
       assert.equal(app.pool.wakes.size, 0);
-      assert.equal(app.store.state.logs.filter((log) => log.kind === "wake").length, 1);
+      assert.equal(app.store.logs.all().filter((log) => log.kind === "wake").length, 1);
     });
   }
 });
@@ -165,8 +166,8 @@ test("failed or unconfirmed starts preserve lastWakeAt and allow an immediate ma
       });
       assert.equal(app.store.get(app.id).lastWakeAt, lastWakeAt);
       assert.equal(app.pool.wakes.size, 0);
-      assert.equal(app.store.state.logs.filter((log) => log.kind === "wake").length, 1);
-      assert.ok(app.store.state.logs[0].status >= 400);
+      assert.equal(app.store.logs.all().filter((log) => log.kind === "wake").length, 1);
+      assert.ok(app.store.logs.all()[0].status >= 400);
       rejected = false;
       assert.deepEqual(await app.pool.wake(app.id), { ok: true });
       assert.equal(remote.mock.callCount(), 2);
@@ -204,7 +205,7 @@ test("HTTP failures preserve upstream status and actionable safe diagnostics wit
         return true;
       });
       assert.equal(app.store.get(app.id).lastWakeAt, lastWakeAt);
-      const logs = app.store.state.logs.filter((log) => log.kind === "wake");
+      const logs = app.store.logs.all().filter((log) => log.kind === "wake");
       assert.equal(logs.length, 1);
       assert.equal(logs[0].message, message);
       assert.equal(logs[0].status, status);
@@ -235,7 +236,7 @@ test("network and timeout failures are distinct, safely logged, and never start 
         return true;
       });
       assert.equal(app.store.get(app.id).lastWakeAt, null);
-      const log = app.store.state.logs[0];
+      const log = app.store.logs.all()[0];
       assert.equal(log.message, message);
       assert.equal(log.status, status);
       assert.equal(log.upstreamStatus, null);
@@ -256,7 +257,7 @@ test("the HTTP wake endpoint returns safe 424 JSON for CNB auth failures while t
   t.after(async () => {
     app.server.closeAllConnections();
     await new Promise((resolve) => app.server.close(resolve));
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    removeAll(fixtureRoot);
   });
   app.server.listen(0, "127.0.0.1");
   await once(app.server, "listening");
@@ -308,7 +309,7 @@ test("the HTTP wake endpoint returns safe 424 JSON for CNB auth failures while t
     await overview.body.cancel();
   }
   assert.equal(remote.mock.callCount(), 2);
-  assert.deepEqual(app.store.state.logs.filter((log) => log.kind === "wake").map((log) => log.upstreamStatus), [401, 403]);
+  assert.deepEqual(app.store.logs.all().filter((log) => log.kind === "wake").map((log) => log.upstreamStatus), [401, 403]);
 });
 
 test("CNB JSON explanation fields are shown while unknown fields stay private", async (t) => {
@@ -330,7 +331,7 @@ test("CNB JSON explanation fields are shown while unknown fields stay private", 
         assert.equal(error.message.includes("private-upstream-trace"), false);
         return true;
       });
-      assert.equal(app.store.state.logs[0].upstreamStatus, 403);
+      assert.equal(app.store.logs.all()[0].upstreamStatus, 403);
       assert.equal(app.store.get(app.id).lastWakeAt, null);
     });
   }
@@ -360,7 +361,7 @@ test("CNB explanations redact every account secret and URL-encoded variants befo
     assert.match(message, /\[已隐藏\]/);
     return true;
   });
-  const visible = JSON.stringify({ message, logs: app.store.state.logs });
+  const visible = JSON.stringify({ message, logs: app.store.logs.all() });
   for (const value of variants) assert.equal(visible.includes(value), false);
 });
 
@@ -406,7 +407,7 @@ test("escaped quotes inside credential values never expose their remaining conte
         message = error.message;
         return true;
       });
-      const log = app.store.state.logs[0];
+      const log = app.store.logs.all()[0];
       assert.equal(log.message, message);
       assert.equal(log.status, 403);
       assert.equal(log.upstreamStatus, 403);
@@ -444,8 +445,8 @@ test("unsafe, invalid, incomplete, and oversized error bodies fall back to the H
         assert.doesNotMatch(error.message, /CNB 说明|private-/);
         return true;
       });
-      assert.equal(app.store.state.logs[0].status, 403);
-      assert.equal(app.store.state.logs[0].upstreamStatus, 403);
+      assert.equal(app.store.logs.all()[0].status, 403);
+      assert.equal(app.store.logs.all()[0].upstreamStatus, 403);
     });
   }
 });
@@ -476,7 +477,7 @@ test("error-body reads cancel at the byte limit and preserve HTTP status when re
         return true;
       });
       if (mode === "limit") assert.equal(cancelled, true);
-      assert.equal(app.store.state.logs[0].upstreamStatus, 403);
+      assert.equal(app.store.logs.all()[0].upstreamStatus, 403);
       assert.equal(app.store.get(app.id).lastWakeAt, null);
     });
   }

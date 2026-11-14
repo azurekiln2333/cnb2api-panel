@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const ADMIN = "models-test-admin-secret";
 const GATEWAY = "models-test-gateway-secret";
@@ -59,7 +60,7 @@ async function fixture(t) {
     app.pool.stop();
     app.server.closeAllConnections();
     await new Promise((resolve) => app.server.close(resolve));
-    rmSync(root, { recursive: true, force: true });
+    removeAll(root);
   });
   return { ...app, call, login, account, inventory };
 }

@@ -13,6 +13,7 @@ import { createPanelServer } from "../src/app.mjs";
 import { Store } from "../src/store.mjs";
 import { prepareResponsesRequest } from "../src/responses.mjs";
 import { rewriteRequest, validateRequestOverrides } from "../src/request-overrides.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const ADMIN = "dsh-guard-admin-key";
 const GATEWAY = "dsh-guard-gateway-key";
@@ -96,7 +97,7 @@ async function fixture(t) {
     app.pool.stop();
     await close(app.server);
     await close(worker);
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   const account = app.store.create({ name: "dsh-worker", endpoint, proxyKey: WORKER });
   await app.pool.probe(account.id);
@@ -106,7 +107,7 @@ async function fixture(t) {
     body: JSON.stringify(body),
   });
   // Request logs are newest first.
-  const logs = () => app.store.state.logs.filter((entry) => entry.kind === "request");
+  const logs = () => app.store.logs.all().filter((entry) => entry.kind === "request");
   const latest = () => logs()[0];
   return { ...app, base, directory, calls, post, logs, latest, accountId: account.id };
 }
@@ -461,7 +462,7 @@ test("the DSH switch is validated, persisted, and off preserves the client paylo
 
 test("DSH defaults to enabled for a fresh data directory", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "dsh-default-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  t.after(() => removeAll(directory));
   const store = new Store(directory, { allowLocal: true });
   assert.equal(store.state.settings.dshCompat, true);
 });

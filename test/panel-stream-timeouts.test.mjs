@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const GATEWAY = "long-stream-gateway-key";
 const WORKER = "long-stream-worker-key";
@@ -51,7 +52,7 @@ async function fixture(t, handler) {
     app.pool.stop();
     await close(app.server);
     await close(worker);
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   const created = app.store.create({ name: "long-stream-worker", endpoint, proxyKey: WORKER });
   await app.pool.probe(created.id);
@@ -62,7 +63,7 @@ async function fixture(t, handler) {
   });
   const requestLog = async () => {
     for (let i = 0; i < 400; i++) {
-      const found = app.store.state.logs.find((entry) => entry.kind === "request");
+      const found = app.store.logs.all().find((entry) => entry.kind === "request");
       if (found) return found;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }

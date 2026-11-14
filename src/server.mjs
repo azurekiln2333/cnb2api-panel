@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { createPanelServer } from './app.mjs';
+import { RuntimeMetrics } from './runtime-metrics.mjs';
 
 const flag = (name, value) => {
   if (value === undefined || value === '') return undefined;
@@ -41,7 +42,7 @@ try {
   const port = Number(process.env.PANEL_PORT || 9002);
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error('PANEL_PORT must be a valid port');
-  const { server, pool } = createPanelServer({
+  const { server, pool, store } = createPanelServer({
     adminKey: process.env.PANEL_ADMIN_KEY,
     gatewayKey: process.env.GATEWAY_KEY,
     dataDir: resolve(process.env.PANEL_DATA_DIR || 'data'),
@@ -51,14 +52,19 @@ try {
     ssoBootstrap: ssoBootstrapFromEnv(process.env),
     platformToken: process.env.PLATFORM_TOKEN || '',
   });
+  // Saturation of the event loop is only visible while the process runs, and
+  // the observation replaces no existing metrics, so it starts with the pool.
+  const metrics = new RuntimeMetrics(store);
   server.listen(port, process.env.PANEL_HOST || '127.0.0.1', () => {
     console.log(
       `[panel] http://${process.env.PANEL_HOST || '127.0.0.1'}:${port}`,
     );
     pool.start();
+    metrics.start();
   });
   for (const signal of ['SIGINT', 'SIGTERM'])
     process.on(signal, () => {
+      metrics.stop();
       pool.stop();
       server.close(() => process.exit(0));
       setTimeout(() => process.exit(0), 5000).unref();

@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const frame = (value) => `data: ${JSON.stringify(value)}\n\n`;
 const choice = (delta, finish_reason = null) => ({ choices: [{ index: 0, delta, finish_reason }] });
@@ -49,7 +50,7 @@ async function fixture(t, suffix) {
     app.pool.stop();
     await close(app.server);
     await close(worker);
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   const endpoint = await listen(worker);
   const account = app.store.create({ name: "local-t4-worker", endpoint, proxyKey: "local-t4-worker-fixture" });

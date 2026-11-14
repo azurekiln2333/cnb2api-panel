@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelServer } from "../src/app.mjs";
 import { fetchQuota } from "../src/quota.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const ADMIN = "quota-diagnostics-admin-key";
 const GATEWAY = "quota-diagnostics-gateway-key";
@@ -51,7 +52,7 @@ async function fixture(t, handler, { timeoutMs = 1000 } = {}) {
   t.after(async () => {
     await close(app.server);
     await close(cnb);
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   const login = await fetch(`${base}/api/session`, {
     method: "POST",

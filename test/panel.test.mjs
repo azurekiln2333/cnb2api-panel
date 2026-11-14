@@ -1,13 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { Store, normalizeEndpoint } from '../src/store.mjs';
 import { createPanelServer } from '../src/app.mjs';
+import {
+  diskText,
+  editSettings,
+  removeAll,
+} from "./support/sqlite-fixture.mjs";
 
 const ADMIN = 'panel-test-admin-key';
 const GATEWAY = 'panel-test-client-key';
@@ -57,7 +62,7 @@ async function fixture(t, { logDirectoryName } = {}) {
   cookie = login.headers.get('set-cookie').split(';')[0];
   t.after(async () => {
     await close(app.server);
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    removeAll(fixtureRoot);
   });
   return { ...app, base, directory, call };
 }
@@ -131,19 +136,23 @@ const completion = (
 
 test('the server writes and reads audit logs from an explicitly configured directory outside data', async (t) => {
   const app = await fixture(t, { logDirectoryName: 'operator-logs' });
-  const auditFile = join(app.directory, '../operator-logs/audit.log');
-  assert.equal(app.store.logFiles.audit, auditFile);
+  assert.equal(app.store.logs.file, join(app.directory, '../operator-logs/logs.sqlite'));
   const audit = await (await app.call('/api/logs/audit')).json();
   assert.ok(audit.logs.some((entry) => entry.action === 'auth.login'));
-  assert.ok(readFileSync(auditFile, 'utf8').includes('auth.login'));
+  assert.ok(
+    app.store.logs
+      .all()
+      .some((entry) => entry.action === 'auth.login'),
+  );
   assert.equal(existsSync(join(app.directory, 'audit.log')), false);
+  assert.equal(existsSync(join(app.directory, 'logs.sqlite')), false);
 });
 
 test('account secrets survive restart encrypted, remain hidden in reads, and edits preserve blank credentials', async (t) => {
   const app = await fixture(t);
   const created = await account(app, null, { pat: 'private-personal-token' });
   assert.equal(created.account.hasPat, true);
-  const disk = readFileSync(join(app.directory, 'accounts.json'), 'utf8');
+  const disk = diskText(app.directory);
   for (const secret of [
     WORKER,
     'private-personal-token',
@@ -306,9 +315,7 @@ test('existing registration tokens are imported, encrypted, preserved on blank e
     new Store(app.directory).get(first.account.id).secrets.registrationToken,
     token,
   );
-  assert.ok(
-    !readFileSync(join(app.directory, 'accounts.json'), 'utf8').includes(token),
-  );
+  assert.ok(!diskText(app.directory).includes(token));
   for (const input of [{ name: '保留原密钥' }, { registrationToken: '' }]) {
     const edited = await app.call(`/api/accounts/${first.account.id}`, {
       method: 'PATCH',
@@ -619,8 +626,16 @@ test('request, audit and system APIs remain separate and audits include successf
     assert.ok(!JSON.stringify(audits).includes(secret));
   for (const channel of ['requests', 'audit', 'system']) {
     assert.equal((await fetch(`${app.base}/api/logs/${channel}`)).status, 401);
-    const persisted = readFileSync(app.store.logFiles[channel], 'utf8').trim().split('\n').map(JSON.parse);
-    assert.ok(persisted.every((entry) => channel === 'requests' ? entry.kind === 'request' : channel === 'audit' ? entry.kind === 'audit' : !['request', 'audit'].includes(entry.kind)));
+    const persisted = app.store.logs
+      .all()
+      .filter((entry) =>
+        channel === 'requests'
+          ? entry.kind === 'request'
+          : channel === 'audit'
+            ? ['account', 'audit'].includes(entry.kind)
+            : !['request', 'account', 'audit'].includes(entry.kind),
+      );
+    assert.ok(persisted.length > 0);
   }
 });
 
@@ -863,9 +878,9 @@ test('disabling session affinity restores per-request balancing and persists acr
 test('existing saved settings receive new defaults while preserving configured values', async (t) => {
   const app = await fixture(t);
   app.store.settings({ strategy: 'failover', maxAttempts: 5 });
-  const saved = JSON.parse(readFileSync(app.store.file, 'utf8'));
-  delete saved.settings.sessionAffinity;
-  writeFileSync(app.store.file, JSON.stringify(saved));
+  editSettings(app.directory, (settings) => {
+    delete settings.sessionAffinity;
+  });
   const restored = new Store(app.directory);
   assert.equal(restored.state.settings.sessionAffinity, true);
   assert.equal(restored.state.settings.strategy, 'failover');
@@ -892,7 +907,7 @@ test('429 triggers cooldown and switches to a lower priority account without lea
   assert.equal(a.calls.length, 1);
   assert.equal(b.calls.length, 2);
   assert.ok(
-    !JSON.stringify(app.store.state.logs).includes('sensitive upstream detail'),
+    !JSON.stringify(app.store.logs.all()).includes('sensitive upstream detail'),
   );
 });
 

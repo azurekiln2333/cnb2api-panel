@@ -3,22 +3,24 @@ import {
   randomUUID,
   createCipheriv,
   createDecipheriv,
+  createHash,
 } from "node:crypto";
 import {
   mkdirSync,
   readFileSync,
   writeFileSync,
-  statSync,
+  renameSync,
   existsSync,
 } from "node:fs";
 import { resolve, join } from "node:path";
 import { addTokenUsage, emptyTokenUsage } from "./token-usage.mjs";
 import { loadCreditHistory, loadReportedHistory } from "./credit-rates.mjs";
-import {
+import {
   backfillDaily,
   emptyDaily,
   loadDaily,
   recordDaily,
+  usageDate,
 } from "./usage-history.mjs";
 import { loadRegistrationRelay, validateRegistrationRelay } from "./registration-relay.mjs";
 import {
@@ -30,12 +32,8 @@ import {
   validateRequestOverrides,
   validateUpstreamHeaders,
 } from "./request-overrides.mjs";
-import {
-  FileStorage,
-  LOG_FILES,
-  logChannel,
-  retainLogs,
-} from "./file-storage.mjs";
+import { Connection, LogStore } from "./db.mjs";
+import { readLegacyState } from "./legacy-store.mjs";
 
 const RUNTIME_FIELDS = [
   "status",
@@ -402,33 +400,98 @@ export function publicAccount(account) {
   };
 }
 
+const SLOW_WRITE_MS = 50;
+const SLOW_WINDOW_MS = 60_000;
+// Legacy documents are imported once by the legacy importer; until that has run
+// the panel must never start on an empty database sitting beside them.
+const LEGACY_FILES = [
+  "panel.json",
+  "accounts.json",
+  "stats.json",
+  "store.pending",
+];
+
+const SCHEMA_MIGRATIONS = [  `CREATE TABLE settings (
+     id INTEGER PRIMARY KEY CHECK (id = 1),
+     settings TEXT NOT NULL,
+     sso TEXT NOT NULL
+   );
+   CREATE TABLE accounts (
+     id TEXT PRIMARY KEY,
+     position INTEGER NOT NULL UNIQUE CHECK (position >= 0),
+     config TEXT NOT NULL,
+     secrets TEXT NOT NULL,
+     runtime TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   );
+   CREATE TABLE stats_hourly (
+     at TEXT PRIMARY KEY,
+     data TEXT NOT NULL
+   );
+   CREATE TABLE stats_daily (
+     day TEXT PRIMARY KEY,
+     data TEXT NOT NULL
+   );
+   CREATE TABLE meta (
+     key TEXT PRIMARY KEY,
+     value TEXT NOT NULL
+   );
+   CREATE TABLE legacy_imports (
+     source TEXT PRIMARY KEY,
+     checksum TEXT NOT NULL,
+     backup TEXT NOT NULL,
+     imported_at TEXT NOT NULL,
+     completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))
+   );`,
+];
+
+// Account definition (everything the operator edits) versus runtime state
+// (everything the panel observes). Splitting them keeps a health check from
+// rewriting and re-encrypting credentials.
+const configOf = (account) =>
+  Object.fromEntries(
+    Object.entries(account).filter(
+      ([key]) => key !== "secrets" && !RUNTIME_FIELDS.includes(key),
+    ),
+  );
+const runtimeOf = (account) =>
+  Object.fromEntries(
+    RUNTIME_FIELDS.filter((key) => account[key] !== undefined).map((key) => [
+      key,
+      account[key],
+    ]),
+  );
+
+const checksum = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const backupPattern = (source) =>
+  new RegExp(`^${source.replace(".", "\\.")}\\.migrated-\\d+\\.bak$`);
+
+function parseStoredJson(text, label) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Parser messages can quote the stored document, credentials included.
+    throw new Error(`Invalid ${label} JSON; restore the data backup`);
+  }
+}
+
 export class Store {
   constructor(directory, { allowLocal = false, logDir, publicUrl = "" } = {}) {
     this.directory = resolve(directory);
     this.allowLocal = allowLocal;
     this.publicUrl = publicUrl;
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-    this.storage = new FileStorage(this.directory, logDir);
-    this.logDirectory = this.storage.logDirectory;
-    this.file = join(this.directory, "panel.json");
-    this.accountsFile = join(this.directory, "accounts.json");
-    this.statsFile = join(this.directory, "stats.json");
-    this.logFiles = Object.fromEntries(
-      Object.entries(LOG_FILES).map(([key, name]) => [
-        key,
-        this.storage.path(name),
-      ]),
-    );
-    if (
-      !existsSync(this.file) &&
-      (existsSync(this.accountsFile) || existsSync(this.statsFile))
-    )
-      throw new Error(
-        "data/panel.json is missing; restore the panel configuration backup",
-      );
+    this.databaseFile = join(this.directory, "panel.sqlite");
+    this.logs = new LogStore(logDir ?? resolve(this.directory, "../logs"), {
+      dataDirectory: this.directory,
+    });
+    this.logDirectory = this.logs.directory;
     const keyFile = join(this.directory, "master.key");
     if (!existsSync(keyFile)) {
-      if (existsSync(this.file) || existsSync(this.accountsFile))
+      const existing =
+        existsSync(this.databaseFile) ||
+        LEGACY_FILES.some((name) => existsSync(join(this.directory, name)));
+      if (existing)
         throw new Error(
           "data/master.key is missing; restore the original encryption key",
         );
@@ -439,154 +502,305 @@ export class Store {
       throw new Error(
         "data/master.key is invalid; restore the original encryption key",
       );
-    this.logLines = { requests: 0, audit: 0, system: 0 };
-    this.snapshots = {};
-    if (existsSync(this.file)) {
-      const original = readFileSync(this.file, "utf8");
-      const saved = JSON.parse(original);
-      if (![1, 2].includes(saved.version))
-        throw new Error("Unsupported panel data version");
-      const legacy = saved.version === 1;
-      const accounts = legacy
-        ? { accounts: saved.accounts }
-        : JSON.parse(readFileSync(this.accountsFile, "utf8"));
-      const stats = legacy
-        ? saved
-        : JSON.parse(readFileSync(this.statsFile, "utf8"));
+    this.connection = new Connection(this.databaseFile);
+    this.persisted = {
+      settings: null,
+      accounts: new Map(),
+      hourly: new Map(),
+      daily: new Map(),
+      dailyAccounts: null,
+      meta: new Map(),
+    };
+    this.secretCache = new Map();
+    this.ssoSecret = null;
+    this.writes = 0;
+    this.slowWrites = 0;
+    this.maxWriteMs = 0;
+    this.lastSlowWriteAt = null;
+    this.slowWindow = null;
+    try {
+      this.connection.migrate(SCHEMA_MIGRATIONS, "panel");
+      this.initialize();
+      this.finishLegacyBackups();
+      this.state = this.load();
+      refreshQuotaProtection(this.state);
+      this.assertNoLegacyFiles();
+    } catch (error) {
+      this.close();
+      throw error;
+    }
+  }
+
+  get db() {
+    return this.connection;
+  }
+
+  initialize() {
+    if (this.connection.get("SELECT id FROM settings WHERE id = 1")) return;
+    if (
+      this.connection.get("SELECT 1 FROM accounts LIMIT 1") ||
+      this.connection.get("SELECT 1 FROM meta LIMIT 1") ||
+      this.connection.get("SELECT 1 FROM stats_hourly LIMIT 1")
+    )
+      throw new Error(
+        "Panel settings are missing; restore the data backup",
+      );
+    const legacy = readLegacyState(this.directory, {
+      key: this.key,
+      allowLocal: this.allowLocal,
+      publicUrl: this.publicUrl,
+    });
+    if (!legacy.found) {
+      this.writeFresh();
+      return;
+    }
+    // One transaction writes every row and the manifest, so a crash before the
+    // renames can be resumed and a crash before the commit leaves no database.
+    const imported = legacy.sources.map((source) => ({
+      source: source.name,
+      checksum: source.checksum,
+      backup: `${source.name}.migrated-${Date.now()}.bak`,
+    }));
+    const state = { version: 2, ...legacy.state };
+    this.connection.transaction(() => {
+      this.persistAll(state);
+      for (const entry of imported)
+        this.connection.run(
+          `INSERT INTO legacy_imports (source, checksum, backup, imported_at)
+           VALUES (?, ?, ?, ?)`,
+          entry.source,
+          entry.checksum,
+          entry.backup,
+          new Date().toISOString(),
+        );
+    });
+    this.connection.checkpoint();
+  }
+
+  // SQLite commits before the files are renamed. The manifest makes a crash
+  // between these operations recoverable without reimporting or overwriting.
+  finishLegacyBackups() {
+    for (const imported of this.connection.all(
+      "SELECT source, checksum, backup, completed FROM legacy_imports",
+    )) {
       if (
-        !Array.isArray(accounts.accounts) ||
-        (!legacy && (accounts.version !== 1 || stats.version !== 1))
-      )
-        throw new Error("Unsupported account or statistics data version");
-      if (
-        !legacy &&
-        (!stats.accounts ||
-          typeof stats.accounts !== "object" ||
-          Array.isArray(stats.accounts) ||
-          !Array.isArray(stats.hourly) ||
-          !stats.tokenUsage ||
-          typeof stats.tokenUsage !== "object" ||
-          typeof stats.tokenUsageStartedAt !== "string" ||
-          !saved.settings ||
-          typeof saved.settings !== "object" ||
-          Array.isArray(saved.settings) ||
-          !saved.sso ||
-          typeof saved.sso.clientSecret !== "string")
+        !LEGACY_FILES.includes(imported.source) ||
+        !backupPattern(imported.source).test(imported.backup)
       )
         throw new Error(
-          "Invalid panel or statistics document; restore the data backup",
+          "Invalid legacy import manifest; restore the data backup",
         );
-      const logs = [];
-      if (!legacy)
-        for (const channel of Object.keys(LOG_FILES)) {
-          const loaded = this.storage.readLog(channel);
-          logs.push(...loaded.entries);
-          this.logLines[channel] = loaded.lines;
-        }
-      const settings = { ...DEFAULT_SETTINGS, ...saved.settings };
-      if (typeof settings.dshCompat !== "boolean")
-        throw new Error("Invalid DSH compatibility setting");
-      if (typeof settings.claudeCodeCompat !== "boolean")
-        throw new Error("Invalid Claude Code compatibility setting");
-      try {
-        settings.requestOverrides = validateRequestOverrides(settings.requestOverrides);
-        settings.upstreamHeaders = validateUpstreamHeaders(settings.upstreamHeaders);
-        settings.registrationRelay = validateRegistrationRelay(settings.registrationRelay, { allowLocal, publicUrl });
-        settings.quotaProtection = validateQuotaProtection(settings.quotaProtection);
-        settings.inferenceProbe = validateInferenceProbe(settings.inferenceProbe);
-      } catch {
-        throw new Error("Invalid request override settings; restore the data backup");
+      const source = join(this.directory, imported.source);
+      const backup = join(this.directory, imported.backup);
+      if (imported.completed) {
+        if (existsSync(source))
+          throw new Error(
+            "Legacy panel data reappeared after migration; keep one source of truth",
+          );
+        continue;
       }
-      const hourly = (stats.hourly || []).map((b) => ({
-        ...b,
-        tokenUsage: { ...emptyTokenUsage(), ...b.tokenUsage },
-      }));
-      // Documents written before the daily rollup existed rebuild it from the
-      // hourly window. The next commit persists the rebuilt rollup.
-      const daily =
-        stats.daily === undefined ? backfillDaily(hourly) : loadDaily(stats.daily);
-      this.state = {
-        version: 2,
-        settings,
-        registrationRelay: loadRegistrationRelay(stats.registrationRelay),
-        logs: legacy
-          ? retainLogs(saved.logs || [])
-          : logs.sort((a, b) => b.at.localeCompare(a.at)),
-        tokenUsage: { ...emptyTokenUsage(), ...stats.tokenUsage },
-        tokenUsageStartedAt:
-          stats.tokenUsageStartedAt || new Date().toISOString(),
-        // Documents written before Credits rate estimates have no history.
-        creditHistory: legacy ? {} : loadCreditHistory(stats.creditHistory),
-        hourly,
-        daily,
-        accounts: accounts.accounts.map((a) => ({
+      if (existsSync(source)) {
+        if (checksum(readFileSync(source)) !== imported.checksum)
+          throw new Error(
+            "Legacy panel data changed during migration; preserve both copies before restarting",
+          );
+        if (existsSync(backup))
+          throw new Error(
+            "Legacy panel backup already exists; preserve both copies before restarting",
+          );
+        renameSync(source, backup);
+      }
+      if (
+        !existsSync(backup) ||
+        checksum(readFileSync(backup)) !== imported.checksum
+      )
+        throw new Error(
+          "Legacy panel backup is missing or changed; restore it before restarting",
+        );
+      this.connection.transaction(() =>
+        this.connection.run(
+          "UPDATE legacy_imports SET completed = 1 WHERE source = ?",
+          imported.source,
+        ),
+      );
+    }
+  }
+
+  // SQLite and the old documents must never both be a source of truth, not even
+  // after a migration brought the panel back to an older image.
+  assertNoLegacyFiles() {
+    const legacy = LEGACY_FILES.filter((name) =>
+      existsSync(join(this.directory, name)),
+    );
+    if (legacy.length)
+      throw new Error(
+        `Legacy panel data (${legacy.join(", ")}) exists beside the SQLite database; ` +
+          "keep one source of truth before starting",
+      );
+  }
+
+  writeFresh() {
+    const state = {
+      version: 2,
+      accounts: [],
+      settings: {
+        ...DEFAULT_SETTINGS,
+        registrationRelay: { enabled: false, servers: [] },
+      },
+      registrationRelay: loadRegistrationRelay(),
+      sso: { ...DEFAULT_SSO },
+      hourly: [],
+      daily: emptyDaily(),
+      tokenUsage: emptyTokenUsage(),
+      tokenUsageStartedAt: new Date().toISOString(),
+      creditHistory: {},
+    };
+    this.connection.transaction(() => this.persistAll(state));
+    this.connection.checkpoint();
+  }
+
+  load() {
+    const saved = this.connection.get(
+      "SELECT settings, sso FROM settings WHERE id = 1",
+    );
+    if (!saved)
+      throw new Error("Panel settings are missing; restore the data backup");
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      ...parseStoredJson(saved.settings, "panel settings"),
+    };
+    if (typeof settings.dshCompat !== "boolean")
+      throw new Error("Invalid DSH compatibility setting");
+    if (typeof settings.claudeCodeCompat !== "boolean")
+      throw new Error("Invalid Claude Code compatibility setting");
+    try {
+      settings.requestOverrides = validateRequestOverrides(
+        settings.requestOverrides,
+      );
+      settings.upstreamHeaders = validateUpstreamHeaders(
+        settings.upstreamHeaders,
+      );
+      settings.registrationRelay = validateRegistrationRelay(
+        settings.registrationRelay,
+        { allowLocal: this.allowLocal, publicUrl: this.publicUrl },
+      );
+      settings.quotaProtection = validateQuotaProtection(
+        settings.quotaProtection,
+      );
+      settings.inferenceProbe = validateInferenceProbe(settings.inferenceProbe);
+    } catch {
+      throw new Error(
+        "Invalid request override settings; restore the data backup",
+      );
+    }
+    const storedSso = parseStoredJson(saved.sso, "panel SSO");
+    const sso = this.loadSso(storedSso);
+    this.ssoSecret = {
+      plain: typeof sso.clientSecret === "string" ? sso.clientSecret : "",
+      value:
+        typeof storedSso?.clientSecret === "string"
+          ? storedSso.clientSecret
+          : "",
+    };
+    this.persisted.settings = { settings: saved.settings, sso: saved.sso };
+    const accounts = this.connection
+      .all(
+        `SELECT id, position, config, secrets, runtime, updated_at
+         FROM accounts ORDER BY position`,
+      )
+      .map((row) => {
+        const config = parseStoredJson(row.config, "account") || {};
+        const runtime = parseStoredJson(row.runtime, "account runtime") || {};
+        const account = {
           quotaProtectionOverride: false,
           ...runtimeDefaults(),
-          ...a,
-          // Accounts saved before this field existed load as "inherit".
-          upstreamMode: normalizeUpstreamMode(a.upstreamMode, { lenient: true }),
-          ...(!legacy
-            ? Object.fromEntries(
-                RUNTIME_FIELDS.filter(
-                  (key) => stats.accounts?.[a.id]?.[key] !== undefined,
-                ).map((key) => [key, stats.accounts[a.id][key]]),
-              )
-            : {}),
-          tokenUsage: {
-            ...emptyTokenUsage(),
-            ...(legacy ? a.tokenUsage : stats.accounts?.[a.id]?.tokenUsage),
-          },
-          probeUsage: {
-            ...emptyProbeUsage(),
-            ...(legacy ? null : stats.accounts?.[a.id]?.probeUsage),
-          },
-          creditReportHistory: legacy
-            ? null
-            : loadReportedHistory(stats.accounts?.[a.id]?.creditReportHistory),
-          secrets: this.decrypt(a.secrets),
-        })),
-      };
-      if (this.state.accounts.some((account) => typeof account.quotaProtectionOverride !== "boolean"))
-        throw new Error("Invalid quota protection override; restore the data backup");
-      this.state.sso = this.loadSso(saved.sso);
-      refreshQuotaProtection(this.state);
-      if (legacy) {
-        const backup = join(this.directory, "panel.json.v1.bak");
-        if (!existsSync(backup))
-          writeFileSync(backup, original, {
-            mode: 0o600,
-            flag: "wx",
-            flush: true,
-          });
-        this.persist(this.state, true);
-      } else {
-        this.snapshots = this.documents(this.state);
-        if (stats.registrationRelay === undefined) {
-          this.snapshots["stats.json"] = "";
-          this.persist(this.state);
-        }
-      }
-    } else {
-      this.state = {
-        version: 2,
-        accounts: [],
-        settings: { ...DEFAULT_SETTINGS, registrationRelay: { enabled: false, servers: [] } },
-        registrationRelay: loadRegistrationRelay(),
-        sso: { ...DEFAULT_SSO },
-        logs: [],
-        hourly: [],
-        daily: emptyDaily(),
-        tokenUsage: emptyTokenUsage(),
-        tokenUsageStartedAt: new Date().toISOString(),
-        creditHistory: {},
-      };
-      this.persist(this.state, true);
+          ...config,
+          upstreamMode: normalizeUpstreamMode(config.upstreamMode, {
+            lenient: true,
+          }),
+          ...runtime,
+          tokenUsage: { ...emptyTokenUsage(), ...runtime.tokenUsage },
+          probeUsage: { ...emptyProbeUsage(), ...runtime.probeUsage },
+          creditReportHistory: loadReportedHistory(runtime.creditReportHistory),
+          secrets: this.decrypt(row.secrets),
+        };
+        if (typeof account.quotaProtectionOverride !== "boolean")
+          throw new Error(
+            "Invalid quota protection override; restore the data backup",
+          );
+        this.persisted.accounts.set(row.id, {
+          position: row.position,
+          config: row.config,
+          secrets: row.secrets,
+          runtime: row.runtime,
+          updatedAt: row.updated_at,
+        });
+        this.secretCache.set(row.id, {
+          json: JSON.stringify(account.secrets ?? {}),
+          value: row.secrets,
+        });
+        return account;
+      });
+    const hourly = this.connection
+      .all("SELECT at, data FROM stats_hourly ORDER BY at")
+      .map((row) => {
+        const bucket = parseStoredJson(row.data, "hourly bucket") || {};
+        this.persisted.hourly.set(row.at, row.data);
+        return {
+          ...bucket,
+          tokenUsage: { ...emptyTokenUsage(), ...bucket.tokenUsage },
+        };
+      });
+    const days = {};
+    for (const row of this.connection.all(
+      "SELECT day, data FROM stats_daily ORDER BY day",
+    )) {
+      days[row.day] = parseStoredJson(row.data, "daily rollup");
+      this.persisted.daily.set(row.day, row.data);
     }
+    const accountsRow = this.connection.get(
+      "SELECT value FROM meta WHERE key = 'dailyAccounts'",
+    );
+    this.persisted.dailyAccounts = accountsRow ? accountsRow.value : null;
+    const daily = Object.keys(days).length
+      ? loadDaily({
+          accounts: accountsRow
+            ? parseStoredJson(accountsRow.value, "daily accounts")
+            : [],
+          days,
+        })
+      : // A database written before the rollup existed rebuilds it from the
+        // hourly window; storage written by this build always has both.
+        hourly.length
+        ? backfillDaily(hourly)
+        : loadDaily({ accounts: [], days });
+    const meta = new Map();
+    for (const row of this.connection.all("SELECT key, value FROM meta"))
+      if (row.key !== "dailyAccounts") meta.set(row.key, row.value);
+    this.persisted.meta = meta;
+    const stored = (key) =>
+      meta.has(key) ? parseStoredJson(meta.get(key), key) : undefined;
+    return {
+      version: 2,
+      settings,
+      sso,
+      accounts,
+      hourly,
+      daily,
+      tokenUsage: { ...emptyTokenUsage(), ...stored("tokenUsage") },
+      tokenUsageStartedAt:
+        typeof stored("tokenUsageStartedAt") === "string"
+          ? stored("tokenUsageStartedAt")
+          : new Date().toISOString(),
+      // Documents written before Credits rate estimates have no history.
+      creditHistory: loadCreditHistory(stored("creditHistory")),
+      registrationRelay: loadRegistrationRelay(stored("registrationRelay")),
+    };
   }
 
   loadSso(saved) {
     const sso = withSsoDefaults(saved);
-    // panel.json keeps the client secret encrypted with master.key.
+    // The stored client secret is encrypted with master.key.
     if (typeof saved?.clientSecret === "string" && saved.clientSecret)
       sso.clientSecret = this.decrypt(saved.clientSecret);
     return sso;
@@ -624,112 +838,293 @@ export class Store {
     );
   }
 
-  documents(state) {
+  // Credentials are encrypted once and reused while their plaintext is
+  // unchanged, so routine runtime writes never touch AES or the secrets column.
+  secretsFor(account) {
+    const json = JSON.stringify(account.secrets ?? {});
+    const cached = this.secretCache.get(account.id);
+    if (cached && cached.json === json) return cached.value;
+    const value = this.encrypt(account.secrets ?? {});
+    this.secretCache.set(account.id, { json, value });
+    return value;
+  }
+
+  encryptSecret(plain) {
+    const value = typeof plain === "string" ? plain : "";
+    if (this.ssoSecret && this.ssoSecret.plain === value)
+      return this.ssoSecret.value;
+    const encrypted = this.encrypt(value);
+    this.ssoSecret = { plain: value, value: encrypted };
+    return encrypted;
+  }
+
+  saveSettings(state) {
+    const settings = JSON.stringify(state.settings);
+    const sso = JSON.stringify({
+      ...withSsoDefaults(state.sso),
+      clientSecret: this.encryptSecret(state.sso?.clientSecret),
+    });
+    if (
+      this.persisted.settings &&
+      this.persisted.settings.settings === settings &&
+      this.persisted.settings.sso === sso
+    )
+      return false;
+    this.connection.run(
+      `INSERT INTO settings (id, settings, sso) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET settings = excluded.settings, sso = excluded.sso`,
+      settings,
+      sso,
+    );
+    this.persisted.settings = { settings, sso };
+    return true;
+  }
+
+  saveAccounts(accounts) {
+    let durable = false;
+    const order = new Map();
+    accounts.forEach((account, position) => {
+      if (typeof account.id !== "string" || !account.id)
+        throw new Error("An account without an id cannot be persisted");
+      order.set(account.id, position);
+    });
+    for (const id of [...this.persisted.accounts.keys()])
+      if (!order.has(id)) {
+        this.connection.run("DELETE FROM accounts WHERE id = ?", id);
+        this.persisted.accounts.delete(id);
+        this.secretCache.delete(id);
+      }
+    // A reorder can cross an occupied position; shifting the whole table by a
+    // large offset first keeps the UNIQUE constraint satisfied at every step.
+    const reordering = [...this.persisted.accounts].some(
+      ([id, cached]) => order.get(id) !== undefined && cached.position !== order.get(id),
+    );
+    if (reordering) {
+      this.connection.exec("UPDATE accounts SET position = position + 1000000");
+      for (const cached of this.persisted.accounts.values())
+        cached.position += 1000000;
+    }
+    accounts.forEach((account, position) => {
+      const config = JSON.stringify(configOf(account));
+      const runtime = JSON.stringify(runtimeOf(account));
+      const secrets = this.secretsFor(account);
+      const updatedAt =
+        typeof account.updatedAt === "string" ? account.updatedAt : "";
+      const cached = this.persisted.accounts.get(account.id);
+      if (!cached) {
+        this.connection.run(
+          `INSERT INTO accounts (id, position, config, secrets, runtime, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          account.id,
+          position,
+          config,
+          secrets,
+          runtime,
+          updatedAt,
+        );
+        this.persisted.accounts.set(account.id, {
+          position,
+          config,
+          secrets,
+          runtime,
+          updatedAt,
+        });
+        durable = true;
+        return;
+      }
+      const assignments = [];
+      const values = [];
+      if (cached.config !== config) {
+        assignments.push("config = ?");
+        values.push(config);
+        durable = true;
+      }
+      if (cached.secrets !== secrets) {
+        assignments.push("secrets = ?");
+        values.push(secrets);
+        durable = true;
+      }
+      if (cached.runtime !== runtime) {
+        assignments.push("runtime = ?");
+        values.push(runtime);
+      }
+      if (cached.position !== position) {
+        assignments.push("position = ?");
+        values.push(position);
+      }
+      if (cached.updatedAt !== updatedAt) {
+        assignments.push("updated_at = ?");
+        values.push(updatedAt);
+        durable = true;
+      }
+      if (!assignments.length) return;
+      this.connection.run(
+        `UPDATE accounts SET ${assignments.join(", ")} WHERE id = ?`,
+        ...values,
+        account.id,
+      );
+      Object.assign(cached, { position, config, secrets, runtime, updatedAt });
+    });
+    return durable;
+  }
+
+  saveHourlyBucket(bucket) {
+    const data = JSON.stringify(bucket);
+    if (this.persisted.hourly.get(bucket.at) === data) return;
+    this.connection.run(
+      `INSERT INTO stats_hourly (at, data) VALUES (?, ?)
+       ON CONFLICT(at) DO UPDATE SET data = excluded.data`,
+      bucket.at,
+      data,
+    );
+    this.persisted.hourly.set(bucket.at, data);
+  }
+
+  deleteHourly(at) {
+    if (!this.persisted.hourly.has(at)) return;
+    this.connection.run("DELETE FROM stats_hourly WHERE at = ?", at);
+    this.persisted.hourly.delete(at);
+  }
+
+  saveHourly(hourly) {
+    const seen = new Set();
+    for (const bucket of hourly) {
+      seen.add(bucket.at);
+      this.saveHourlyBucket(bucket);
+    }
+    for (const at of [...this.persisted.hourly.keys()])
+      if (!seen.has(at)) this.deleteHourly(at);
+  }
+
+  saveDaily(daily, only) {
+    const days = daily?.days && typeof daily.days === "object" ? daily.days : {};
+    const keys = Object.keys(days);
+    const accounts = JSON.stringify(daily?.accounts ?? []);
+    if (this.persisted.dailyAccounts !== accounts) {
+      this.connection.run(
+        `INSERT INTO meta (key, value) VALUES ('dailyAccounts', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        accounts,
+      );
+      this.persisted.dailyAccounts = accounts;
+    }
+    // Retention and account renumbering rewrite every day at once, so a change
+    // in the number of days falls back to a full comparison.
+    const full = !only || keys.length !== this.persisted.daily.size;
+    const targets = full ? keys : keys.filter((day) => only.has(day));
+    for (const day of targets) {
+      const data = JSON.stringify(days[day]);
+      if (this.persisted.daily.get(day) === data) continue;
+      this.connection.run(
+        `INSERT INTO stats_daily (day, data) VALUES (?, ?)
+         ON CONFLICT(day) DO UPDATE SET data = excluded.data`,
+        day,
+        data,
+      );
+      this.persisted.daily.set(day, data);
+    }
+    if (full)
+      for (const day of [...this.persisted.daily.keys()])
+        if (!days[day]) {
+          this.connection.run("DELETE FROM stats_daily WHERE day = ?", day);
+          this.persisted.daily.delete(day);
+        }
+  }
+
+  saveMeta(state) {
+    const entries = {
+      tokenUsage: JSON.stringify(state.tokenUsage),
+      tokenUsageStartedAt: JSON.stringify(state.tokenUsageStartedAt),
+      creditHistory: JSON.stringify(state.creditHistory || {}),
+      registrationRelay: JSON.stringify(state.registrationRelay),
+    };
+    for (const [key, value] of Object.entries(entries)) {
+      if (this.persisted.meta.get(key) === value) continue;
+      this.connection.run(
+        `INSERT INTO meta (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        key,
+        value,
+      );
+      this.persisted.meta.set(key, value);
+    }
+  }
+
+  persistAll(state) {
+    const durableSettings = this.saveSettings(state);
+    const durableAccounts = this.saveAccounts(state.accounts);
+    this.saveHourly(state.hourly);
+    this.saveDaily(state.daily);
+    this.saveMeta(state);
+    return durableSettings || durableAccounts;
+  }
+
+  // Account definitions, SSO and settings are written rarely but must land on
+  // disk; the WAL checkpoint after the commit provides that.
+  cloneState() {
+    const state = this.state;
     return {
-      "accounts.json": JSON.stringify({
-        version: 1,
-        accounts: state.accounts.map((a) =>
-          Object.fromEntries(
-            Object.entries(a).filter(([key]) => !RUNTIME_FIELDS.includes(key)),
-          ),
-        ),
-      }),
-      "stats.json": JSON.stringify({
-        version: 1,
-        hourly: state.hourly,
-        daily: state.daily,
-        tokenUsage: state.tokenUsage,
-        tokenUsageStartedAt: state.tokenUsageStartedAt,
-        registrationRelay: state.registrationRelay,
-        creditHistory: state.creditHistory || {},
-        accounts: Object.fromEntries(
-          state.accounts.map((a) => [
-            a.id,
-            Object.fromEntries(
-              RUNTIME_FIELDS.filter((key) => a[key] !== undefined).map(
-                (key) => [key, a[key]],
-              ),
-            ),
-          ]),
-        ),
-      }),
-      "panel.json": JSON.stringify({
-        version: 2,
-        settings: state.settings,
-        sso: withSsoDefaults(state.sso),
-      }),
+      ...state,
+      settings: structuredClone(state.settings),
+      sso: structuredClone(state.sso),
+      accounts: state.accounts.map((account) => structuredClone(account)),
+      tokenUsage: { ...state.tokenUsage },
+      creditHistory: structuredClone(state.creditHistory),
+      registrationRelay: structuredClone(state.registrationRelay),
+      // commit() callers change accounts, settings, SSO or relay state only;
+      // hourly and daily buckets are written by record() alone.
+      hourly: state.hourly,
+      daily: state.daily,
     };
   }
 
-  persist(next, initialize = false) {
-    const documents = this.documents(next);
-    const operations = [];
-    for (const name of ["accounts.json", "stats.json", "panel.json"]) {
-      if (documents[name] === this.snapshots[name]) continue;
-      const data = JSON.parse(documents[name]);
-      if (name === "accounts.json")
-        for (const account of data.accounts)
-          account.secrets = this.encrypt(account.secrets);
-      if (name === "panel.json")
-        data.sso.clientSecret = this.encrypt(data.sso.clientSecret);
-      operations.push({
-        type: "replace",
-        file: name,
-        text: JSON.stringify(data),
-      });
-    }
-    const counts = { ...this.logLines };
-    for (const [channel, file] of Object.entries(LOG_FILES)) {
-      const previous = (initialize ? [] : this.state.logs).filter(
-        (entry) => logChannel(entry) === channel,
-      );
-      const entries = next.logs.filter(
-        (entry) => logChannel(entry) === channel,
-      );
-      if (!initialize && JSON.stringify(previous) === JSON.stringify(entries))
-        continue;
-      const append =
-        !initialize &&
-        counts[channel] < 2000 &&
-        entries.length &&
-        JSON.stringify(entries.slice(1)) ===
-          JSON.stringify(previous.slice(0, 999));
-      if (append) {
-        const offset = existsSync(this.logFiles[channel])
-          ? statSync(this.logFiles[channel]).size
-          : 0;
-        operations.push({
-          type: "append",
-          file,
-          offset,
-          text: `${JSON.stringify(entries[0])}\n`,
-        });
-        counts[channel]++;
-      } else {
-        operations.push({
-          type: "replace",
-          file,
-          text: [...entries]
-            .reverse()
-            .map((entry) => `${JSON.stringify(entry)}\n`)
-            .join(""),
-        });
-        counts[channel] = entries.length;
-      }
-    }
-    this.storage.write(operations);
-    this.snapshots = documents;
-    this.logLines = counts;
-  }
-
-  // Publish state only after all recoverable disk operations complete.
   commit(mutate) {
-    const next = structuredClone(this.state);
+    const started = Date.now();
+    const next = this.cloneState();
     const result = mutate(next);
     refreshQuotaProtection(next);
-    this.persist(next);
+    const durable = this.connection.transaction(() => this.persistAll(next));
     this.state = next;
+    if (durable) this.connection.checkpoint();
+    this.noteWrite("commit", Date.now() - started);
     return result;
+  }
+
+  noteWrite(operation, elapsed) {
+    this.writes++;
+    if (elapsed > this.maxWriteMs) this.maxWriteMs = elapsed;
+    if (elapsed < SLOW_WRITE_MS) return;
+    this.slowWrites++;
+    this.lastSlowWriteAt = new Date().toISOString();
+    const now = Date.now();
+    if (this.slowWindow && now - this.slowWindow.started < SLOW_WINDOW_MS) {
+      this.slowWindow.count++;
+      this.slowWindow.max = Math.max(this.slowWindow.max, elapsed);
+      return;
+    }
+    this.slowWindow = { started: now, count: 1, max: elapsed };
+    // One line per window keeps the observation from becoming the noise it
+    // measures; the full counters stay available through metrics().
+    try {
+      this.logs.append({
+        kind: "system",
+        status: 200,
+        message:
+          `存储写入耗时 ${Math.round(elapsed)}ms（${operation}），` +
+          `超过 ${SLOW_WRITE_MS}ms 阈值，60 秒内只记录一次`,
+      });
+    } catch {
+      // Observing a slow write must never break the write itself.
+    }
+  }
+
+  metrics() {
+    return {
+      writes: this.writes,
+      slowWrites: this.slowWrites,
+      maxWriteMs: this.maxWriteMs,
+      lastSlowWriteAt: this.lastSlowWriteAt,
+    };
   }
 
   get(id) {
@@ -927,10 +1322,19 @@ export class Store {
     return this.get(id);
   }
 
+  // Hot path: a health check or a usage refresh touches one account only, so
+  // the write stays on that row instead of snapshotting the whole state.
   patch(id, fields) {
-    this.commit((s) =>
-      Object.assign(s.accounts.find((a) => a.id === id) ?? {}, fields),
-    );
+    const started = Date.now();
+    const index = this.state.accounts.findIndex((account) => account.id === id);
+    if (index < 0) return;
+    const account = structuredClone({ ...this.state.accounts[index], ...fields });
+    refreshQuotaProtection({ accounts: [account], settings: this.state.settings });
+    const next = { ...this.state, accounts: this.state.accounts.slice() };
+    next.accounts[index] = account;
+    this.connection.transaction(() => this.saveAccounts(next.accounts));
+    this.state = next;
+    this.noteWrite("patch", Date.now() - started);
   }
 
   remove(id) {
@@ -993,58 +1397,125 @@ export class Store {
     return next;
   }
 
+  // Hot path: one append-only row plus the rows a request actually changes.
+  // The log is written first so a failed state write can never lose an entry,
+  // and the published state is replaced only after the database commits.
   record(entry) {
+    const started = Date.now();
     const now = Date.now();
-    this.commit((s) => {
-      const log = {
-        ...entry,
-        id: randomUUID(),
-        at: new Date(now).toISOString(),
-      };
-      s.logs.unshift(log);
-      s.logs = retainLogs(s.logs);
-      if (entry.kind !== "request") return;
-      const hour = new Date(Math.floor(now / 3600000) * 3600000).toISOString();
-      let bucket = s.hourly.find((b) => b.at === hour);
-      if (!bucket) {
-        bucket = {
-          at: hour,
-          requests: 0,
-          errors: 0,
-          durationMs: 0,
-          accounts: {},
-          tokenUsage: emptyTokenUsage(),
-        };
-        s.hourly.push(bucket);
-      }
-      bucket.requests++;
-      bucket.errors += entry.status >= 400 ? 1 : 0;
-      bucket.durationMs += entry.durationMs || 0;
+    const record = {
+      ...entry,
+      id: randomUUID(),
+      at: new Date(now).toISOString(),
+    };
+    const state = this.state;
+    const next = { ...state };
+    const changed = new Map();
+    const mutable = (id) => {
+      if (!id) return null;
+      const known = changed.get(id);
+      if (known) return known;
+      const current = state.accounts.find((item) => item.id === id);
+      if (!current) return null;
+      const account = structuredClone(current);
+      changed.set(id, account);
+      return account;
+    };
+    let hour = null;
+    if (entry.kind === "request") {
+      const bucketAt = new Date(
+        Math.floor(now / 3600000) * 3600000,
+      ).toISOString();
+      const index = state.hourly.findIndex((bucket) => bucket.at === bucketAt);
+      const previous = index < 0 ? null : state.hourly[index];
+      hour =
+        previous === null
+          ? {
+              at: bucketAt,
+              requests: 0,
+              errors: 0,
+              durationMs: 0,
+              accounts: {},
+              tokenUsage: emptyTokenUsage(),
+            }
+          : {
+              ...previous,
+              accounts: { ...previous.accounts },
+              tokenUsage: { ...previous.tokenUsage },
+            };
+      hour.requests++;
+      hour.errors += entry.status >= 400 ? 1 : 0;
+      hour.durationMs += entry.durationMs || 0;
       if (entry.accountId)
-        bucket.accounts[entry.accountId] =
-          (bucket.accounts[entry.accountId] || 0) + 1;
-      s.hourly = s.hourly.filter((b) => Date.parse(b.at) > now - 30 * 86400000);
+        hour.accounts[entry.accountId] =
+          (hour.accounts[entry.accountId] || 0) + 1;
+      const retained =
+        index < 0 ? [...state.hourly, hour] : state.hourly.slice();
+      if (index >= 0) retained[index] = hour;
+      next.hourly = retained.filter(
+        (bucket) => Date.parse(bucket.at) > now - 30 * 86400000,
+      );
       // The daily rollup outlives the hourly window with its own retention and
-      // carries the per-account split; hourly buckets stay totals-only so every
-      // commit stays small.
-      recordDaily(s.daily, entry, now);
-      const account = s.accounts.find((a) => a.id === entry.accountId);
+      // carries the per-account split.
+      next.daily = structuredClone(state.daily);
+      recordDaily(next.daily, entry, now);
       if (entry.tokenUsage) {
-        addTokenUsage(s.tokenUsage, entry.tokenUsage);
-        addTokenUsage(bucket.tokenUsage, entry.tokenUsage);
+        next.tokenUsage = addTokenUsage(
+          { ...state.tokenUsage },
+          entry.tokenUsage,
+        );
+        addTokenUsage(hour.tokenUsage, entry.tokenUsage);
         if (Array.isArray(entry.usageAttempts)) {
           // Request/global totals are already folded. Account totals receive
           // only their own attempt measurements, never the final request sum.
           for (const attempt of entry.usageAttempts) {
-            const owner = s.accounts.find((item) => item.id === attempt.accountId);
-            if (owner && attempt.tokenUsage) addTokenUsage(owner.tokenUsage, attempt.tokenUsage);
+            const owner = mutable(attempt.accountId);
+            if (owner && attempt.tokenUsage)
+              addTokenUsage(owner.tokenUsage, attempt.tokenUsage);
           }
-        } else if (account) addTokenUsage(account.tokenUsage, entry.tokenUsage);
+        } else {
+          const owner = mutable(entry.accountId);
+          if (owner) addTokenUsage(owner.tokenUsage, entry.tokenUsage);
+        }
       }
-      if (account) {
-        account.requests++;
-        if (entry.status >= 400) account.errors++;
+      const owner = mutable(entry.accountId);
+      if (owner) {
+        owner.requests++;
+        if (entry.status >= 400) owner.errors++;
       }
-    });
+    }
+    if (changed.size) {
+      next.accounts = state.accounts.map(
+        (account) => changed.get(account.id) ?? account,
+      );
+      // Only these accounts' inputs changed, so per-account recomputation is
+      // equivalent to a full pass and keeps the write scope at one row each.
+      for (const account of changed.values())
+        refreshQuotaProtection({
+          accounts: [account],
+          settings: next.settings,
+        });
+    }
+    this.logs.append(record);
+    // Audit and system entries are pure history: only the log row changes.
+    if (hour || next.accounts)
+      this.connection.transaction(() => {
+        if (hour) {
+          this.saveHourlyBucket(hour);
+          const retained = new Set(next.hourly.map((bucket) => bucket.at));
+          for (const bucket of state.hourly)
+            if (!retained.has(bucket.at)) this.deleteHourly(bucket.at);
+          this.saveDaily(next.daily, new Set([usageDate(now)]));
+        }
+        this.saveMeta(next);
+        if (next.accounts) this.saveAccounts(next.accounts);
+      });
+    this.state = next;
+    this.noteWrite("record", Date.now() - started);
+  }
+
+  close() {
+    this.logs.close();
+    this.connection.close();
   }
 }

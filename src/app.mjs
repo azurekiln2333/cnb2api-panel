@@ -812,10 +812,9 @@ export function createPanelServer(options) {
           return json(res, 200, pool.registrationRelay.sync());
         const requestLogDetail = /^\/api\/logs\/requests\/([a-f0-9-]{36})$/i.exec(path);
         if (requestLogDetail && method === "GET") {
-          const log = store.state.logs.find(
-            (entry) => entry.kind === "request" && entry.id === requestLogDetail[1],
-          );
-          if (!log) throw new InputError("请求记录不存在", 404);
+          const log = store.logs.get(requestLogDetail[1]);
+          if (!log || log.kind !== "request")
+            throw new InputError("请求记录不存在", 404);
           return json(res, 200, { log });
         }
         const logRoute = /^\/api\/logs(?:\/(requests|audit|system))?$/.exec(
@@ -824,7 +823,7 @@ export function createPanelServer(options) {
         if (logRoute && method === "GET") {
           const channel = logRoute[1] || "requests";
           const result = queryLogs(
-            store.state.logs,
+            store.logs,
             channel,
             new URL(req.url, "http://panel.local").searchParams,
           );

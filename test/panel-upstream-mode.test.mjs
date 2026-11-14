@@ -2,10 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createPanelServer } from "../src/app.mjs";
+import { editAccounts, removeAll } from "./support/sqlite-fixture.mjs";
 import {
   Store,
   UPSTREAM_MODES,
@@ -20,7 +21,7 @@ const APPLIED_HEADER = "x-cnb2api-upstream-mode-applied";
 
 function storeFixture(t) {
   const root = mkdtempSync(join(tmpdir(), "panel-upstream-mode-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => removeAll(root));
   return new Store(join(root, "data"), { allowLocal: true });
 }
 
@@ -51,16 +52,17 @@ test("upstream mode validates, defaults to inherit and survives reload", (t) => 
   );
 
   // Data written before the field existed must load as "inherit".
-  const saved = JSON.parse(readFileSync(store.accountsFile, "utf8"));
-  for (const account of saved.accounts) delete account.upstreamMode;
-  writeFileSync(store.accountsFile, JSON.stringify(saved));
+  editAccounts(store.directory, (accounts) => {
+    for (const account of accounts) delete account.config.upstreamMode;
+  });
   const reloaded = new Store(store.directory, { allowLocal: true });
   assert.equal(reloaded.get(plain.id).upstreamMode, "inherit");
   assert.equal(reloaded.get(ide.id).upstreamMode, "inherit");
 
   // An unknown stored value must not reject the whole document.
-  saved.accounts[0].upstreamMode = "turbo";
-  writeFileSync(store.accountsFile, JSON.stringify(saved));
+  editAccounts(store.directory, (accounts) => {
+    accounts[0].config.upstreamMode = "turbo";
+  });
   assert.equal(
     new Store(store.directory, { allowLocal: true }).get(plain.id).upstreamMode,
     "inherit",
@@ -152,7 +154,7 @@ async function fixture(t) {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     }
-    rmSync(root, { recursive: true, force: true });
+    removeAll(root);
   });
   return { ...app, base, directory, upstream, calls, call, account, send };
 }

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { Store } from "../src/store.mjs";
 import { Pool } from "../src/pool.mjs";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const gatewayKey = "rate-test-gateway-key";
 const proxyKey = "rate-test-worker-key";
@@ -33,7 +34,7 @@ function poolFixture(t) {
   const pool = new Pool(store);
   const account = store.create({ name: "rate", endpoint: "http://127.0.0.1:9001", proxyKey });
   store.patch(account.id, { status: "healthy" });
-  t.after(() => { pool.stop(); rmSync(directory, { recursive: true, force: true }); });
+  t.after(() => { pool.stop(); removeAll(directory); });
   return { store, pool, id: account.id };
 }
 async function httpFixture(t, count = 1) {
@@ -73,7 +74,7 @@ async function httpFixture(t, count = 1) {
     app.pool.stop();
     await close(app.server);
     await close(worker);
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   const chat = () => fetch(`${base}/v1/chat/completions`, {
     method: "POST", headers: { Authorization: `Bearer ${gatewayKey}`, "Content-Type": "application/json" },

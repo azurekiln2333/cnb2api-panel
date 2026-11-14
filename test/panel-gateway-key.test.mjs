@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const ADMIN = "gateway-key-test-admin-key";
 
@@ -53,7 +54,7 @@ async function fixture(t) {
     });
     return { app, base };
   };
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => removeAll(root));
   return { dataDir, open };
 }
 

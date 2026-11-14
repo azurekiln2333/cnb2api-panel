@@ -1,11 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, publicAccount } from "../src/store.mjs";
 import { Pool, isReady } from "../src/pool.mjs";
 import { quotaProtectionFor } from "../src/quota-protection.mjs";
+import {
+  editAccounts,
+  editSettings,
+  readAccounts,
+  removeAll,
+} from "./support/sqlite-fixture.mjs";
 
 const snapshot = (org, { total = 100, used = 10, freeze = 0 } = {}) => ({
   org,
@@ -34,7 +40,7 @@ function fixture(t, fetchQuotaImpl) {
   };
   t.after(() => {
     pool.stop();
-    rmSync(root, { recursive: true, force: true });
+    removeAll(root);
   });
   return { store, pool, account, directory, advance: (ms) => { clock += ms; } };
 }
@@ -267,12 +273,12 @@ test("restart recomputes quota protection and keeps runtime state out of account
   const app = fixture(t, async ({ org }) => snapshot(org, { used: 95 }));
   const account = app.account();
   await app.pool.quotaCycle();
-  const definitions = JSON.parse(readFileSync(join(app.directory, "accounts.json"), "utf8"));
-  const stats = JSON.parse(readFileSync(join(app.directory, "stats.json"), "utf8"));
-  assert.equal(definitions.accounts[0].quotaProtection, undefined);
-  assert.equal(stats.accounts[account.id].quotaProtection.reason, "low");
-  stats.accounts[account.id].quotaProtection.suspended = false;
-  writeFileSync(join(app.directory, "stats.json"), JSON.stringify(stats));
+  // The verdict lives in the runtime half of the row, never in the definition.
+  editAccounts(app.directory, (rows) => {
+    assert.equal(rows[0].config.quotaProtection, undefined);
+    assert.equal(rows[0].runtime.quotaProtection.reason, "low");
+    rows[0].runtime.quotaProtection.suspended = false;
+  });
   const restored = new Store(app.directory, { allowLocal: true });
   assert.equal(restored.get(account.id).quotaProtection.suspended, true);
   assert.equal(restored.get(account.id).enabled, true);
@@ -282,9 +288,9 @@ test("legacy installations default protection on and new credentials require ver
   const app = fixture(t, async ({ org }) => snapshot(org));
   const account = app.account();
   await app.pool.quotaCycle();
-  const panel = JSON.parse(readFileSync(join(app.directory, "panel.json"), "utf8"));
-  delete panel.settings.quotaProtection;
-  writeFileSync(join(app.directory, "panel.json"), JSON.stringify(panel));
+  editSettings(app.directory, (settings) => {
+    delete settings.quotaProtection;
+  });
   const restored = new Store(app.directory, { allowLocal: true });
   assert.equal(restored.state.settings.quotaProtection.enabled, true);
   restored.update(account.id, { pat: "new-fixture-token" });
@@ -338,21 +344,23 @@ test("account override persists in account definitions and legacy accounts defau
   const app = fixture(t, async ({ org }) => snapshot(org));
   const account = app.account();
   app.store.update(account.id, { enabled: true, quotaProtectionOverride: true });
-  const definitions = JSON.parse(readFileSync(join(app.directory, "accounts.json"), "utf8"));
-  const stats = JSON.parse(readFileSync(join(app.directory, "stats.json"), "utf8"));
-  assert.equal(definitions.accounts[0].quotaProtectionOverride, true);
-  assert.equal(stats.accounts[account.id].quotaProtectionOverride, undefined);
+  const definitions = readAccounts(app.directory);
+  assert.equal(definitions[0].config.quotaProtectionOverride, true);
+  assert.equal(definitions[0].runtime.quotaProtectionOverride, undefined);
   const restored = new Store(app.directory, { allowLocal: true });
   assert.equal(restored.get(account.id).quotaProtectionOverride, true);
   assert.equal(restored.get(account.id).quotaProtection.reason, "override");
   assert.equal(isReady(restored.get(account.id)), true);
-  delete definitions.accounts[0].quotaProtectionOverride;
-  writeFileSync(join(app.directory, "accounts.json"), JSON.stringify(definitions));
+  // Accounts saved before the field existed default to automatic protection.
+  editAccounts(app.directory, (rows) => {
+    delete rows[0].config.quotaProtectionOverride;
+  });
   const legacy = new Store(app.directory, { allowLocal: true });
   assert.equal(legacy.get(account.id).quotaProtectionOverride, false);
   assert.equal(legacy.get(account.id).quotaProtection.suspended, true);
-  definitions.accounts[0].quotaProtectionOverride = "true";
-  writeFileSync(join(app.directory, "accounts.json"), JSON.stringify(definitions));
+  editAccounts(app.directory, (rows) => {
+    rows[0].config.quotaProtectionOverride = "true";
+  });
   assert.throws(() => new Store(app.directory, { allowLocal: true }), /Invalid quota protection override/);
 });
 

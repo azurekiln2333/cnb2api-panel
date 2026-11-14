@@ -7,8 +7,8 @@
 // delta between the first and last sample inside a window, never an average
 // of rates, so a sample that thinning drops never changes the result.
 //
-// Storage is compact because Store.commit() clones and serializes the whole
-// state on every commit. A history is an array of fixed-order number arrays:
+// Storage is compact because the whole history is one meta row that is
+// rewritten whenever a sample lands. A history is an array of fixed-order number arrays:
 // the first sample holds absolute values, every later sample holds the
 // difference from the sample before it. Times are Unix seconds. Credits are
 // integers: billing in milli-Credits (CNB's own unit), reported credit in

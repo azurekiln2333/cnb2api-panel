@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 // Design R11 / §6: the gateway refuses every inference call until a key is
 // presented. There is no environment switch, no account-pool state and no
@@ -44,7 +45,7 @@ async function fixture(t, options = {}) {
     app.pool.stop();
     app.server.closeAllConnections();
     await new Promise((resolve) => app.server.close(resolve));
-    rmSync(root, { recursive: true, force: true });
+    removeAll(root);
   });
   return { app, base: `http://127.0.0.1:${app.server.address().port}` };
 }
@@ -135,7 +136,7 @@ test("an unset GATEWAY_KEY is generated, so the panel is never open", async (t) 
     app.pool.stop();
     app.server.closeAllConnections();
     await new Promise((resolve) => app.server.close(resolve));
-    rmSync(root, { recursive: true, force: true });
+    removeAll(root);
   });
 
   const anonymous = await call(base, ["POST", "/v1/chat/completions"]);

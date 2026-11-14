@@ -2,11 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createPanelServer } from "../src/app.mjs";
 import { DEFAULT_SETTINGS, Store } from "../src/store.mjs";
+import {
+  editAccounts,
+  editSettings,
+  removeAll,
+} from "./support/sqlite-fixture.mjs";
 
 const ADMIN = "synthetic-probe-admin";
 const GATEWAY = "synthetic-probe-gateway";
@@ -128,14 +133,14 @@ async function fixture(t) {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     }
-    rmSync(root, { recursive: true, force: true });
+    removeAll(root);
   });
   return { ...app, base, directory, endpoint, upstream, calls, call, account, probeCalls, enable };
 }
 
 test("inference probe settings default to off, validate and survive reload", (t) => {
   const root = mkdtempSync(join(tmpdir(), "panel-inference-settings-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => removeAll(root));
   const store = new Store(join(root, "data"), { allowLocal: true });
   assert.deepEqual(DEFAULT_SETTINGS.inferenceProbe, { enabled: false, intervalMinutes: 30 });
   assert.deepEqual(store.state.settings.inferenceProbe, { enabled: false, intervalMinutes: 30 });
@@ -164,13 +169,15 @@ test("inference probe settings default to off, validate and survive reload", (t)
 
   // Documents written before the feature existed load with the defaults.
   const account = store.create({ name: "旧账号", proxyKey: PROXY });
-  const panel = JSON.parse(readFileSync(store.file, "utf8"));
-  delete panel.settings.inferenceProbe;
-  writeFileSync(store.file, JSON.stringify(panel));
-  const stats = JSON.parse(readFileSync(store.statsFile, "utf8"));
-  delete stats.accounts[account.id].inferenceProbe;
-  delete stats.accounts[account.id].probeUsage;
-  writeFileSync(store.statsFile, JSON.stringify(stats));
+  editSettings(store.directory, (settings) => {
+    delete settings.inferenceProbe;
+  });
+  editAccounts(store.directory, (accounts) => {
+    for (const row of accounts) {
+      delete row.runtime.inferenceProbe;
+      delete row.runtime.probeUsage;
+    }
+  });
   const reloaded = new Store(store.directory, { allowLocal: true });
   assert.deepEqual(reloaded.state.settings.inferenceProbe, { enabled: false, intervalMinutes: 30 });
   assert.equal(reloaded.get(account.id).inferenceProbe, null);
@@ -406,7 +413,7 @@ test("the manual endpoint works with the setting off, requires an enabled accoun
   assert.equal(app.probeCalls().length, 2);
 
   // Every attempt is audited, including the rejected anonymous one.
-  const audit = app.store.state.logs.filter((entry) => entry.action === "account.inference_probe");
+  const audit = app.store.logs.all().filter((entry) => entry.action === "account.inference_probe");
   assert.deepEqual(audit.map((entry) => entry.status).sort(), [200, 200, 401, 409]);
   assert.equal(audit[0].accountId, id);
 });
@@ -415,7 +422,7 @@ test("probe usage stays out of logs and token totals but enters reconciliation",
   const app = await fixture(t);
   const id = await app.account();
   await app.pool.workerUsage.refresh(id);
-  const logsBefore = app.store.state.logs.filter((entry) => entry.kind === "request").length;
+  const logsBefore = app.store.logs.all().filter((entry) => entry.kind === "request").length;
   await app.pool.inferenceProbe(id);
   await app.pool.inferenceProbe(id);
   const account = app.store.get(id);
@@ -423,7 +430,7 @@ test("probe usage stays out of logs and token totals but enters reconciliation",
   assert.equal(account.tokenUsage.total, 0);
   assert.equal(account.requests, 0);
   assert.equal(app.store.state.tokenUsage.total, 0);
-  assert.equal(app.store.state.logs.filter((entry) => entry.kind === "request").length, logsBefore);
+  assert.equal(app.store.logs.all().filter((entry) => entry.kind === "request").length, logsBefore);
 
   // The worker counted both probes; the comparison explains them.
   app.upstream.usageTotals = usageSnapshot(6, 2, 2);

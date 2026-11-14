@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 import {
   RegistrationRelay,
   RELAY_HEADERS,
@@ -39,6 +40,14 @@ function fixture(t, options = {}) {
   const root = mkdtempSync(join(tmpdir(), "registration-relay-core-"));
   const directory = join(root, "data");
   const store = new Store(directory, { allowLocal: true });
+  // Opening a second store on the same directory replaces the shared handle
+  // registry entry, so every instance is closed explicitly before cleanup.
+  const opened = [store];
+  const open = () => {
+    const instance = new Store(directory, { allowLocal: true });
+    opened.push(instance);
+    return instance;
+  };
   let now = INITIAL_NOW;
   const relay = new RegistrationRelay(store, {
     now: () => now, fetchImpl: async (_url, init) => acknowledgement(init), ...options,
@@ -48,10 +57,11 @@ function fixture(t, options = {}) {
   t.after(async () => {
     relay.stop();
     await Promise.allSettled([...relay.active.values()].map((work) => work.promise));
-    rmSync(root, { recursive: true, force: true });
+    for (const instance of opened) instance.close();
+    removeAll(root);
   });
   return {
-    store, relay, root, directory,
+    store, relay, root, directory, open,
     account: (extra = {}) => store.create({ name: "Workspace", proxyKey: PROXY, registrationToken: TOKEN, ...extra }),
     configure: (servers = [peer()], enabled = true) => store.settings({ registrationRelay: { enabled, servers } }),
     advance: (milliseconds) => { now += milliseconds; },
@@ -98,23 +108,28 @@ test("relay headers accept a complete safe envelope and reject partial or malfor
   ]) assert.throws(() => parseRelayHeaders(headers), { status: 400 });
 });
 
-test("relay runtime upgrades old statistics once and preserves source identity and encrypted credentials", (t) => {
+test("relay state keeps its source identity across restarts and stores no plaintext credentials", (t) => {
   const f = fixture(t);
   const account = f.account();
-  const oldStats = JSON.parse(readFileSync(f.store.statsFile, "utf8"));
-  delete oldStats.registrationRelay;
-  writeFileSync(f.store.statsFile, JSON.stringify(oldStats));
-  const restored = new Store(f.directory, { allowLocal: true });
-  const source = restored.state.registrationRelay.sourceId;
-  assert.equal(JSON.parse(readFileSync(f.store.statsFile, "utf8")).registrationRelay.sourceId, source);
-  assert.equal(new Store(f.directory, { allowLocal: true }).state.registrationRelay.sourceId, source);
+  const source = f.store.state.registrationRelay.sourceId;
+  const restored = f.open();
+  assert.equal(restored.state.registrationRelay.sourceId, source);
   assert.equal(restored.get(account.id).secrets.registrationToken, TOKEN);
-  const disk = [restored.file, restored.accountsFile, restored.statsFile].map((file) => readFileSync(file, "utf8")).join("");
+  // Neither database may hold the credential in plaintext.
+  const disk = [
+    join(f.directory, "panel.sqlite"),
+    join(f.directory, "panel.sqlite-wal"),
+    join(f.directory, "logs", "logs.sqlite"),
+  ]
+    .filter((file) => existsSync(file))
+    .map((file) => readFileSync(file).toString("latin1"))
+    .join("");
   assert.equal(disk.includes(TOKEN), false);
   assert.equal(disk.includes(PROXY), false);
   const broken = structuredClone(restored.state.registrationRelay);
   broken.deliveries.invalid = {};
   assert.throws(() => loadRegistrationRelay(broken), { status: 500 });
+  restored.close();
 });
 
 test("original registration atomically persists its current endpoint and outbox for disabled accounts too", (t) => {
@@ -122,18 +137,16 @@ test("original registration atomically persists its current endpoint and outbox 
   const account = f.account({ enabled: false });
   f.configure([peer(), peer(2, { enabled: false })]);
   assert.deepEqual(f.relay.register(account.id, URI), { applied: true, result: { ok: true, accountId: account.id } });
-  const restored = new Store(f.directory, { allowLocal: true });
+  const restored = f.open();
   assert.equal(restored.get(account.id).endpoint, URI);
   assert.equal(Object.keys(restored.state.registrationRelay.deliveries).length, 1);
+  restored.close();
   assert.equal(f.job(account).endpoint, URI);
   assert.equal(JSON.stringify(f.relay.status()).includes(TOKEN), false);
-  const snapshots = structuredClone(f.store.snapshots);
-  let writes = 0;
-  const write = f.store.storage.write.bind(f.store.storage);
-  f.store.storage.write = (operations) => { writes++; return write(operations); };
+  // A reconcile with nothing to do must not open a write transaction.
+  const writes = f.store.metrics().writes;
   f.relay.reconcile();
-  assert.equal(writes, 0);
-  assert.deepEqual(f.store.snapshots, snapshots);
+  assert.equal(f.store.metrics().writes, writes);
 });
 
 test("same-URI registration preserves verified health, retry progress and successful deliveries", async (t) => {
@@ -155,7 +168,7 @@ test("same-URI registration preserves verified health, retry progress and succes
     const delivery = structuredClone(f.job(account));
     f.advance(1000);
     assert.deepEqual(f.relay.register(account.id, URI), { applied: true, result: { ok: true, accountId: account.id } });
-    const restored = new Store(f.directory, { allowLocal: true });
+    const restored = f.open();
     for (const [field, value] of Object.entries(fields)) assert.deepEqual(restored.get(account.id)[field], value);
     assert.equal(restored.get(account.id).registeredAt, new Date(INITIAL_NOW + 1000).toISOString());
     assert.deepEqual(f.store.state.registrationRelay.generations[account.id], version);
@@ -315,7 +328,7 @@ test("backoff survives restart, waits until due and manual synchronization retri
   assert.equal(f.job(account).status, "failed");
   assert.equal(f.job(account).nextAttemptAt, INITIAL_NOW + 5000);
   assert.equal(calls, 1);
-  const restored = new Store(f.directory, { allowLocal: true });
+  const restored = f.open();
   assert.equal(restored.state.registrationRelay.deliveries[`${account.id}/peer-1`].nextAttemptAt, INITIAL_NOW + 5000);
   await f.relay.run();
   f.advance(4999);
@@ -334,7 +347,9 @@ test("backoff survives restart, waits until due and manual synchronization retri
   await f.relay.run();
   assert.equal(calls, 9);
   assert.equal(f.job(account).attempts, 1);
-  const diagnostics = readFileSync(f.store.logFiles.system, "utf8") + readFileSync(f.store.statsFile, "utf8");
+  const diagnostics =
+    JSON.stringify(f.store.logs.page("system", { all: true, limit: 1000, offset: 0 })) +
+    readFileSync(join(f.directory, "panel.sqlite")).toString("latin1");
   assert.equal(diagnostics.includes(TOKEN), false);
   assert.equal(diagnostics.includes("unsafe-error"), false);
 });
@@ -352,7 +367,7 @@ test("disabled peers and the main switch pause work and re-enable with an immedi
   await f.relay.run();
   assert.equal(calls, 1);
   assert.equal(f.relay.status().servers[0].status, "disabled");
-  assert.equal(new Store(f.directory, { allowLocal: true }).state.registrationRelay.deliveries[`${account.id}/peer-1`].paused, true);
+  assert.equal(f.open().state.registrationRelay.deliveries[`${account.id}/peer-1`].paused, true);
   f.configure();
   f.relay.reconcile();
   assert.equal(f.job(account).nextAttemptAt, INITIAL_NOW);
@@ -417,4 +432,132 @@ test("periodic persistence failures stop the relay instead of escaping the inter
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(f.relay.stopped, true);
   assert.equal(f.relay.timer, null);
+});
+
+const systemMessages = (f) =>
+  f.store.logs
+    .page("system", { all: true, limit: 100, offset: 0 })
+    .logs.map((entry) => entry.message);
+
+async function blockedByRejection(t, { status = 403 } = {}) {
+  let calls = 0;
+  const f = fixture(t, {
+    fetchImpl: async () => {
+      calls++;
+      return new Response("private-rejection", { status });
+    },
+  });
+  const account = f.account();
+  f.configure();
+  f.relay.register(account.id, URI);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await f.relay.run();
+    f.advance(300000);
+  }
+  return { f, account, calls: () => calls };
+}
+
+test("rejected registration keys stop automatic retries and stay visible as needing action", async (t) => {
+  const { f, account, calls } = await blockedByRejection(t);
+  const job = f.job(account);
+  assert.equal(calls(), 3);
+  assert.equal(job.status, "failed");
+  assert.equal(job.authFailures, 3);
+  assert.equal(job.needsAction, true);
+  assert.equal(job.nextAttemptAt, Number.MAX_SAFE_INTEGER);
+  assert.match(job.lastError, /联动服务器未匹配注册密钥；已暂停自动重试/);
+  assert.equal(JSON.stringify(f.relay.status()).includes(TOKEN), false);
+  const status = f.relay.status().servers[0];
+  assert.equal(status.status, "failed");
+  assert.equal(status.needsAction, true);
+  // Nothing schedules the blocked work any more, however long the panel runs.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    f.advance(300000);
+    await f.relay.run();
+  }
+  assert.equal(calls(), 3);
+  // The blocked state is durable, so a restart does not resume it either.
+  const restored = f.open();
+  const saved = restored.state.registrationRelay.deliveries[`${account.id}/peer-1`];
+  assert.equal(saved.needsAction, true);
+  assert.equal(saved.authFailures, 3);
+  assert.equal(saved.nextAttemptAt, Number.MAX_SAFE_INTEGER);
+  restored.close();
+  f.store.close();
+});
+
+test("manual sync, a rotated registration key and a new peer configuration resume a blocked delivery", async (t) => {
+  const { f, account, calls } = await blockedByRejection(t);
+  assert.equal(f.job(account).needsAction, true);
+  let available = false;
+  f.relay.fetchImpl = async (_url, init) => {
+    calls();
+    return available
+      ? acknowledgement(init)
+      : new Response("private-rejection", { status: 403 });
+  };
+  available = true;
+  assert.equal(f.relay.sync().scheduled, 1);
+  assert.notEqual(f.job(account).needsAction, true);
+  await f.relay.run();
+  assert.equal(f.job(account).status, "success");
+  assert.equal(f.job(account).needsAction, false);
+  assert.equal(f.job(account).authFailures, 0);
+});
+
+test("a rotated registration key or a changed peer origin restarts a blocked delivery", async (t) => {
+  const { f, account } = await blockedByRejection(t);
+  let available = true;
+  f.relay.fetchImpl = async (_url, init) => {
+    if (!available) return new Response("private-rejection", { status: 403 });
+    return acknowledgement(init);
+  };
+  // Rotating the key invalidates the old credential version, so the outbox is
+  // rebuilt instead of staying parked on the old failure.
+  f.store.update(account.id, { registrationToken: "rotated-registration-token" });
+  f.relay.reconcile();
+  assert.notEqual(f.job(account).needsAction, true);
+  await f.relay.run();
+  assert.equal(f.job(account).status, "success");
+  // A blocked delivery for an unchanged credential also restarts when the peer
+  // it points at is reconfigured.
+  available = false;
+  f.store.settings({ registrationRelay: { enabled: true, servers: [peer(2, { origin: "https://panel-9.example.com" })] } });
+  f.relay.reconcile();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await f.relay.run();
+    f.advance(300000);
+  }
+  assert.equal(f.job(account, peer(2)).needsAction, true);
+  available = true;
+  f.relay.sync();
+  await f.relay.run();
+  assert.equal(f.job(account, peer(2)).status, "success");
+});
+
+test("repeated identical delivery failures collapse into one aggregated system entry", async (t) => {
+  const f = fixture(t, {
+    fetchImpl: async () => new Response("unavailable", { status: 503 }),
+  });
+  const account = f.account();
+  f.configure();
+  f.relay.register(account.id, URI);
+  for (let attempt = 1; attempt <= 12; attempt++) {
+    await f.relay.run();
+    f.advance(300000);
+  }
+  // Non-authentication failures keep their backoff, but only two records reach
+  // the system channel: the first failure and the ten-repeat aggregate.
+  assert.equal(f.job(account).status, "failed");
+  assert.notEqual(f.job(account).needsAction, true);
+  let messages = systemMessages(f);
+  assert.deepEqual(messages, [
+    "联动服务器返回失败状态（已重复 11 次）",
+    "联动服务器返回失败状态",
+  ]);
+  f.advance(3600000);
+  await f.relay.run();
+  messages = systemMessages(f);
+  assert.equal(messages.length, 3);
+  assert.equal(messages[0], "联动服务器返回失败状态（已重复 13 次）");
 });

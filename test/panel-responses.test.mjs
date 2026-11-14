@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const GATEWAY = "responses-test-gateway-key";
 const WORKER = "responses-test-worker-key";
@@ -68,7 +69,7 @@ async function fixture(t, handler, { account = true } = {}) {
     app.pool.stop();
     await close(app.server);
     await close(worker);
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   let id;
   if (account) {
@@ -99,7 +100,7 @@ test("Responses JSON uses Chat upstream, existing rewrites and original Chat usa
   assert.equal(app.calls[0].payload.max_tokens, 50);
   assert.deepEqual(app.calls[0].payload.messages.map((message) => message.role), ["system", "system", "user"]);
   assert.equal(app.calls[0].payload.stream_options.include_usage, true);
-  const record = app.store.state.logs.find((entry) => entry.kind === "request");
+  const record = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.equal(record.path, "/v1/responses");
   assert.equal(record.initialMessage.text, "hello");
   assert.equal(record.tokenUsage.input, 12);
@@ -201,7 +202,7 @@ test("Codex JSON preserves namespace/custom calls and complete second-turn histo
   assert.deepEqual(messages.filter((message) => message.role === "tool").map((message) => message.tool_call_id), ["call_lookup", "call_patch"]);
   assert.ok(!JSON.stringify(app.calls).includes("opaque-reasoning-secret"));
   assert.ok(!JSON.stringify(app.calls).includes("client-session-secret"));
-  const records = app.store.state.logs.filter((entry) => entry.kind === "request");
+  const records = app.store.logs.all().filter((entry) => entry.kind === "request");
   assert.equal(records.length, 2);
   assert.ok(records.every((record) => record.path === "/v1/responses" && record.tokenUsage.input === 12));
 });
@@ -233,7 +234,7 @@ test("Codex SSE restores custom tool events and namespace through strict Chat", 
   assert.equal(events.filter((event) => event.type === "response.custom_tool_call_input.delta").map((event) => event.delta).join(""), patch);
   assert.equal(events.find((event) => event.type === "response.custom_tool_call_input.done").input, patch);
   assert.ok(!events.some((event) => event.type === "response.function_call_arguments.delta"));
-  const record = app.store.state.logs.find((entry) => entry.kind === "request");
+  const record = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.equal(record.path, "/v1/responses");
   assert.equal(record.tokenUsage.input, 7);
   assert.equal(record.tokenUsage.output, 4);
@@ -249,7 +250,7 @@ test("native Chat removes client_metadata while preserving standard metadata", a
   assert.equal((await response.json()).choices[0].message.content, "native reply");
   assert.equal(Object.hasOwn(app.calls[0].payload, "client_metadata"), false);
   assert.deepEqual(app.calls[0].payload.metadata, { task: "preserved" });
-  assert.equal(app.store.state.logs.find((entry) => entry.kind === "request").path, "/v1/chat/completions");
+  assert.equal(app.store.logs.all().find((entry) => entry.kind === "request").path, "/v1/chat/completions");
 });
 
 test("Responses validation exposes safe field locations without request values", async (t) => {
@@ -292,7 +293,7 @@ test("Responses SSE translates split Unicode/text/tool events and captures trail
   assert.equal(events.at(-1).response.output[1].arguments, "{}");
   assert.equal(events.at(-1).response.usage.total_tokens, 12);
   assert.deepEqual(events.map((entry) => entry.sequence_number), events.map((_entry, index) => index));
-  const record = app.store.state.logs.find((entry) => entry.kind === "request");
+  const record = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.equal(record.tokenUsage.input, 8);
   assert.equal(record.tokenUsage.output, 4);
   assert.equal(record.responseBytes, Buffer.byteLength(text));
@@ -369,7 +370,7 @@ test("a slow upstream first token still reaches the client behind a keepalive co
   assert.equal(events.at(-1).type, "response.completed");
   assert.equal(events.at(-1).response.output[0].content[0].text, "late");
   // Token accounting must not count the comment frames as response bytes.
-  const record = app.store.state.logs.find((entry) => entry.kind === "request");
+  const record = app.store.logs.all().find((entry) => entry.kind === "request");
   const eventBytes = text.split("\n\n").filter((block) => block.trim() && !block.trimStart().startsWith(":"))
     .reduce((total, block) => total + Buffer.byteLength(`${block}\n\n`), 0);
   assert.ok(record.responseBytes >= eventBytes);
@@ -395,8 +396,8 @@ test("Responses retries retryable HTTP failures using the existing pool", async 
   assert.equal(response.status, 200);
   assert.equal((await response.json()).status, "completed");
   assert.equal(app.calls.length, 2);
-  assert.equal(app.store.state.logs.find((entry) => entry.kind === "request").attempts, 2);
-  assert.ok(!JSON.stringify(app.store.state.logs).includes("private failure"));
+  assert.equal(app.store.logs.all().find((entry) => entry.kind === "request").attempts, 2);
+  assert.ok(!JSON.stringify(app.store.logs.all()).includes("private failure"));
 });
 
 test("inference idle timeout confirms a reachable worker instead of marking it offline", async (t) => {
@@ -436,7 +437,7 @@ test("Responses SSE forwards proxy-friendly headers and ends cleanly on a silent
   assert.equal(events.at(-1).response.output[0].content[0].text, "partial");
   assert.deepEqual(events.map((event) => event.sequence_number), events.map((_event, index) => index));
   assert.equal(text.length > 0 && text.endsWith("\n\n"), true);
-  const records = app.store.state.logs.filter((entry) => entry.kind === "request");
+  const records = app.store.logs.all().filter((entry) => entry.kind === "request");
   assert.equal(records.at(-1).tokenUsage.missingRequests, 1);
 });
 
@@ -460,9 +461,9 @@ test("a disconnected Responses stream cancels its Chat request without cooling t
   } finally {
     clearTimeout(timeout);
   }
-  for (let i = 0; i < 100 && !app.store.state.logs.some((entry) => entry.kind === "request"); i++)
+  for (let i = 0; i < 100 && !app.store.logs.all().some((entry) => entry.kind === "request"); i++)
     await new Promise((resolve) => setTimeout(resolve, 10));
-  const record = app.store.state.logs.find((entry) => entry.kind === "request");
+  const record = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.equal(record.status, 499);
   assert.equal(app.store.get(app.id).status, "healthy");
   assert.equal(app.store.get(app.id).cooldownUntil, null);
@@ -492,7 +493,7 @@ test("Claude Code compatibility also rewrites the Chat payload the Responses bri
     "to share feedback, users can report the issue at https://github.com/anthropics/claude-code/issues");
   assert.equal(outbound.messages[2].content, CLAUDE_IDENTITY);
   assert.equal(outbound.tools[0].function.description, CLAUDE_REWRITTEN);
-  const record = app.store.state.logs.find((entry) => entry.kind === "request");
+  const record = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.equal(record.path, "/v1/responses");
   assert.deepEqual(record.requestDiagnostics.rules.slice(3).map((rule) => rule.outcome)[0], "applied");
 });

@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { createPanelServer } from '../src/app.mjs';
 import { Store } from '../src/store.mjs';
+import { diskText, editDatabase, removeAll } from "./support/sqlite-fixture.mjs";
 import {
   resetOidcCaches,
   verifyIdToken,
@@ -194,7 +195,7 @@ async function fixture(t) {
     });
   t.after(async () => {
     await close(app.server);
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    removeAll(fixtureRoot);
   });
   const login = async () => {
     const response = await call('/api/session', { method: 'POST', data: { key: ADMIN } });
@@ -305,9 +306,11 @@ test('enabling SSO needs an allowlist and a reachable issuer, and persists the s
   assert.equal(saved.hasClientSecret, true);
   assert.ok(!('clientSecret' in saved));
 
-  const disk = readFileSync(join(app.directory, 'panel.json'), 'utf8');
+  const disk = diskText(app.directory);
   assert.ok(!disk.includes(CLIENT_SECRET));
-  const persisted = JSON.parse(disk).sso;
+  const persisted = editDatabase(app.directory, (db) =>
+    JSON.parse(db.get("SELECT sso FROM settings WHERE id = 1").sso),
+  );
   assert.equal(typeof persisted.clientSecret, 'string');
   assert.notEqual(persisted.clientSecret, CLIENT_SECRET);
   assert.equal(new Store(app.directory, { allowLocal: true }).state.sso.clientSecret, CLIENT_SECRET);
@@ -676,14 +679,14 @@ test('environment bootstrap seeds an unconfigured panel and rejects unsafe setti
   const base = await listen(app.server);
   t.after(async () => {
     await close(app.server);
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    removeAll(fixtureRoot);
   });
   const config = await (await fetch(`${base}/api/auth/config`)).json();
   assert.deepEqual(config, {
     keyLoginEnabled: true,
     sso: { enabled: true, providerName: '引导 SSO', loginUrl: '/api/auth/oidc/login' },
   });
-  assert.ok(!readFileSync(join(directory, 'panel.json'), 'utf8').includes(CLIENT_SECRET));
+  assert.ok(!diskText(directory).includes(CLIENT_SECRET));
 
   // Saved configuration wins: a second bootstrap must not overwrite it.
   app.store.saveSso({ ...app.store.state.sso, providerName: '已保存 SSO' });
@@ -700,7 +703,7 @@ test('environment bootstrap seeds an unconfigured panel and rejects unsafe setti
 
   const otherRoot = mkdtempSync(join(tmpdir(), 'cnb-panel-bootstrap-bad-'));
   const otherDir = join(otherRoot, 'data');
-  t.after(() => rmSync(otherRoot, { recursive: true, force: true }));
+  t.after(() => removeAll(otherRoot));
   assert.throws(
     () =>
       createPanelServer({

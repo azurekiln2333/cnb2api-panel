@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.mjs";
 import { Pool } from "../src/pool.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const snapshot = (org, used = 10) => ({
   org,
@@ -33,7 +34,7 @@ function fixture(t, fetchQuotaImpl, options = {}) {
   });
   t.after(() => {
     pool.stop();
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    removeAll(fixtureRoot);
   });
   const account = (fields = {}) =>
     store.create({

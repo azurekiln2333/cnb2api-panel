@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { createPanelServer } from "../src/app.mjs";
 import { Store } from "../src/store.mjs";
 import { rewriteRequest, validateRequestOverrides } from "../src/request-overrides.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const ADMIN = "synthetic-panel-admin";
 const GATEWAY = "synthetic-gateway-key";
@@ -102,7 +103,7 @@ async function fixture(t) {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     }
-    rmSync(root, { recursive: true, force: true });
+    removeAll(root);
   });
   return { ...app, base, directory, call, worker, send, sendMessages };
 }
@@ -201,7 +202,7 @@ test("near-limit DSH requests retain rewrites and request bytes across failover"
   assert.ok(second[0].payload.messages[0].content.endsWith("You are an AI assistant."));
   assert.equal(second[0].payload.messages[1].content, "You are an AI assistant.");
   assert.equal(second[0].payload.messages[2].content, "visible");
-  const log = app.store.state.logs.find((entry) => entry.kind === "request");
+  const log = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.equal(log.attempts, 2);
   assert.equal(log.requestDiagnostics.rules[0].outcome, "applied");
 });
@@ -216,7 +217,7 @@ test("a forwarded body over the workspace limit returns 413 without cooling an a
   assert.equal(response.status, 413);
   assert.equal((await response.json()).error.type, "invalid_request_error");
   assert.equal(calls.length, 0);
-  const log = app.store.state.logs.find((entry) => entry.kind === "request");
+  const log = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.equal(log.status, 413);
   assert.equal(log.attempts, 0);
   assert.equal(app.store.state.accounts[0].status, "healthy");
@@ -255,7 +256,7 @@ test("header support is tracked per retry and disabling DSH preserves the reques
   assert.equal(second.length, 1);
   assert.deepEqual(first[0].payload, second[0].payload);
   assert.equal(second[0].payload.messages[0].role, "developer");
-  const log = app.store.state.logs.find((entry) => entry.kind === "request");
+  const log = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.equal(log.requestDiagnostics.headers.supported, null);
   assert.deepEqual(log.requestDiagnostics.headers.attempts.map((entry) => entry.status), [503, 200]);
 });
@@ -275,7 +276,7 @@ test("a failed retry does not inherit the previous workspace's header acknowledg
   await response.text();
   assert.equal(first.length, 1);
   assert.equal(second.length, 1);
-  const log = app.store.state.logs.find((entry) => entry.kind === "request");
+  const log = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.equal(log.attempts, 2);
   assert.equal(log.requestDiagnostics.headers.supported, null);
   assert.deepEqual(log.requestDiagnostics.headers.attempts, [
@@ -301,7 +302,7 @@ test("neutral developer roles at any position are converted when compatibility i
   assert.equal(response.status, 200);
   await response.text();
   assert.deepEqual(calls[0].payload.messages.map((message) => message.role), ["user", "system", "user", "system"]);
-  const details = app.store.state.logs.find((entry) => entry.kind === "request").requestDiagnostics;
+  const details = app.store.logs.all().find((entry) => entry.kind === "request").requestDiagnostics;
   assert.equal(details.received.messages[1].role, "developer");
   assert.equal(details.forwarded.messages[1].role, "system");
 });
@@ -364,7 +365,7 @@ test("Claude Code compatibility rewrites Messages fingerprints before forwarding
   assert.equal(outbound.messages[2].content[0].content, CLAUDE_IDENTITY);
   assert.doesNotMatch(outbound.messages[1].content[0].text, /official cli for claude/i);
   assert.deepEqual(payload, claudeCodePayload(), "the client payload is not mutated");
-  const log = app.store.state.logs.find((entry) => entry.kind === "request");
+  const log = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.equal(log.path, "/v1/messages");
   assert.deepEqual(
     log.requestDiagnostics.rules.slice(-3).map((rule) => [rule.name, rule.outcome]),

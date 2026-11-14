@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -18,6 +18,12 @@ import {
   usageHistory,
 } from "../src/usage-history.mjs";
 import { emptyTokenUsage } from "../src/token-usage.mjs";
+import {
+  editDaily,
+  editHourly,
+  readDaily,
+  removeAll,
+} from "./support/sqlite-fixture.mjs";
 
 const ADMIN = "synthetic-panel-admin";
 const GATEWAY = "synthetic-gateway-key";
@@ -26,7 +32,7 @@ const DAY_MS = 86_400_000;
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "panel-history-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => removeAll(root));
   return new Store(join(root, "data"), { allowLocal: true });
 }
 
@@ -39,13 +45,7 @@ const usage = (input, output, extra = {}) => ({
   ...extra,
 });
 
-const saved = (store) => JSON.parse(readFileSync(store.statsFile, "utf8"));
-const rewrite = (store, change) => {
-  const stats = saved(store);
-  change(stats);
-  writeFileSync(store.statsFile, JSON.stringify(stats));
-  return new Store(store.directory, { allowLocal: true });
-};
+const reload = (store) => new Store(store.directory, { allowLocal: true });
 
 async function listen(server) {
   server.listen(0, "127.0.0.1");
@@ -97,9 +97,10 @@ test("hourly buckets stay totals-only and old split buckets still load", (t) => 
 
   // A bucket written by an earlier build with a split still loads and keeps
   // counting totals.
-  const reloaded = rewrite(store, (stats) => {
-    stats.hourly.at(-1).accountTokens = { [a.id]: packTokenUsage(usage(10, 5)) };
+  editHourly(store.directory, (buckets) => {
+    buckets.at(-1).accountTokens = { [a.id]: packTokenUsage(usage(10, 5)) };
   });
+  const reloaded = reload(store);
   reloaded.record({ kind: "request", accountId: a.id, status: 200, tokenUsage: usage(1, 1) });
   const after = reloaded.state.hourly.at(-1);
   assert.equal(after.tokenUsage.input, 13);
@@ -144,7 +145,7 @@ test("daily rollup counts requests, errors and per-account tokens", (t) => {
   // The rollup persists with the other statistics.
   const restored = new Store(store.directory, { allowLocal: true });
   assert.deepEqual(restored.state.daily, store.state.daily);
-  assert.deepEqual(saved(store).daily, store.state.daily);
+  assert.deepEqual(readDaily(store.directory), store.state.daily);
 });
 
 test("daily rollup splits on UTC+8 midnight and expires after its retention", (t) => {
@@ -182,10 +183,15 @@ test("state without a daily rollup backfills from hourly and marks it partial", 
   store.record({ kind: "request", accountId: a.id, status: 200, tokenUsage: usage(10, 5) });
   t.mock.timers.setTime(Date.parse("2026-03-05T03:00:00.000Z"));
   store.record({ kind: "request", accountId: a.id, status: 502 });
-  const reloaded = rewrite(store, (stats) => {
-    delete stats.daily;
-    for (const entry of stats.hourly) delete entry.accountTokens;
+  // A state without a daily rollup rebuilds it from hourly and marks it.
+  editDaily(store.directory, (daily) => {
+    daily.accounts = [];
+    daily.days = {};
   });
+  editHourly(store.directory, (buckets) => {
+    for (const entry of buckets) delete entry.accountTokens;
+  });
+  const reloaded = reload(store);
   const history = usageHistory(reloaded.state, 7);
   const day = history.days.at(-1);
   assert.equal(day.date, "2026-03-05");
@@ -201,7 +207,7 @@ test("state without a daily rollup backfills from hourly and marks it partial", 
 
   // The next commit persists the rebuilt rollup, and new traffic adds to it.
   reloaded.record({ kind: "request", accountId: a.id, status: 200, tokenUsage: usage(1, 1) });
-  const persisted = saved(reloaded).daily;
+  const persisted = readDaily(reloaded.directory);
   assert.equal(persisted.days["2026-03-05"].partial, true);
   assert.equal(persisted.days["2026-03-05"].requests, 3);
 });
@@ -209,20 +215,23 @@ test("state without a daily rollup backfills from hourly and marks it partial", 
 test("saved rollups load leniently and the size budget stays small", (t) => {
   const store = fixture(t);
   const a = store.create({ name: "账号 A", proxyKey: PROXY });
-  const loaded = rewrite(store, (stats) => {
-    stats.daily = {
-      accounts: [a.id],
-      days: {
-        "2026-03-01": { requests: 2, tokens: "a:5", accounts: "0:2:a:5,7:1:3", partial: true },
-        "not-a-date": { requests: 9 },
-        "2026-03-02": null,
-      },
+  editDaily(store.directory, (daily) => {
+    daily.accounts = [a.id];
+    daily.days = {
+      "2026-03-01": { requests: 2, tokens: "a:5", accounts: "0:2:a:5,7:1:3", partial: true },
+      "not-a-date": { requests: 9 },
+      "2026-03-02": null,
     };
   });
+  const loaded = reload(store);
   assert.deepEqual(Object.keys(loaded.state.daily.days), ["2026-03-01"]);
   // The row for an unknown account index is dropped.
   assert.equal(loaded.state.daily.days["2026-03-01"].accounts, "0:2:a:5");
-  assert.equal(rewrite(store, (stats) => (stats.daily = [])).state.daily.accounts.length, 0);
+  editDaily(store.directory, (daily) => {
+    daily.accounts = [];
+    daily.days = {};
+  });
+  assert.equal(reload(store).state.daily.accounts.length, 0);
 
   // 400 days x 10 busy accounts must stay cheap to clone and serialize on
   // every commit.
@@ -318,7 +327,7 @@ test("the history API enforces its ranges and needs an admin session", async (t)
     app.pool.stop();
     app.server.closeAllConnections();
     await new Promise((resolve) => app.server.close(resolve));
-    rmSync(root, { recursive: true, force: true });
+    removeAll(root);
   });
 
   assert.equal((await fetch(`${base}/api/usage/history?days=7`)).status, 401);

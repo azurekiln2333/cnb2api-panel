@@ -2,13 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, publicAccount } from "../src/store.mjs";
 import { Pool } from "../src/pool.mjs";
 import { WorkerUsageMonitor } from "../src/worker-usage.mjs";
 import { createPanelServer } from "../src/app.mjs";
+import { editAccounts, editMeta, removeAll } from "./support/sqlite-fixture.mjs";
 import {
   appendSample,
   BILLING_FIELDS,
@@ -323,7 +324,7 @@ async function workerFixture(t) {
   t.after(async () => {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
-    rmSync(root, { recursive: true, force: true });
+    removeAll(root);
   });
   return {
     store, monitor, id: created.id,
@@ -372,7 +373,7 @@ test("worker usage snapshots feed reported history and follow the boot id baseli
 
 test("quota sync records billing samples that survive a restart; old documents load without history", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "cnb-credit-rates-store-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => removeAll(root));
   const directory = join(root, "data");
   let store = new Store(directory, { allowLocal: true });
   let clock = T0;
@@ -391,11 +392,12 @@ test("quota sync records billing samples that survive a restart; old documents l
   assert.deepEqual(store.state.creditHistory, pool.store.state.creditHistory);
   assert.deepEqual(creditRates(store.state, { window: "1h", now: clock }).accounts[0], before);
   // A statistics document from 1.2.10 has no history fields.
-  const statsFile = join(directory, "stats.json");
-  const stats = JSON.parse(readFileSync(statsFile, "utf8"));
-  delete stats.creditHistory;
-  for (const entry of Object.values(stats.accounts)) delete entry.creditReportHistory;
-  writeFileSync(statsFile, JSON.stringify(stats));
+  editMeta(directory, (meta) => {
+    delete meta.creditHistory;
+  });
+  editAccounts(directory, (accounts) => {
+    for (const account of accounts) delete account.runtime.creditReportHistory;
+  });
   store = new Store(directory, { allowLocal: true });
   assert.deepEqual(store.state.creditHistory, {});
   assert.equal(store.state.accounts[0].creditReportHistory, null);
@@ -421,7 +423,7 @@ test("credit rates API requires an admin session and validates the window", asyn
     app.pool.stop();
     app.server.closeAllConnections();
     await new Promise((resolve) => app.server.close(resolve));
-    rmSync(root, { recursive: true, force: true });
+    removeAll(root);
   });
   const base = `http://127.0.0.1:${app.server.address().port}`;
   for (const key of [null, "credit-rates-gateway-key"]) {

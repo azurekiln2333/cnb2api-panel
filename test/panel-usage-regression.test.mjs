@@ -8,6 +8,7 @@ import { TokenUsageCapture, deriveCacheMiss } from "../src/token-usage.mjs";
 import { toResponsesResponse, ResponsesStream } from "../src/responses.mjs";
 import { Pool } from "../src/pool.mjs";
 import { Store } from "../src/store.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const completion = (usage, choices = [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }]) => ({ usage, choices });
 const capture = (values, sse = false) => {
@@ -122,7 +123,7 @@ for (const firstContentType of ["application/json", "text/event-stream", "missin
   test(`two-account retry retains measured usage under its original account: ${firstContentType}`, async (t) => {
     const root = mkdtempSync(join(tmpdir(), "panel-usage-retry-"));
     const directory = join(root, "data");
-    t.after(() => rmSync(root, { recursive: true, force: true }));
+    t.after(() => removeAll(root));
     const store = new Store(directory, { allowLocal: true });
     const accounts = ["A", "B"].map((name, index) => store.create({ name, endpoint: `http://127.0.0.1:${19001 + index}`, proxyKey: "dummy-retry-key" }));
     const first = completion({ prompt_tokens: 100, completion_tokens: 5, prompt_cache_hit_tokens: 60 }, []);
@@ -146,7 +147,7 @@ for (const firstContentType of ["application/json", "text/event-stream", "missin
     Object.assign(res, { destroyed: false, writableEnded: false, headersSent: false,
       writeHead() { this.headersSent = true; }, write() { return true; }, end() { this.writableEnded = true; } });
     await Pool.prototype.forward.call(pool, { headers: {} }, res, "/v1/responses", { model: "test-model", input: "synthetic", stream: false });
-    const entry = store.state.logs.find((value) => value.kind === "request");
+    const entry = store.logs.all().find((value) => value.kind === "request");
     const firstTotal = firstContentType === "missing" ? 0 : 105;
     assert.equal(calls, 2);
     assert.equal(entry.attempts, 2);

@@ -118,14 +118,10 @@ Compose 将宿主机的 `./logs` 挂载到 `/app/logs`。
 ```text
 /data/platform2api/cnb2api-panel/
 ├── data/
-│   ├── panel.json
-│   ├── accounts.json
-│   ├── stats.json
+│   ├── panel.sqlite
 │   └── master.key
 └── logs/
-    ├── requests.log
-    ├── audit.log
-    └── system.log
+    └── logs.sqlite
 ```
 
 镜像启动成功后，目录只需保留以下内容。
@@ -135,14 +131,10 @@ cnb2api-panel/
 ├── docker-compose.yaml
 ├── .env
 ├── data/
-│   ├── panel.json
-│   ├── accounts.json
-│   ├── stats.json
+│   ├── panel.sqlite
 │   └── master.key
 └── logs/
-    ├── requests.log
-    ├── audit.log
-    └── system.log
+    └── logs.sqlite
 ```
 
 手动更新时，运行 `pull` 和 `up -d`。
@@ -462,7 +454,7 @@ https://ai.example.com/api/auth/oidc/callback
 后端也会拒绝新的 Key 登录请求。
 关闭 Key 登录不会改变 API 的网关密钥。
 
-面板将 SSO 配置保存到 `data/panel.json`。
+面板将 SSO 配置保存到 `data/panel.sqlite`。
 `.env` 无需重复填写 SSO 参数。
 已有部署可删除 `.env` 中的 SSO 变量。
 删除这些变量不会关闭已保存的 SSO。
@@ -1050,12 +1042,8 @@ Docker 使用 Compose 的宿主机 `./data` 挂载。
 
 | 文件 | 内容 | 加密情况 |
 | --- | --- | --- |
-| `data/panel.json` | 面板配置、路由配置、SSO 配置 | SSO 客户端密钥加密 |
-| `data/accounts.json` | 账号定义、地址、权重、凭据 | 账号凭据加密 |
-| `data/stats.json` | 用量、探活状态、额度与对比基线 | 明文统计 |
-| `logs/requests.log` | API 请求记录 | 明文日志 |
-| `logs/audit.log` | 管理操作审计 | 明文日志 |
-| `logs/system.log` | 工作区运行事件 | 明文日志 |
+| `data/panel.sqlite` | 账号定义、账号凭据、面板与路由配置、SSO、用量统计、联动注册状态 | 凭据与 SSO 密钥加密 |
+| `logs/logs.sqlite` | 请求日志、审计日志、运行事件 | 明文日志 |
 | `data/master.key` | 解密账号凭据的本地密钥 | 原始密钥文件 |
 | `data/gateway.key` | 自动生成的网关密钥 | 原始密钥文件 |
 | `.env` | 面板密钥及启动配置 | 明文配置 |
@@ -1064,10 +1052,9 @@ Docker 使用 Compose 的宿主机 `./data` 挂载。
 SSO 客户端密钥也使用 AES-256-GCM。
 账号名称、仓库、工作区地址和配置仍为明文。
 事件和用量统计也为明文。
-整个 JSON 文件没有加密。
+`panel.sqlite` 中的账号凭据列不会加密整个库。
 
-同时取得 `accounts.json` 和 `master.key` 即可解密账号凭据。
-SSO 密钥仍保存在 `panel.json` 中。
+同时取得 `panel.sqlite` 和 `master.key` 即可解密账号凭据。
 丢失 `master.key` 后，原有凭据无法恢复。
 Linux 首次生成的数据目录权限为 `0700`。
 首次生成的数据文件和密钥权限为 `0600`。
@@ -1079,21 +1066,25 @@ Linux 首次生成的数据目录权限为 `0700`。
 请求日志记录首条用户消息，最多 4,000 个字符。
 消息过长时，面板标记截断。
 图片、音频和文件只保留类型占位。
-请求日志在 `logs/requests.log` 中逐行追加。
-每行是一个 JSON 对象。
-日志不会写入 `panel.json` 或 `accounts.json`。
-请求计数只更新 `stats.json`。
+请求日志写入 `logs/logs.sqlite` 的日志表。
+每条记录是一行，列表只解析当前页。
+日志与账号、统计分属两个库文件。
+账号与统计写入不会因为日志变多而变慢。
 更新前的日志没有消息摘要，无法补回。
 请求日志不保存系统消息、工具正文和回复正文。
 请求详情还包含上游地址、收发大小与首字节耗时。
 登录会话只保存在内存中。
 重启后需要重新登录。
 
-JSON 文件通过临时文件和原子替换写入。
-日志超过 2,000 条时，压缩为最近 1,000 条。
-三类日志分别压缩，互不挤占。
-写入中断后，启动过程通过 `store.pending` 恢复。
-此文件方案用于单进程部署。
+账号、设置与统计写入是增量的。
+每次只改写真正变化的行。
+凭据在明文未变化时不会重新加密。
+所有写入都在一个事务内完成。
+事务提交后才更新内存状态。
+库文件使用 WAL 模式，读写互不阻塞。
+凭据与设置提交后会立即落盘。
+超过 50ms 的写入会在运行事件中记录一条。
+此方案用于单进程部署。
 多个面板进程不能共享同一数据目录。
 
 ### 请求日志、审计日志与运行事件
@@ -1127,24 +1118,44 @@ JSON 文件通过临时文件和原子替换写入。
 备份前先停止面板写入。
 一起备份 `.env`、`data/` 和 `logs/`。
 备份应按密钥文件管理访问权限。
-只复制 `panel.json` 无法恢复账号凭据。
+只复制 `data/panel.sqlite` 而不带 `master.key` 无法恢复账号凭据。
+`master.key` 丢失后，库里的凭据无法解密。
 
-首次升级时，面板自动拆分旧版数据。
-原文件保存在 `data/panel.json.v1.bak`。
-账号、凭据、累计用量与历史事件均会迁移。
-旧账号修改记录迁入 `audit.log`。
-旧请求和运行事件迁入各自的日志文件。
-旧备份不会继续接收写入。
-保留完整 `data/`，无需手动拆分或清空文件。
+首次启动新版时，面板把旧数据导入 SQLite。
+导入在单个事务内完成，失败则进程退出且不以空库启动。
+导入成功后，旧文件改名为 `*.migrated-<时间戳>.bak`。
+`legacy_imports` 记录每个来源的校验和与备份名。
+重启不会重复导入，中断的导入可以继续。
+旧 `requests.log`、`audit.log`、`system.log` 不读、不迁、不改名、不删除。
+旧日志不再被面板使用，可自行删除。
+`panel.sqlite` 与旧文件同时存在时，面板拒绝启动并说明原因。
+
+### 回滚到旧镜像
+
+新版不再写旧文件，旧镜像也读不了新数据。
+回滚步骤如下。
+
+```bash
+docker compose down
+# 把每个 *.migrated-<时间戳>.bak 改回原名：
+#   panel.json.<时间戳>.bak → panel.json
+#   accounts.json.<时间戳>.bak → accounts.json
+#   stats.json.<时间戳>.bak → stats.json
+# 移走 panel.sqlite、panel.sqlite-wal、panel.sqlite-shm 与 logs/logs.sqlite
+# 再启动旧镜像的标签
+docker compose up -d
+```
+
+回滚后，新版期间新增的账号与统计会丢失。
+再次升级时，如果 `panel.sqlite` 与旧文件同时存在，面板拒绝启动。
+如需重新升级，先删掉旧文件或移走 `panel.sqlite`，只保留一份数据源。
 
 升级到 `1.1.2` 时，先更新 `docker-compose.yaml`。
 确认配置包含 `./logs:/app/logs` 挂载。
 再运行 `docker compose up -d --pull always`。
 Watchtower 无法修改容器挂载。
-面板会把旧版 `data/*.log` 自动迁入 `logs/`。
-复制完成后，面板删除数据目录中的旧日志。
-迁移中断后，重启会继续迁移。
-目标已有不同日志时，面板停止迁移并报告错误。
+`1.1.2` 之前的数据目录里可能还有旧日志文件。
+这些文件现在保持原样，不再被读取。
 
 迁移旧面板时，先停止原面板进程。
 找到原进程实际使用的 `PANEL_DATA_DIR`。

@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelServer } from "../src/app.mjs";
 import { SessionAffinity } from "../src/session-affinity.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const GATEWAY = "cache-affinity-gateway-key";
 const WORKER = "cache-affinity-worker-key";
@@ -61,7 +62,7 @@ async function fixture(t, accounts = 3) {
     app.pool.stop();
     await close(app.server);
     for (const worker of workers) await close(worker);
-    rmSync(directory, { recursive: true, force: true });
+    removeAll(directory);
   });
   for (let i = 0; i < accounts; i++) {
     const created = app.store.create({

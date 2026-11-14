@@ -7,6 +7,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelServer } from "../src/app.mjs";
+import { removeAll } from "./support/sqlite-fixture.mjs";
 
 const ADMIN = "relay-panel-admin-key";
 const GATEWAY = "relay-panel-gateway-key";
@@ -88,6 +89,7 @@ async function panel(t, { relayOptions = {}, publicUrl = "" } = {}) {
     async restart() {
       app.pool.stop();
       await close(app.server);
+      app.store.close();
       app = instrument(createPanelServer(options));
       base = await listen(app.server);
       Object.assign(result, app);
@@ -98,7 +100,8 @@ async function panel(t, { relayOptions = {}, publicUrl = "" } = {}) {
   t.after(async () => {
     app.pool.stop();
     await close(app.server);
-    rmSync(root, { recursive: true, force: true });
+    app.store.close();
+    removeAll(root);
   });
   return result;
 }
@@ -177,12 +180,12 @@ test("one registration reaches all enabled panels with different local account I
   const safe = JSON.stringify([
     await (await source.call("/api/registration-relay")).json(),
     await (await source.call("/api/settings")).json(),
-    await (await source.call("/api/overview")).json(), source.store.state.logs,
+    await (await source.call("/api/overview")).json(), source.store.logs.all(),
   ]);
   for (const secret of [TOKEN, PROXY, ADMIN, GATEWAY]) assert.ok(!safe.includes(secret));
-  const stats = readFileSync(join(source.root, "data", "stats.json"), "utf8");
-  assert.ok(!stats.includes(TOKEN));
-  assert.ok(!stats.includes(PROXY));
+  const stored = readFileSync(join(source.root, "data", "panel.sqlite")).toString("latin1");
+  assert.ok(!stored.includes(TOKEN));
+  assert.ok(!stored.includes(PROXY));
 });
 
 test("local acknowledgement and probe do not wait for a stalled linked server", async (t) => {
@@ -242,8 +245,8 @@ test("cross-linked primary panels apply relayed updates only once without loopin
   assert.equal(first.store.get(firstAccount.id).endpoint, URI);
   assert.deepEqual(first.probes, [firstAccount.id]);
   assert.deepEqual(second.probes, [secondAccount.id]);
-  assert.equal(first.store.state.logs.filter((entry) => entry.message === "工作区地址已更新").length, 1);
-  assert.equal(second.store.state.logs.filter((entry) => entry.message === "工作区地址已更新").length, 1);
+  assert.equal(first.store.logs.all().filter((entry) => entry.message === "工作区地址已更新").length, 1);
+  assert.equal(second.store.logs.all().filter((entry) => entry.message === "工作区地址已更新").length, 1);
 });
 
 test("a peer body stalled after HTTP 200 times out without blocking local registration", async (t) => {
@@ -319,9 +322,9 @@ test("a missing peer token stays visible and manual sync retries after repair wi
   assert.ok((await synced.json()).scheduled >= 1);
   await waitFor(() => source.pool.registrationRelay.status().servers[0].status === "success");
   assert.equal(receiver.store.get(target.id).endpoint, URI);
-  const audit = source.store.state.logs.find((entry) => entry.action === "registration.relay.sync");
+  const audit = source.store.logs.all().find((entry) => entry.action === "registration.relay.sync");
   assert.equal(audit.status, 200);
-  const safe = JSON.stringify([source.pool.registrationRelay.status(), source.store.state.logs]);
+  const safe = JSON.stringify([source.pool.registrationRelay.status(), source.store.logs.all()]);
   assert.ok(!safe.includes(TOKEN));
   assert.ok(!safe.includes("different-registration-secret"));
 });
@@ -338,7 +341,7 @@ test("failed delivery resumes from durable state after restart without exposing 
   await source.setPeers([serverEntry(remote.origin)]);
   assert.equal((await source.register()).status, 200);
   await waitFor(() => source.pool.registrationRelay.status().servers[0].status === "failed");
-  assert.ok(!JSON.stringify(source.store.state.logs).includes(privateError));
+  assert.ok(!JSON.stringify(source.store.logs.all()).includes(privateError));
   available = true;
   clock += 600000;
   await source.restart();
@@ -347,5 +350,7 @@ test("failed delivery resumes from durable state after restart without exposing 
   assert.equal(remote.calls.length, 2);
   assert.equal(remote.calls[1].headers[SOURCE_HEADER], remote.calls[0].headers[SOURCE_HEADER]);
   assert.equal(remote.calls[1].headers[REVISION_HEADER], remote.calls[0].headers[REVISION_HEADER]);
-  assert.ok(!readFileSync(join(source.root, "data", "stats.json"), "utf8").includes(privateError));
+  assert.ok(
+    !readFileSync(join(source.root, "data", "panel.sqlite")).toString("latin1").includes(privateError),
+  );
 });

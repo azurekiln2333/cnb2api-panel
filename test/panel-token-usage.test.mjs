@@ -2,12 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.mjs";
 import { createPanelServer } from "../src/app.mjs";
 import { addTokenUsage, deriveCacheMiss, emptyTokenUsage, TokenUsageCapture } from "../src/token-usage.mjs";
+import { editMeta, removeAll } from "./support/sqlite-fixture.mjs";
 
 const ADMIN = "usage-test-admin-key";
 const GATEWAY = "usage-test-gateway-key";
@@ -480,7 +481,7 @@ async function fixture(t, { reportUsage = true } = {}) {
     app.pool.stop();
     await close(app.server);
     await close(upstream);
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    removeAll(fixtureRoot);
   });
   return {
     ...app,
@@ -555,11 +556,11 @@ test("gateway persists local totals, preserves SSE bytes, and excludes count_tok
   assert.deepEqual(overview.stats.tokenUsage.total, expected);
   assert.deepEqual(overview.accounts[0].tokenUsage, expected);
   assert.equal(overview.stats.requests, 3);
-  const disk = readFileSync(app.store.logFiles.requests, "utf8");
-  const requestLogs = disk
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
+  const requestLogs = app.store.logs
+    .all()
+    .filter((entry) => entry.kind === "request")
+    .reverse();
+  const disk = JSON.stringify(requestLogs);
   assert.equal(requestLogs.length, 3);
   for (const log of requestLogs)
     assert.deepEqual(log.initialMessage, {
@@ -584,16 +585,14 @@ test("gateway persists local totals, preserves SSE bytes, and excludes count_tok
 test("legacy version 1 data receives empty usage and lifetime totals survive hourly pruning", (t) => {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "cnb-panel-legacy-usage-"));
   const directory = join(fixtureRoot, "data");
-  t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
+  t.after(() => removeAll(fixtureRoot));
   const store = new Store(directory, { allowLocal: true });
-  const saved = {
-    ...store.state,
-    version: 1,
-    sso: { ...store.state.sso, clientSecret: store.encrypt("") },
-  };
-  delete saved.tokenUsage;
-  delete saved.tokenUsageStartedAt;
-  writeFileSync(store.file, JSON.stringify(saved));
+  // A database written before usage totals existed carries no such rows.
+  editMeta(directory, (meta) => {
+    delete meta.tokenUsage;
+    delete meta.tokenUsageStartedAt;
+  });
+  store.close();
   const restored = new Store(directory, { allowLocal: true });
   assert.deepEqual(restored.state.tokenUsage, emptyTokenUsage());
   restored.commit((s) => {
@@ -727,7 +726,7 @@ test("an interrupted stream keeps measured usage without claiming complete cache
     app.pool.stop();
     await close(app.server);
     await close(upstream);
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    removeAll(fixtureRoot);
   });
   const created = app.store.create({
     name: "abort-workspace",
@@ -751,11 +750,11 @@ test("an interrupted stream keeps measured usage without claiming complete cache
   for (
     let i = 0;
     i < 200 &&
-    !app.store.state.logs.some((entry) => entry.kind === "request");
+    !app.store.logs.all().some((entry) => entry.kind === "request");
     i++
   )
     await new Promise((resolve) => setTimeout(resolve, 10));
-  const record = app.store.state.logs.find((entry) => entry.kind === "request");
+  const record = app.store.logs.all().find((entry) => entry.kind === "request");
   assert.ok(record, "request log written");
   // The aborted attempt was billed: its usage must survive into the ledger.
   assert.equal(record.tokenUsage.input, 100);
